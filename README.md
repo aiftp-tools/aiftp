@@ -5,7 +5,15 @@
 [![CI](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml/badge.svg)](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-🚧 **Status**: Pre-MVP. Active development, not yet usable.
+**Status**: 🎉 **v0.1.0 MVP — verified on Star Server (Japan)** _(2026-05-19)_
+
+Real-world checklist verified on a production Star Server account:
+push, encrypted backup capture from the remote, restore-to-pre-push,
+TLS warning, hard-excluded credentials, Keychain-resident secrets.
+
+Phase 1.1 follow-ups (auto-mkdir parent directories, init UX for
+`/`-prefixed `remote_root` on shared hosts, server-specific TLS quirks)
+are tracked in `../docs/spec.md` and will land in v0.2.
 
 ---
 
