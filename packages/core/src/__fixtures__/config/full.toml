@@ -1,0 +1,73 @@
+schema = 1
+
+[profile.production]
+host = "ftp.example.com"
+port = 21
+protocol = "ftps"
+user = "deploy-prod"
+remote_root = "/public_html"
+local_root = "./dist"
+keychain_service = "aiftp:example-production"
+server_kind = "starserver"
+
+[profile.staging]
+host = "ftp.example.com"
+port = 21
+protocol = "ftps"
+user = "deploy-stage"
+remote_root = "/stage.example.com"
+local_root = "./dist"
+keychain_service = "aiftp:example-staging"
+
+[exclude]
+patterns = [
+  ".git/",
+  ".env*",
+  "node_modules/",
+  "*.log",
+  ".aiftp/",
+  ".DS_Store",
+]
+
+[safety]
+require_tls = true
+verify_certificate = true
+confirm_on_delete = true
+max_files_per_push = 500
+max_total_size_mb = 100
+require_full_backup_before_first_push = false
+warn_on_prod_profile = true
+prod_profile_patterns = ["prod*", "production*", "main*"]
+syntax_check = true
+server_lock = true
+lock_timeout_min = 10
+verify_after_upload = "size"
+deletion_policy = "never"
+
+[backup]
+auto_before_push = true
+retention_count = 30
+max_disk_mb = 500
+on_limit_exceeded = "halt"
+full_backup_on_first_push = "recommend"
+full_backup_schedule = "weekly"
+full_backup_retention = 4
+encrypt = true
+encryption_algorithm = "aes-256-gcm"
+key_storage = "os-keychain"
+cloud_backup = false
+
+[backup.hard_exclude]
+additional_patterns = ["custom-secret.php"]
+
+[connection]
+max_concurrent = 2
+throttle_per_minute = 30
+retry_count = 5
+retry_backoff_ms = [1000, 3000, 9000, 27000, 60000]
+timeout_ms = 60000
+resume_partial_upload = true
+
+[hooks]
+pre_push = ["npm run build"]
+post_push = ["./scripts/notify.sh"]

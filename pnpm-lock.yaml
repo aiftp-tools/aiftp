@@ -36,7 +36,18 @@ importers:
         specifier: workspace:*
         version: link:../core
 
-  packages/core: {}
+  packages/core:
+    dependencies:
+      '@iarna/toml':
+        specifier: ^2.2.5
+        version: 2.2.5
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/iarna__toml':
+        specifier: ^2.0.5
+        version: 2.0.5
 
   packages/mcp:
     dependencies:
@@ -265,6 +276,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@iarna/toml@2.2.5':
+    resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
+
   '@isaacs/cliui@8.0.2':
     resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
     engines: {node: '>=12'}
@@ -433,6 +447,9 @@ packages:
 
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+
+  '@types/iarna__toml@2.0.5':
+    resolution: {integrity: sha512-I55y+SxI0ayM4MBU6yfGJGmi4wRll6wtSeKiFYAZj+Z5Q1DVbMgBSVDYY+xQZbjIlLs/pN4fidnvR8faDrmxPg==}
 
   '@types/node@22.19.19':
     resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
@@ -1016,6 +1033,9 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@ampproject/remapping@2.3.0':
@@ -1142,6 +1162,8 @@ snapshots:
   '@esbuild/win32-x64@0.21.5':
     optional: true
 
+  '@iarna/toml@2.2.5': {}
+
   '@isaacs/cliui@8.0.2':
     dependencies:
       string-width: 5.1.2
@@ -1248,6 +1270,10 @@ snapshots:
   '@types/estree@1.0.8': {}
 
   '@types/estree@1.0.9': {}
+
+  '@types/iarna__toml@2.0.5':
+    dependencies:
+      '@types/node': 22.19.19
 
   '@types/node@22.19.19':
     dependencies:
@@ -1850,3 +1876,5 @@ snapshots:
       strip-ansi: 7.2.0
 
   yaml@2.9.0: {}
+
+  zod@4.4.3: {}

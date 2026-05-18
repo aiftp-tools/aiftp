@@ -1,0 +1,11 @@
+schema = 1
+
+[profile.production]
+host = "ftp.example.com"
+user = "deploy"
+remote_root = "/public_html"
+local_root = "./dist"
+keychain_service = "aiftp:example-production"
+
+[safety]
+deletion_policy = "delete-everything"

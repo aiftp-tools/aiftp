@@ -1,0 +1,4 @@
+schema = 1
+
+[safety]
+require_tls = true

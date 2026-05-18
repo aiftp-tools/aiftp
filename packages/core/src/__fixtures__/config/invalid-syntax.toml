@@ -1,0 +1,4 @@
+schema = 1
+
+[profile.production
+host = "ftp.example.com"
