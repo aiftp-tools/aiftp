@@ -215,6 +215,7 @@ function uploaderFromClient(client: FtpClient): DeployUploader {
   return {
     upload: (localPath, remotePath) => client.upload(localPath, remotePath),
     size: (remotePath) => client.size(remotePath),
+    mkdir: (remoteDir) => client.mkdir(remoteDir),
   };
 }
 

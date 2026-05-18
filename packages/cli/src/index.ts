@@ -283,6 +283,7 @@ function managedUploaderFromClient(client: FtpClient): ManagedUploader {
     uploader: {
       upload: (localPath, remotePath) => client.upload(localPath, remotePath),
       size: (remotePath) => client.size(remotePath),
+      mkdir: (remoteDir) => client.mkdir(remoteDir),
     },
     close: async () => undefined,
   };

@@ -336,6 +336,91 @@ describe('deploy engine', () => {
     ).rejects.toThrow(DeployVerificationError);
   });
 
+  it('calls uploader.mkdir for each unique parent directory before upload', async () => {
+    await writeLocal('assets/css/main.css', 'body{}');
+    await writeLocal('assets/js/app.js', 'console.log(1);');
+    await writeLocal('index.html', '<h1>top</h1>');
+    const events: string[] = [];
+    const mkdirCalls: string[] = [];
+    const backupStore = createBackupStore();
+    const uploader: DeployUploader = {
+      mkdir: async (remoteDir) => {
+        mkdirCalls.push(remoteDir);
+        events.push(`mkdir:${remoteDir}`);
+      },
+      upload: async (localPath, remotePath) => {
+        events.push(`upload:${remotePath}`);
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+    };
+
+    await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: { schema: 1, files: {} },
+      excluder: createExcluder(),
+      backupStore,
+      uploader,
+    });
+
+    expect(mkdirCalls).toEqual(['/public_html/assets/css', '/public_html/assets/js']);
+    expect(events).toEqual([
+      'mkdir:/public_html/assets/css',
+      'upload:/public_html/assets/css/main.css',
+      'mkdir:/public_html/assets/js',
+      'upload:/public_html/assets/js/app.js',
+      'upload:/public_html/index.html',
+    ]);
+  });
+
+  it('skips mkdir when uploader does not implement it (backward compat)', async () => {
+    await writeLocal('nested/a.html', '<p>a</p>');
+    const backupStore = createBackupStore();
+    const uploader: DeployUploader = {
+      upload: async (localPath, remotePath) => {
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+    };
+
+    await expect(
+      runPush({
+        localRoot,
+        remoteRoot: '/public_html',
+        state: { schema: 1, files: {} },
+        excluder: createExcluder(),
+        backupStore,
+        uploader,
+      }),
+    ).resolves.toMatchObject({ uploaded: [{ path: 'nested/a.html' }] });
+  });
+
+  it('skips mkdir for files at the remote root', async () => {
+    await writeLocal('index.html', '<h1>root</h1>');
+    const mkdirCalls: string[] = [];
+    const backupStore = createBackupStore();
+    const uploader: DeployUploader = {
+      mkdir: async (remoteDir) => {
+        mkdirCalls.push(remoteDir);
+      },
+      upload: async (localPath, remotePath) => {
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+    };
+
+    await runPush({
+      localRoot,
+      state: { schema: 1, files: {} },
+      excluder: createExcluder(),
+      backupStore,
+      uploader,
+    });
+
+    expect(mkdirCalls).toEqual([]);
+  });
+
   it('releases locks when upload fails', async () => {
     await writeLocal('index.html', '<h1>changed</h1>\n');
     const events: string[] = [];

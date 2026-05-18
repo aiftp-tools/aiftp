@@ -23,6 +23,7 @@ export interface DeployUploader {
     remotePath: string,
   ): Promise<{ remotePath: string; bytesUploaded?: number }>;
   size?(remotePath: string): Promise<number>;
+  mkdir?(remoteDir: string): Promise<void>;
 }
 
 export interface DeployLock {
@@ -217,10 +218,27 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
     let nextState = options.state;
     const uploaded: UploadedFileResult[] = [];
     const verifyAfterUpload = options.safety?.verifyAfterUpload ?? 'size';
+    const createdDirs = new Set<string>();
+    const normalizedRemoteRoot = options.remoteRoot ? options.remoteRoot.replace(/\/+$/u, '') : '';
 
     for (const path of planned) {
       const absoluteLocalPath = localPath(options.localRoot, path);
       const absoluteRemotePath = remotePath(options.remoteRoot, path);
+
+      if (options.uploader.mkdir) {
+        const parentDir = posix.dirname(absoluteRemotePath);
+        if (
+          parentDir !== '.' &&
+          parentDir !== '/' &&
+          parentDir !== '' &&
+          parentDir !== normalizedRemoteRoot &&
+          !createdDirs.has(parentDir)
+        ) {
+          await options.uploader.mkdir(parentDir);
+          createdDirs.add(parentDir);
+        }
+      }
+
       const info = await stat(absoluteLocalPath);
       const upload = await options.uploader.upload(absoluteLocalPath, absoluteRemotePath);
 
