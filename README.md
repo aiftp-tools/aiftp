@@ -30,7 +30,7 @@ Most existing FTP deploy tools (`git-ftp`, `ftp-deploy`, `dg/ftp-deployment`) as
 | **Spec** | [docs/spec.md (in parent dir)](../docs/spec.md) |
 | **WBS** | [docs/wbs.md (in parent dir)](../docs/wbs.md) |
 | **Target OS** | macOS (Phase 1), Windows (Phase 1.5) |
-| **Language** | TypeScript / Node.js 20+ |
+| **Language** | TypeScript / Node.js 22+ |
 | **License** | MIT |
 
 ## Quick start (not ready yet)

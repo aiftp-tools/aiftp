@@ -14,7 +14,7 @@
     "url": "https://github.com/aiftp-tools/aiftp/issues"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=22.0.0",
     "pnpm": ">=9.0.0"
   },
   "packageManager": "pnpm@10.30.1",
