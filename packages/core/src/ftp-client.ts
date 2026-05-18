@@ -1,0 +1,384 @@
+import { type AccessOptions, Client as BasicFtpClient, type FileInfo } from 'basic-ftp';
+
+export class FtpError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpError';
+  }
+}
+
+export class FtpConnectionError extends FtpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpConnectionError';
+  }
+}
+
+export class FtpAuthError extends FtpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpAuthError';
+  }
+}
+
+export class FtpTlsError extends FtpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpTlsError';
+  }
+}
+
+export class FtpNotFoundError extends FtpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpNotFoundError';
+  }
+}
+
+export class FtpTimeoutError extends FtpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'FtpTimeoutError';
+  }
+}
+
+export type FtpProtocol = 'ftp' | 'ftps';
+
+export interface FtpClientOptions {
+  host: string;
+  port?: number;
+  user: string;
+  password: string;
+  protocol?: FtpProtocol;
+  /**
+   * When true (default), refuse to connect over plain FTP — only FTPS is
+   * accepted. Setting this to false explicitly opts in to plain FTP and
+   * logs a warning via `onWarning`.
+   */
+  requireTls?: boolean;
+  /**
+   * When true (default), reject self-signed and otherwise invalid TLS
+   * certificates. Must be left enabled for production deployments.
+   */
+  verifyCertificate?: boolean;
+  /**
+   * Socket-level timeout in milliseconds for individual FTP operations.
+   * Defaults to 60_000 (60s) per spec §C.1.
+   */
+  timeoutMs?: number;
+  /**
+   * Optional logger for verbose debugging. Receives FTP protocol traffic
+   * with credentials redacted.
+   */
+  onLog?: (line: string) => void;
+  /**
+   * Optional sink for non-fatal warnings (e.g., plain FTP fallback).
+   */
+  onWarning?: (line: string) => void;
+}
+
+export interface ListEntry {
+  name: string;
+  size: number;
+  type: 'file' | 'directory' | 'unknown';
+  modifiedAt?: Date;
+}
+
+export interface UploadResult {
+  remotePath: string;
+  bytesUploaded: number;
+}
+
+const DEFAULT_PORT = 21;
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Maps a basic-ftp / Node error into our error hierarchy.
+ * Best-effort: the FTP reply code is the strongest signal; if it is
+ * missing, the message text is sniffed for known phrases.
+ */
+function mapFtpError(error: unknown, context: string): FtpError {
+  if (error instanceof FtpError) {
+    return error;
+  }
+  const err = error as { code?: number | string; message?: string };
+  const code = typeof err?.code === 'number' ? err.code : undefined;
+  const msg = err?.message ?? String(error);
+
+  // Node TLS errors (string codes)
+  if (typeof err?.code === 'string') {
+    const tlsCodes = new Set([
+      'CERT_HAS_EXPIRED',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'ERR_TLS_CERT_ALTNAME_INVALID',
+    ]);
+    if (tlsCodes.has(err.code)) {
+      return new FtpTlsError(`${context}: TLS verification failed (${err.code}): ${msg}`, {
+        cause: error,
+      });
+    }
+    if (err.code === 'ETIMEDOUT' || err.code === 'ESOCKETTIMEDOUT') {
+      return new FtpTimeoutError(`${context}: socket timeout`, { cause: error });
+    }
+    if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ECONNRESET') {
+      return new FtpConnectionError(`${context}: connection failed (${err.code})`, {
+        cause: error,
+      });
+    }
+  }
+
+  // FTP reply codes (numeric)
+  if (code === 530) {
+    return new FtpAuthError(`${context}: authentication failed (530)`, { cause: error });
+  }
+  if (code === 550) {
+    return new FtpNotFoundError(`${context}: not found or permission denied (550)`, {
+      cause: error,
+    });
+  }
+  if (code === 421) {
+    return new FtpConnectionError(`${context}: service unavailable (421)`, { cause: error });
+  }
+  if (code === 425 || code === 426) {
+    return new FtpConnectionError(`${context}: data connection failed (${code})`, {
+      cause: error,
+    });
+  }
+
+  // Fallback: inspect message text
+  const lower = msg.toLowerCase();
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return new FtpTimeoutError(`${context}: ${msg}`, { cause: error });
+  }
+
+  return new FtpError(`${context}: ${msg}`, { cause: error });
+}
+
+function mapFileType(t: FileInfo['type']): ListEntry['type'] {
+  // basic-ftp's FileType: 0=Unknown, 1=File, 2=Directory, 3=SymbolicLink
+  if (t === 1) return 'file';
+  if (t === 2) return 'directory';
+  return 'unknown';
+}
+
+/**
+ * High-level FTP/FTPS client. Wraps `basic-ftp` with:
+ *   - TLS enforcement (requireTls)
+ *   - certificate verification toggle
+ *   - normalized error hierarchy
+ *   - explicit connect/disconnect lifecycle
+ *
+ * Retries belong to the caller — wrap individual operations with
+ * `withRetry()` from `./retry.js`.
+ */
+export class FtpClient {
+  private client: BasicFtpClient | null = null;
+  private readonly options: Required<
+    Omit<
+      FtpClientOptions,
+      'onLog' | 'onWarning' | 'port' | 'protocol' | 'requireTls' | 'verifyCertificate' | 'timeoutMs'
+    >
+  > & {
+    port: number;
+    protocol: FtpProtocol;
+    requireTls: boolean;
+    verifyCertificate: boolean;
+    timeoutMs: number;
+    onLog?: (line: string) => void;
+    onWarning?: (line: string) => void;
+  };
+
+  constructor(options: FtpClientOptions) {
+    if (!options.host) throw new FtpError('host is required');
+    if (!options.user) throw new FtpError('user is required');
+    if (options.password === undefined || options.password === null) {
+      throw new FtpError('password is required');
+    }
+
+    const protocol: FtpProtocol = options.protocol ?? 'ftps';
+    const requireTls = options.requireTls ?? true;
+
+    if (requireTls && protocol === 'ftp') {
+      throw new FtpTlsError(
+        'requireTls=true but protocol="ftp": plain FTP is not allowed. ' +
+          'Either set protocol="ftps" or pass requireTls=false explicitly.',
+      );
+    }
+
+    this.options = {
+      host: options.host,
+      user: options.user,
+      password: options.password,
+      port: options.port ?? DEFAULT_PORT,
+      protocol,
+      requireTls,
+      verifyCertificate: options.verifyCertificate ?? true,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      onLog: options.onLog,
+      onWarning: options.onWarning,
+    };
+
+    if (this.options.protocol === 'ftp') {
+      this.options.onWarning?.(
+        'Using plain FTP without TLS. Credentials and data are transmitted in clear text.',
+      );
+    }
+  }
+
+  /**
+   * Establishes the connection. Idempotent: calling twice replaces the
+   * underlying socket.
+   */
+  async connect(): Promise<void> {
+    await this.disconnect();
+
+    const client = new BasicFtpClient(this.options.timeoutMs);
+    if (this.options.onLog) {
+      client.ftp.verbose = true;
+      client.ftp.log = this.options.onLog;
+    }
+
+    const accessOptions: AccessOptions = {
+      host: this.options.host,
+      port: this.options.port,
+      user: this.options.user,
+      password: this.options.password,
+      secure: this.options.protocol === 'ftps',
+      secureOptions: {
+        rejectUnauthorized: this.options.verifyCertificate,
+      },
+    };
+
+    try {
+      await client.access(accessOptions);
+    } catch (error: unknown) {
+      client.close();
+      throw mapFtpError(error, 'connect');
+    }
+    this.client = client;
+  }
+
+  /**
+   * Closes the connection. Safe to call multiple times.
+   */
+  async disconnect(): Promise<void> {
+    if (this.client) {
+      try {
+        this.client.close();
+      } catch {
+        // Ignore close errors; we are tearing down.
+      }
+      this.client = null;
+    }
+  }
+
+  /**
+   * Reports whether the client believes it is connected. Note that the
+   * server may have closed the connection without our knowledge; the next
+   * operation will surface that case as an error.
+   */
+  isConnected(): boolean {
+    return this.client !== null && !this.client.closed;
+  }
+
+  private requireConnection(): BasicFtpClient {
+    if (!this.client || this.client.closed) {
+      throw new FtpConnectionError('Not connected. Call connect() first.');
+    }
+    return this.client;
+  }
+
+  async upload(localPath: string, remotePath: string): Promise<UploadResult> {
+    const client = this.requireConnection();
+    try {
+      await client.uploadFrom(localPath, remotePath);
+      const bytes = await client.size(remotePath).catch(() => 0);
+      return { remotePath, bytesUploaded: bytes };
+    } catch (error: unknown) {
+      throw mapFtpError(error, `upload(${remotePath})`);
+    }
+  }
+
+  async download(remotePath: string, localPath: string): Promise<void> {
+    const client = this.requireConnection();
+    try {
+      await client.downloadTo(localPath, remotePath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `download(${remotePath})`);
+    }
+  }
+
+  async list(remotePath?: string): Promise<ListEntry[]> {
+    const client = this.requireConnection();
+    try {
+      const entries = await client.list(remotePath);
+      return entries.map((e) => ({
+        name: e.name,
+        size: e.size,
+        type: mapFileType(e.type),
+        modifiedAt: e.modifiedAt,
+      }));
+    } catch (error: unknown) {
+      throw mapFtpError(error, `list(${remotePath ?? '.'})`);
+    }
+  }
+
+  async delete(remotePath: string): Promise<void> {
+    const client = this.requireConnection();
+    try {
+      await client.remove(remotePath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `delete(${remotePath})`);
+    }
+  }
+
+  async size(remotePath: string): Promise<number> {
+    const client = this.requireConnection();
+    try {
+      return await client.size(remotePath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `size(${remotePath})`);
+    }
+  }
+
+  async exists(remotePath: string): Promise<boolean> {
+    try {
+      await this.size(remotePath);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof FtpNotFoundError) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async mkdir(remotePath: string): Promise<void> {
+    const client = this.requireConnection();
+    let originalDir: string | undefined;
+    try {
+      // basic-ftp's ensureDir is "mkdir -p" but has a side effect: it leaves
+      // the CWD at the deepest created directory. Restore it so subsequent
+      // operations see a stable working directory.
+      try {
+        originalDir = await client.pwd();
+      } catch {
+        // pwd may fail in unusual server states; restore is best-effort.
+      }
+      await client.ensureDir(remotePath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `mkdir(${remotePath})`);
+    } finally {
+      if (originalDir) {
+        try {
+          await client.cd(originalDir);
+        } catch {
+          // Best-effort restore.
+        }
+      }
+    }
+  }
+}
