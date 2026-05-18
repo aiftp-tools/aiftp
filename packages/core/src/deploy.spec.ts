@@ -193,6 +193,67 @@ describe('deploy engine', () => {
     );
   });
 
+  it('acquires the deployment lock before backup snapshot reads remote content', async () => {
+    await writeLocal('index.html', '<h1>local changed</h1>\n');
+    const events: string[] = [];
+    const remoteContent = Buffer.from('<h1>remote before push</h1>\n', 'utf8');
+    const backupStore = new BackupStore({
+      rootDir: backupRoot,
+      key: generateKey(),
+      source: {
+        readFile: async (path) => {
+          events.push(`backup:${path}`);
+          return remoteContent;
+        },
+      },
+      excluder: createExcluder(),
+      now: () => new Date('2026-05-18T12:30:00.000Z'),
+    });
+    const uploader: DeployUploader = {
+      upload: async (localPath, remotePath) => {
+        events.push(`upload:${remotePath}`);
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+    };
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: {
+        schema: 1,
+        files: {
+          'index.html': {
+            hash: 'old-hash',
+            size: 10,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+        },
+      },
+      excluder: createExcluder(),
+      backupStore,
+      uploader,
+      lock: {
+        acquire: async () => {
+          events.push('acquire');
+        },
+        release: async () => {
+          events.push('release');
+        },
+      },
+    });
+
+    await expect(
+      backupStore.restoreFile(result.backupSnapshot?.id ?? '', 'index.html'),
+    ).resolves.toEqual(remoteContent);
+    expect(events).toEqual([
+      'acquire',
+      'backup:index.html',
+      'upload:/public_html/index.html',
+      'release',
+    ]);
+  });
+
   it('halts before backup/upload when safety limits would be exceeded', async () => {
     await writeLocal('big.html', '0123456789\n');
     const backupStore = createBackupStore();

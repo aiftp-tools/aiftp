@@ -10,7 +10,7 @@ export type SnapshotId = string;
 export type SnapshotType = 'auto' | 'full';
 
 export interface BackupSource {
-  readFile(path: string): Promise<Buffer>;
+  readFile(path: string): Promise<Buffer | null>;
   listFiles?(): Promise<string[]>;
 }
 
@@ -41,6 +41,7 @@ export interface BackupStoreOptions {
   key: Buffer;
   source: BackupSource;
   excluder: Excluder;
+  sourceConcurrency?: number;
   maxDiskBytes?: number;
   now?: () => Date;
 }
@@ -141,6 +142,7 @@ export class BackupStore {
   private readonly rootDir: string;
   private readonly source: BackupSource;
   private readonly excluder: Excluder;
+  private readonly sourceConcurrency: number | undefined;
   private readonly maxDiskBytes: number | undefined;
   private readonly now: () => Date;
 
@@ -149,6 +151,7 @@ export class BackupStore {
     this.key = options.key;
     this.source = options.source;
     this.excluder = options.excluder;
+    this.sourceConcurrency = options.sourceConcurrency;
     this.maxDiskBytes = options.maxDiskBytes;
     this.now = options.now ?? (() => new Date());
   }
@@ -247,12 +250,7 @@ export class BackupStore {
       .filter((path) => !this.excluder.shouldExclude(path).excluded)
       .sort((a, b) => a.localeCompare(b));
 
-    const sources = await Promise.all(
-      paths.map(async (path) => ({
-        path,
-        data: await this.source.readFile(path),
-      })),
-    );
+    const sources = await this.readSources(paths);
 
     await this.assertWithinDiskLimit(sources.reduce((sum, file) => sum + file.data.length, 0));
 
@@ -305,6 +303,43 @@ export class BackupStore {
         `Backup disk limit exceeded: projected=${projected} max=${this.maxDiskBytes}`,
       );
     }
+  }
+
+  private async readSources(
+    paths: readonly string[],
+  ): Promise<Array<{ path: string; data: Buffer }>> {
+    const concurrency =
+      this.sourceConcurrency === undefined
+        ? paths.length
+        : Math.max(1, Math.min(this.sourceConcurrency, paths.length));
+    const sources: Array<{ path: string; data: Buffer } | undefined> = new Array(paths.length);
+    let nextIndex = 0;
+
+    async function worker(readFile: BackupSource['readFile']): Promise<void> {
+      while (nextIndex < paths.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const path = paths[index];
+        if (path === undefined) {
+          continue;
+        }
+        const data = await readFile(path);
+        if (data === null) {
+          continue;
+        }
+        sources[index] = {
+          path,
+          data,
+        };
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: concurrency }, () => worker((path) => this.source.readFile(path))),
+    );
+    return sources.filter(
+      (source): source is { path: string; data: Buffer } => source !== undefined,
+    );
   }
 
   private createSnapshotId(type: SnapshotType): SnapshotId {

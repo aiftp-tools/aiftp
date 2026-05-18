@@ -244,18 +244,30 @@ async function startTestServer(): Promise<TestServer> {
 }
 
 describe.sequential('FtpClient: integration with ftp-srv (plain FTP)', () => {
-  let server: TestServer;
+  let server: TestServer | undefined;
+  let serverStartError: unknown;
   let workDir: string;
 
   beforeAll(async () => {
-    server = await startTestServer();
+    try {
+      server = await startTestServer();
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('listen EPERM')) {
+        serverStartError = error;
+        return;
+      }
+      throw error;
+    }
   });
 
   afterAll(async () => {
-    await server.stop();
+    await server?.stop();
   });
 
-  beforeEach(async () => {
+  beforeEach(async (context) => {
+    if (!server && serverStartError) {
+      context.skip();
+    }
     workDir = await mkdtemp(join(tmpdir(), 'aiftp-work-'));
   });
 
@@ -266,6 +278,9 @@ describe.sequential('FtpClient: integration with ftp-srv (plain FTP)', () => {
   function newClient(
     overrides: Partial<Parameters<typeof FtpClient.prototype.constructor>[0]> = {},
   ): FtpClient {
+    if (!server) {
+      throw new Error('ftp-srv integration server did not start');
+    }
     return new FtpClient({
       host: '127.0.0.1',
       port: server.port,

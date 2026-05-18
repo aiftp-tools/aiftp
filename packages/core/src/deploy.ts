@@ -206,14 +206,14 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
     };
   }
 
-  const modifiedTargets = planned.filter((path) => status.diff.modified.includes(path));
-  const backupSnapshot =
-    modifiedTargets.length > 0
-      ? await options.backupStore.createAutoSnapshot(modifiedTargets)
-      : null;
-
   await options.lock?.acquire();
   try {
+    const modifiedTargets = planned.filter((path) => status.diff.modified.includes(path));
+    const backupSnapshot =
+      modifiedTargets.length > 0
+        ? await options.backupStore.createAutoSnapshot(modifiedTargets)
+        : null;
+
     let nextState = options.state;
     const uploaded: UploadedFileResult[] = [];
     const verifyAfterUpload = options.safety?.verifyAfterUpload ?? 'size';

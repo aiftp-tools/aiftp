@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
+  FtpClient,
   type PushOptions,
   type PushResult,
   type SnapshotMeta,
@@ -13,6 +14,7 @@ import {
   checkAll,
   createDefaultBackupStore,
   createExcluder,
+  getPassword,
   loadConfig,
   loadState,
   runPush,
@@ -189,6 +191,33 @@ function unavailableUploader(): DeployUploader {
   };
 }
 
+async function createDefaultFtpClient(cwd: string, profileName: string): Promise<FtpClient> {
+  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+  const profile = config.profile[profileName];
+  if (!profile) {
+    throw new Error(`Profile not found: ${profileName}`);
+  }
+  const client = new FtpClient({
+    host: profile.host,
+    port: profile.port,
+    user: profile.user,
+    password: await getPassword(profile.keychain_service, profile.user),
+    protocol: profile.protocol,
+    requireTls: config.safety.require_tls,
+    verifyCertificate: config.safety.verify_certificate,
+    timeoutMs: config.connection.timeout_ms,
+  });
+  await client.connect();
+  return client;
+}
+
+function uploaderFromClient(client: FtpClient): DeployUploader {
+  return {
+    upload: (localPath, remotePath) => client.upload(localPath, remotePath),
+    size: (remotePath) => client.size(remotePath),
+  };
+}
+
 async function backupStoreFor(app: AiftpMcpApp, profileName: string): Promise<AiftpBackupStore> {
   return (
     (await app.runtime.createBackupStore?.({ cwd: app.cwd, profileName })) ??
@@ -208,15 +237,16 @@ async function pushBackupStoreFor(
   app: AiftpMcpApp,
   profileName: string,
   dryRun: boolean,
+  ftpClient?: FtpClient,
+  runtimeStore?: AiftpBackupStore,
 ): Promise<PushOptions['backupStore']> {
-  const store = await app.runtime.createBackupStore?.({ cwd: app.cwd, profileName });
-  if (store) {
-    return store as unknown as PushOptions['backupStore'];
+  if (runtimeStore) {
+    return runtimeStore as unknown as PushOptions['backupStore'];
   }
   if (dryRun) {
     return dryRunBackupStore();
   }
-  return createDefaultBackupStore({ cwd: app.cwd, profileName });
+  return createDefaultBackupStore({ cwd: app.cwd, profileName, ftpClient });
 }
 
 function textResult(payload: unknown, isError?: boolean): CallToolResult {
@@ -252,24 +282,48 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
   if (!profile) {
     throw new Error(`Profile not found: ${args.profile}`);
   }
-  const backupStore = await pushBackupStoreFor(app, args.profile, args.dry_run);
-  const uploader =
-    (await app.runtime.createUploader?.({ cwd: app.cwd, profileName: args.profile })) ??
-    unavailableUploader();
-  const result = await (app.runtime.runPush ?? runPush)({
-    ...(await loadStatusContext(app.cwd, args.profile)),
-    backupStore: backupStore as unknown as PushOptions['backupStore'],
-    uploader,
-    remoteRoot: profile.remote_root,
-    files: args.files,
-    dryRun: args.dry_run,
-    safety: {
-      maxFilesPerPush: config.safety.max_files_per_push,
-      maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
-      verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
-    },
-    preflight: (paths) => checkAll(paths),
+  const runtimeStore = await app.runtime.createBackupStore?.({
+    cwd: app.cwd,
+    profileName: args.profile,
   });
+  const runtimeUploader = await app.runtime.createUploader?.({
+    cwd: app.cwd,
+    profileName: args.profile,
+  });
+  const needsDefaultFtp =
+    !app.runtime.runPush &&
+    !args.dry_run &&
+    (runtimeStore === undefined || runtimeUploader === undefined);
+  const sharedFtpClient = needsDefaultFtp
+    ? await createDefaultFtpClient(app.cwd, args.profile)
+    : undefined;
+
+  const result = await (async () => {
+    const backupStore = await pushBackupStoreFor(
+      app,
+      args.profile,
+      args.dry_run,
+      sharedFtpClient,
+      runtimeStore,
+    );
+    const uploader =
+      runtimeUploader ??
+      (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
+    return (app.runtime.runPush ?? runPush)({
+      ...(await loadStatusContext(app.cwd, args.profile)),
+      backupStore: backupStore as unknown as PushOptions['backupStore'],
+      uploader,
+      remoteRoot: profile.remote_root,
+      files: args.files,
+      dryRun: args.dry_run,
+      safety: {
+        maxFilesPerPush: config.safety.max_files_per_push,
+        maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
+        verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+      },
+      preflight: (paths) => checkAll(paths),
+    });
+  })().finally(() => sharedFtpClient?.disconnect());
 
   if (!result.dryRun) {
     await saveState(stateDir(app.cwd, args.profile), result.nextState);

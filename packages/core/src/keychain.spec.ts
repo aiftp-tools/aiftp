@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   KeychainError,
   KeychainNotFoundError,
@@ -25,6 +25,14 @@ const PREFIX = process.env.AIFTP_TEST_KEYCHAIN_PREFIX ?? `aiftp-test-${process.p
 
 const testService = (suffix: string): string => `${PREFIX}:${suffix}`;
 const created = new Set<{ service: string; account: string }>();
+
+function isHeadlessKeychainUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('Unable to obtain authorization for this operation') ||
+    message.includes('SecKeychainSearchCreateFromAttributes')
+  );
+}
 
 async function track(service: string, account: string, password: string): Promise<void> {
   await setPassword(service, account, password);
@@ -84,10 +92,30 @@ describe.skipIf(onMacOS)('keychain: non-macOS platform guard', () => {
 });
 
 describe.skipIf(!runIntegration)('keychain: integration (macOS, non-CI)', () => {
-  beforeAll(() => {
+  let unavailableError: unknown;
+
+  beforeAll(async () => {
     // Sanity check so a misconfigured env does not silently pollute.
     if (!PREFIX.includes('test')) {
       throw new Error(`Refusing to run integration tests with non-test prefix: ${PREFIX}`);
+    }
+    const service = testService('probe');
+    const account = 'probe';
+    try {
+      await setPassword(service, account, 'probe');
+      await deletePassword(service, account);
+    } catch (error: unknown) {
+      if (isHeadlessKeychainUnavailable(error)) {
+        unavailableError = error;
+        return;
+      }
+      throw error;
+    }
+  });
+
+  beforeEach((context) => {
+    if (unavailableError) {
+      context.skip();
     }
   });
 

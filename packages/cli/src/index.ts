@@ -26,7 +26,7 @@ import {
   saveState,
   setPassword,
 } from '@aiftp-tools/core';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
 
 export { VERSION };
@@ -254,11 +254,11 @@ function injectedRuntimeUploader(): DeployUploader {
   };
 }
 
-async function createDefaultManagedUploader(
+async function createDefaultFtpClient(
   cwd: string,
   profileName: string,
   keychain: CliKeychain,
-): Promise<ManagedUploader> {
+): Promise<FtpClient> {
   const config = await loadConfig(join(cwd, '.aiftp.toml'));
   const profile = config.profile[profileName];
   if (!profile) {
@@ -275,13 +275,31 @@ async function createDefaultManagedUploader(
     timeoutMs: config.connection.timeout_ms,
   });
   await client.connect();
+  return client;
+}
+
+function managedUploaderFromClient(client: FtpClient): ManagedUploader {
   return {
     uploader: {
       upload: (localPath, remotePath) => client.upload(localPath, remotePath),
       size: (remotePath) => client.size(remotePath),
     },
-    close: () => client.disconnect(),
+    close: async () => undefined,
   };
+}
+
+async function createDefaultManagedUploader(
+  cwd: string,
+  profileName: string,
+  keychain: CliKeychain,
+  ftpClient?: FtpClient,
+): Promise<ManagedUploader> {
+  if (ftpClient) {
+    return managedUploaderFromClient(ftpClient);
+  }
+  const client = await createDefaultFtpClient(cwd, profileName, keychain);
+  const managed = managedUploaderFromClient(client);
+  return { ...managed, close: () => client.disconnect() };
 }
 
 async function resolveManagedUploader(
@@ -290,15 +308,16 @@ async function resolveManagedUploader(
   dryRun: boolean | undefined,
   keychain: CliKeychain,
   runtime: CliRuntime,
+  ftpClient?: FtpClient,
+  runtimeUploader?: DeployUploader,
 ): Promise<ManagedUploader> {
-  const runtimeUploader = await runtime.createUploader?.({ cwd, profileName });
   if (runtimeUploader) {
     return { uploader: runtimeUploader, close: async () => undefined };
   }
   if (runtime.runPush || dryRun) {
     return { uploader: injectedRuntimeUploader(), close: async () => undefined };
   }
-  return createDefaultManagedUploader(cwd, profileName, keychain);
+  return createDefaultManagedUploader(cwd, profileName, keychain, ftpClient);
 }
 
 function printStatus(stdout: (line: string) => void, result: StatusResult, json?: boolean): void {
@@ -487,47 +506,74 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error(`Profile not found: ${cmd.profile}`);
       }
       const context = await loadStatusContext(cwd, cmd.profile);
-      const backupStore =
-        (await runtime.createBackupStore?.({ cwd, profileName: cmd.profile })) ??
-        (await createDefaultBackupStore({ cwd, profileName: cmd.profile, keychain }));
-      const managedUploader = await resolveManagedUploader(
+      const runtimeBackupStore = await runtime.createBackupStore?.({
         cwd,
-        cmd.profile,
-        cmd.dryRun,
-        keychain,
-        runtime,
-      );
-      const result = await (runtime.runPush ?? runPush)({
-        ...context,
-        backupStore: backupStore as PushOptions['backupStore'],
-        uploader: managedUploader.uploader,
-        remoteRoot: profile.remote_root,
-        files: cmd.only,
-        dryRun: cmd.dryRun,
-        safety: {
-          maxFilesPerPush: config.safety.max_files_per_push,
-          maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
-          verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
-        },
-        preflight: (paths) => checkAll(paths),
-      }).finally(() => managedUploader.close());
+        profileName: cmd.profile,
+      });
+      const runtimeUploader = await runtime.createUploader?.({
+        cwd,
+        profileName: cmd.profile,
+      });
+      const needsDefaultFtp =
+        !runtime.runPush &&
+        !cmd.dryRun &&
+        (runtimeBackupStore === undefined || runtimeUploader === undefined);
+      let sharedFtpClient: FtpClient | undefined;
+      try {
+        sharedFtpClient = needsDefaultFtp
+          ? await createDefaultFtpClient(cwd, cmd.profile, keychain)
+          : undefined;
+        const backupStore =
+          runtimeBackupStore ??
+          (await createDefaultBackupStore({
+            cwd,
+            profileName: cmd.profile,
+            keychain,
+            ftpClient: sharedFtpClient,
+          }));
+        const managedUploader = await resolveManagedUploader(
+          cwd,
+          cmd.profile,
+          cmd.dryRun,
+          keychain,
+          runtime,
+          sharedFtpClient,
+          runtimeUploader,
+        );
+        const result = await (runtime.runPush ?? runPush)({
+          ...context,
+          backupStore: backupStore as PushOptions['backupStore'],
+          uploader: managedUploader.uploader,
+          remoteRoot: profile.remote_root,
+          files: cmd.only,
+          dryRun: cmd.dryRun,
+          safety: {
+            maxFilesPerPush: config.safety.max_files_per_push,
+            maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
+            verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+          },
+          preflight: (paths) => checkAll(paths),
+        }).finally(() => managedUploader.close());
 
-      if (!result.dryRun) {
-        await saveState(stateDir(cwd, cmd.profile), result.nextState);
-        await appendLogEntry(cwd, {
-          at: new Date().toISOString(),
-          event: 'push',
-          profile: cmd.profile,
-          uploaded: result.uploaded.length,
-        });
-      }
+        if (!result.dryRun) {
+          await saveState(stateDir(cwd, cmd.profile), result.nextState);
+          await appendLogEntry(cwd, {
+            at: new Date().toISOString(),
+            event: 'push',
+            profile: cmd.profile,
+            uploaded: result.uploaded.length,
+          });
+        }
 
-      if (cmd.json) {
-        stdout(JSON.stringify(result));
-      } else if (result.dryRun) {
-        stdout(`Planned ${result.planned.length} file(s)`);
-      } else {
-        stdout(`Uploaded ${result.uploaded.length} file(s)`);
+        if (cmd.json) {
+          stdout(JSON.stringify(result));
+        } else if (result.dryRun) {
+          stdout(`Planned ${result.planned.length} file(s)`);
+        } else {
+          stdout(`Uploaded ${result.uploaded.length} file(s)`);
+        }
+      } finally {
+        await sharedFtpClient?.disconnect();
       }
     });
 
@@ -611,5 +657,12 @@ export function createCli(options: CliOptions = {}): Command {
 }
 
 export async function main(argv = process.argv): Promise<void> {
-  await createCli().parseAsync(argv, { from: 'node' });
+  try {
+    await createCli().parseAsync(argv, { from: 'node' });
+  } catch (error: unknown) {
+    if (error instanceof CommanderError && error.exitCode === 0) {
+      return;
+    }
+    throw error;
+  }
 }
