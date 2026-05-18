@@ -25,3 +25,12 @@ export {
   hasPassword,
   setPassword,
 } from './keychain.js';
+
+export {
+  Excluder,
+  type ExcluderOptions,
+  type ExcludeMatch,
+  type ExcludeReason,
+  HARD_EXCLUDE_PATTERNS,
+  createExcluder,
+} from './exclude.js';

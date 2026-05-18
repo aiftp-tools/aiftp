@@ -20,9 +20,11 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
+    "picomatch": "^4.0.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/iarna__toml": "^2.0.5"
+    "@types/iarna__toml": "^2.0.5",
+    "@types/picomatch": "^4.0.3"
   }
 }
