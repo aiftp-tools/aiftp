@@ -45,6 +45,12 @@ export const HARD_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
   '*.bak',
 ]);
 
+export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
+  '.git/',
+  '.aiftp/',
+  '.aiftp.toml',
+]);
+
 export type ExcludeReason = 'hard' | 'soft' | null;
 
 export interface ExcludeMatch {

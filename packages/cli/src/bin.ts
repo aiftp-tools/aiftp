@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-import { VERSION } from './index.js';
+import { main } from './index.js';
 
-console.log(`aiftp v${VERSION} — pre-MVP scaffold`);
-console.log('Implementation pending. See docs/wbs.md for the roadmap.');
+main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  process.exitCode = 1;
+});
