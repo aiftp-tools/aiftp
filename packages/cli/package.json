@@ -1,0 +1,37 @@
+{
+  "name": "aiftp",
+  "version": "0.0.0",
+  "description": "AI-first FTP/FTPS deploy tool — CLI",
+  "license": "MIT",
+  "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
+  "homepage": "https://github.com/aiftp-tools/aiftp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiftp-tools/aiftp.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/aiftp-tools/aiftp/issues"
+  },
+  "keywords": ["ftp", "ftps", "deploy", "ai", "mcp", "claude", "cursor"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "aiftp": "./dist/bin.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aiftp-tools/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
