@@ -15,3 +15,13 @@ export {
   loadConfig,
   validateConfig,
 } from './config.js';
+
+export {
+  KeychainError,
+  KeychainNotFoundError,
+  KeychainPlatformError,
+  deletePassword,
+  getPassword,
+  hasPassword,
+  setPassword,
+} from './keychain.js';
