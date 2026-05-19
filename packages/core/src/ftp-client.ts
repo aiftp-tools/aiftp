@@ -82,6 +82,15 @@ export interface FtpClientOptions {
    */
   verifyCertificate?: boolean;
   /**
+   * When true, skip the hostname-matches-cert check but keep the full
+   * chain validation. Maps to `[quirks].tls_check_hostname = false`.
+   * The typical use case is Star Server: cert CN is `*.star.ne.jp` but
+   * the customer's actual hostname is `*.stars.ne.jp`. Defaults to
+   * false (perform the hostname check). Has no effect when
+   * `verifyCertificate` is false.
+   */
+  skipHostnameCheck?: boolean;
+  /**
    * Socket-level timeout in milliseconds for individual FTP operations.
    * Defaults to 60_000 (60s) per spec §C.1.
    */
@@ -95,6 +104,13 @@ export interface FtpClientOptions {
    * Optional sink for non-fatal warnings (e.g., plain FTP fallback).
    */
   onWarning?: (line: string) => void;
+  /**
+   * When > 0, send a NOOP command every `noopIntervalSec` seconds while
+   * the connection is idle, to keep PASV NAT mappings and shared-host
+   * idle-disconnect timers from severing the control channel. Maps to
+   * `[quirks].noop_interval_sec` in the config schema. 0 disables.
+   */
+  noopIntervalSec?: number;
 }
 
 export interface ListEntry {
@@ -244,10 +260,19 @@ function mapFileType(t: FileInfo['type']): ListEntry['type'] {
  */
 export class FtpClient {
   private client: BasicFtpClient | null = null;
+  private noopTimer: ReturnType<typeof setInterval> | null = null;
   private readonly options: Required<
     Omit<
       FtpClientOptions,
-      'onLog' | 'onWarning' | 'port' | 'protocol' | 'requireTls' | 'verifyCertificate' | 'timeoutMs'
+      | 'onLog'
+      | 'onWarning'
+      | 'port'
+      | 'protocol'
+      | 'requireTls'
+      | 'verifyCertificate'
+      | 'timeoutMs'
+      | 'skipHostnameCheck'
+      | 'noopIntervalSec'
     >
   > & {
     port: number;
@@ -255,6 +280,8 @@ export class FtpClient {
     requireTls: boolean;
     verifyCertificate: boolean;
     timeoutMs: number;
+    skipHostnameCheck: boolean;
+    noopIntervalSec: number;
     onLog?: (line: string) => void;
     onWarning?: (line: string) => void;
   };
@@ -284,7 +311,9 @@ export class FtpClient {
       protocol,
       requireTls,
       verifyCertificate: options.verifyCertificate ?? true,
+      skipHostnameCheck: options.skipHostnameCheck ?? false,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      noopIntervalSec: options.noopIntervalSec ?? 0,
       onLog: options.onLog,
       onWarning: options.onWarning,
     };
@@ -317,6 +346,13 @@ export class FtpClient {
       secure: this.options.protocol === 'ftps',
       secureOptions: {
         rejectUnauthorized: this.options.verifyCertificate,
+        // skipHostnameCheck=true keeps `rejectUnauthorized` honest about
+        // the chain but treats the hostname mismatch as benign. Used by
+        // the StarServer / lolipop-style shared hosts where the cert CN
+        // does not include the customer's vanity domain.
+        ...(this.options.skipHostnameCheck && this.options.verifyCertificate !== false
+          ? { checkServerIdentity: () => undefined }
+          : {}),
       },
     };
 
@@ -327,12 +363,29 @@ export class FtpClient {
       throw mapFtpError(error, 'connect');
     }
     this.client = client;
+
+    // Optional NOOP keepalive. Best-effort: if a NOOP fails because the
+    // socket is mid-transfer or torn down, swallow it -- the next real
+    // operation will surface the actual error.
+    const interval = this.options.noopIntervalSec ?? 0;
+    if (interval > 0) {
+      this.noopTimer = setInterval(() => {
+        if (!this.client) return;
+        this.client.send('NOOP').catch(() => undefined);
+      }, interval * 1000);
+      // Don't hold the process open just for the keepalive.
+      this.noopTimer.unref?.();
+    }
   }
 
   /**
    * Closes the connection. Safe to call multiple times.
    */
   async disconnect(): Promise<void> {
+    if (this.noopTimer) {
+      clearInterval(this.noopTimer);
+      this.noopTimer = null;
+    }
     if (this.client) {
       try {
         this.client.close();

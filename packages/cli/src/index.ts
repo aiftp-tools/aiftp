@@ -338,7 +338,9 @@ async function createDefaultFtpClient(
     protocol: profile.protocol,
     requireTls: config.safety.require_tls,
     verifyCertificate: config.safety.verify_certificate,
+    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
     timeoutMs: config.connection.timeout_ms,
+    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
   });
   await client.connect();
   return client;

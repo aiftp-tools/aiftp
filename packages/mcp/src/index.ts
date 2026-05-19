@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
@@ -16,6 +16,7 @@ import {
   createDefaultBackupStore,
   createExcluder,
   getPassword,
+  isValidSnapshotId,
   loadConfig,
   loadState,
   runPush,
@@ -63,6 +64,8 @@ export type AiftpToolName =
   | 'aiftp_push_confirm'
   | 'aiftp_backup_list'
   | 'aiftp_backup_restore'
+  | 'aiftp_backup_restore_prepare'
+  | 'aiftp_backup_restore_confirm'
   | 'aiftp_backup_verify'
   | 'aiftp_backup_prune'
   | 'aiftp_log'
@@ -111,6 +114,22 @@ const backupRestoreSchema = profileSchema
   })
   .strict();
 
+const backupRestorePrepareSchema = profileSchema
+  .extend({
+    id: z.string().min(1),
+    path: z.string().min(1),
+    output: z.string().min(1),
+  })
+  .strict();
+
+const backupRestoreConfirmSchema = profileSchema
+  .extend({
+    plan_id: z.string().min(1),
+    diff_hash: z.string().min(1),
+    confirm_token: z.string().min(1),
+  })
+  .strict();
+
 const backupVerifySchema = profileSchema
   .extend({
     id: z.string().min(1),
@@ -142,6 +161,8 @@ const toolSchemas = {
   aiftp_push_confirm: pushConfirmSchema,
   aiftp_backup_list: profileSchema,
   aiftp_backup_restore: backupRestoreSchema,
+  aiftp_backup_restore_prepare: backupRestorePrepareSchema,
+  aiftp_backup_restore_confirm: backupRestoreConfirmSchema,
   aiftp_backup_verify: backupVerifySchema,
   aiftp_backup_prune: backupPruneSchema,
   aiftp_log: logSchema,
@@ -156,7 +177,12 @@ const toolDescriptions = {
   aiftp_push_confirm:
     'Confirm a previously-prepared real push. Requires the exact plan_id / diff_hash / confirm_token from aiftp_push_prepare.',
   aiftp_backup_list: 'List encrypted backup snapshots.',
-  aiftp_backup_restore: 'Restore one file from a backup snapshot to a local output path.',
+  aiftp_backup_restore:
+    'Direct restore is refused — use aiftp_backup_restore_prepare + aiftp_backup_restore_confirm.',
+  aiftp_backup_restore_prepare:
+    'Prepare a backup restore: validates the snapshot id and output path (must stay inside the project root), returns plan_id / diff_hash / confirm_token.',
+  aiftp_backup_restore_confirm:
+    'Confirm a previously-prepared backup restore. Requires the exact plan_id / diff_hash / confirm_token from aiftp_backup_restore_prepare.',
   aiftp_backup_verify: 'Verify a backup snapshot.',
   aiftp_backup_prune: 'Prune old backup snapshots.',
   aiftp_log: 'Read recent local aiftp operation log entries.',
@@ -228,7 +254,9 @@ async function createDefaultFtpClient(cwd: string, profileName: string): Promise
     protocol: profile.protocol,
     requireTls: config.safety.require_tls,
     verifyCertificate: config.safety.verify_certificate,
+    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
     timeoutMs: config.connection.timeout_ms,
+    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
   });
   await client.connect();
   return client;
@@ -549,13 +577,138 @@ async function handleBackupList(app: AiftpMcpApp, rawArgs: unknown): Promise<Cal
   return textResult({ ok: true, profile: args.profile, snapshots });
 }
 
-async function handleBackupRestore(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
-  const args = backupRestoreSchema.parse(rawArgs ?? {});
-  const data = await (await backupStoreFor(app, args.profile)).restoreFile(args.id, args.path);
-  const output = projectPath(app.cwd, args.output);
-  await mkdir(dirname(output), { recursive: true });
-  await writeFile(output, data);
-  return textResult({ ok: true, profile: args.profile, restored: args.output });
+async function handleBackupRestore(_app: AiftpMcpApp, _rawArgs: unknown): Promise<CallToolResult> {
+  throw new Error(
+    'aiftp_backup_restore refuses direct invocation. Use the two-step flow: aiftp_backup_restore_prepare to validate the snapshot id and output path, then aiftp_backup_restore_confirm to actually write the file.',
+  );
+}
+
+/**
+ * Resolve `requested` relative to `cwd` and confirm the absolute result
+ * stays inside the project root. Used by destructive write operations
+ * (backup restore) to prevent path-traversal escapes through the MCP
+ * interface. Mirrors the CLI's `restrictToProject` helper.
+ */
+function restrictOutputToProject(cwd: string, requested: string): string {
+  if (typeof requested !== 'string' || requested.length === 0) {
+    throw new Error('output path must not be empty');
+  }
+  const cwdResolved = resolve(cwd);
+  const absolute = isAbsolute(requested) ? resolve(requested) : resolve(cwdResolved, requested);
+  const rel = relative(cwdResolved, absolute);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`output path ${requested} resolves outside the project root`);
+  }
+  return absolute;
+}
+
+interface PreparedRestorePlan {
+  planId: string;
+  diffHash: string;
+  confirmToken: string;
+  profile: string;
+  snapshotId: string;
+  path: string;
+  outputAbsolute: string;
+  outputRequested: string;
+  createdAt: number;
+}
+
+const restorePlanStore = new Map<string, PreparedRestorePlan>();
+
+function pruneExpiredRestorePlans(now: number): void {
+  for (const [id, plan] of restorePlanStore) {
+    if (now - plan.createdAt > PLAN_TTL_MS) restorePlanStore.delete(id);
+  }
+}
+
+async function handleBackupRestorePrepare(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  const args = backupRestorePrepareSchema.parse(rawArgs ?? {});
+  if (!isValidSnapshotId(args.id)) {
+    throw new Error(
+      `Invalid snapshot id: ${JSON.stringify(args.id)}. Expected format: "<iso-timestamp>-<auto|full>-<uuid>" (see aiftp_backup_list).`,
+    );
+  }
+  const outputAbsolute = restrictOutputToProject(app.cwd, args.output);
+  const now = Date.now();
+  pruneExpiredRestorePlans(now);
+  const planId = randomUUID();
+  // The diff_hash binds the confirm to *these exact target identifiers*; if
+  // the user issues a second prepare for a different file, the prior token
+  // becomes useless.
+  const diffHash = createHash('sha256')
+    .update(`${args.profile}\n${args.id}\n${args.path}\n${outputAbsolute}`)
+    .digest('hex');
+  const confirmToken = randomBytes(24).toString('base64url');
+  restorePlanStore.set(planId, {
+    planId,
+    diffHash,
+    confirmToken,
+    profile: args.profile,
+    snapshotId: args.id,
+    path: args.path,
+    outputAbsolute,
+    outputRequested: args.output,
+    createdAt: now,
+  });
+  return textResult({
+    ok: true,
+    profile: args.profile,
+    plan_id: planId,
+    diff_hash: diffHash,
+    confirm_token: confirmToken,
+    snapshot_id: args.id,
+    path: args.path,
+    output: args.output,
+    ttl_ms: PLAN_TTL_MS,
+  });
+}
+
+async function handleBackupRestoreConfirm(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  const args = backupRestoreConfirmSchema.parse(rawArgs ?? {});
+  const now = Date.now();
+  pruneExpiredRestorePlans(now);
+  const plan = restorePlanStore.get(args.plan_id);
+  if (!plan) {
+    throw new Error(
+      `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_backup_restore_prepare again to obtain a fresh plan.`,
+    );
+  }
+  if (plan.profile !== args.profile) {
+    throw new Error(
+      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${args.profile}".`,
+    );
+  }
+  if (plan.diffHash !== args.diff_hash) {
+    throw new Error(
+      'diff_hash mismatch: the restore target drifted between prepare and confirm. Call aiftp_backup_restore_prepare again.',
+    );
+  }
+  if (plan.confirmToken !== args.confirm_token) {
+    throw new Error('confirm_token mismatch: refusing to restore.');
+  }
+  // Consume the plan before side effects so a second confirm with the same
+  // token cannot replay the restore.
+  restorePlanStore.delete(args.plan_id);
+  const data = await (await backupStoreFor(app, plan.profile)).restoreFile(
+    plan.snapshotId,
+    plan.path,
+  );
+  await mkdir(dirname(plan.outputAbsolute), { recursive: true });
+  await writeFile(plan.outputAbsolute, data);
+  return textResult({
+    ok: true,
+    profile: plan.profile,
+    plan_id: args.plan_id,
+    restored: plan.outputRequested,
+    bytes: data.length,
+  });
 }
 
 async function handleBackupVerify(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -595,6 +748,8 @@ const handlers = {
   aiftp_push_confirm: handlePushConfirm,
   aiftp_backup_list: handleBackupList,
   aiftp_backup_restore: handleBackupRestore,
+  aiftp_backup_restore_prepare: handleBackupRestorePrepare,
+  aiftp_backup_restore_confirm: handleBackupRestoreConfirm,
   aiftp_backup_verify: handleBackupVerify,
   aiftp_backup_prune: handleBackupPrune,
   aiftp_log: handleLog,

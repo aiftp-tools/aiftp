@@ -301,6 +301,79 @@ describe('mcp', () => {
     expect(parsed.profiles.production.server_kind).toBe('starserver');
   });
 
+  it('aiftp_backup_restore_prepare rejects malformed snapshot ids', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.alloc(0),
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const r = await callAiftpTool(app, 'aiftp_backup_restore_prepare', {
+      id: '../etc/passwd',
+      path: 'index.html',
+      output: 'restored.html',
+    });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.content)).toMatch(/invalid snapshot id/i);
+  });
+
+  it('aiftp_backup_restore_prepare rejects output paths that escape the project root', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.alloc(0),
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const r = await callAiftpTool(app, 'aiftp_backup_restore_prepare', {
+      id: '2026-05-18T14-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      path: 'index.html',
+      output: '../escape.html',
+    });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.content)).toMatch(/outside.*project root|--output/i);
+  });
+
+  it('aiftp_backup_restore_confirm rejects replay of a consumed plan_id', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.from('payload', 'utf8'),
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const validId = '2026-05-18T14-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_backup_restore_prepare', {
+        id: validId,
+        path: 'index.html',
+        output: 'restored.html',
+      }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    const replay = await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(replay.isError).toBe(true);
+    expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+  });
+
   it('aiftp_backup_list, restore, verify, prune, log, and list_remote delegate safely', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp'), { recursive: true });
@@ -343,15 +416,32 @@ describe('mcp', () => {
     ).toMatchObject({
       deleted: ['snap-old'],
     });
-    expect(
-      parseText(
-        await callAiftpTool(app, 'aiftp_backup_restore', {
-          id: 'snap-1',
-          path: 'index.html',
-          output: 'restored/index.html',
-        }),
-      ),
-    ).toMatchObject({ restored: 'restored/index.html' });
+    // v0.2.2: aiftp_backup_restore is now a two-step flow (prepare + confirm).
+    // Direct invocation is refused.
+    const directRestore = await callAiftpTool(app, 'aiftp_backup_restore', {
+      id: '2026-05-18T14-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      path: 'index.html',
+      output: 'restored/index.html',
+    });
+    expect(directRestore.isError).toBe(true);
+    expect(JSON.stringify(directRestore.content)).toMatch(/prepare\/confirm|two-step/i);
+
+    const validId = '2026-05-18T14-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_backup_restore_prepare', {
+        id: validId,
+        path: 'index.html',
+        output: 'restored/index.html',
+      }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { restored: string };
+    expect(confirmed.restored).toBe('restored/index.html');
     expect(await readFile(join(cwd, 'restored', 'index.html'), 'utf8')).toBe('<h1>restored</h1>\n');
     expect(parseText(await callAiftpTool(app, 'aiftp_log', { limit: 1 }))).toMatchObject({
       entries: [{ event: 'push' }],
