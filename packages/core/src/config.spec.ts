@@ -126,7 +126,73 @@ describe('config: loadConfig', () => {
     await expect(promise).rejects.toBeInstanceOf(ConfigValidationError);
     await expect(promise).rejects.toThrow(/Forbidden field 'password'/);
   });
+
+  // -------------------------------------------------------------------------
+  // v0.2: schema = 2 acceptance. All tests below use { autoMigrate: false } so
+  // they do not write to read-only fixtures. End-to-end migration coverage
+  // lives in config-migration.spec.ts (tmpdir-based).
+  // -------------------------------------------------------------------------
+
+  it('accepts schema = 2 with minimal profile', async () => {
+    const cfg = await loadConfig(fixture('minimal-v2.toml'), { autoMigrate: false });
+    expect(cfg.schema).toBe(2);
+    expect(cfg.profile.production?.host).toBe('ftp.example.com');
+  });
+
+  it('accepts new optional profile fields: account, ftps_mode, passive_mode', async () => {
+    const cfg = await loadConfig(fixture('full-v2.toml'), { autoMigrate: false });
+    const profile = cfg.profile.production;
+    expect(profile?.account).toBe('billing-account-7');
+    expect(profile?.ftps_mode).toBe('explicit');
+    expect(profile?.passive_mode).toBe(true);
+  });
+
+  it('accepts [encoding] section with file_name', async () => {
+    const cfg = await loadConfig(fixture('full-v2.toml'), { autoMigrate: false });
+    expect(cfg.encoding?.file_name).toBe('shift_jis');
+  });
+
+  it('accepts [quirks] section with all flags', async () => {
+    const cfg = await loadConfig(fixture('full-v2.toml'), { autoMigrate: false });
+    expect(cfg.quirks).toMatchObject({
+      ignore_pasv_address: true,
+      use_mlsd: false,
+      tls_check_hostname: true,
+      noop_interval_sec: 30,
+    });
+  });
+
+  it('applies encoding and quirks defaults when sections are omitted in v2', async () => {
+    const cfg = await loadConfig(fixture('minimal-v2.toml'), { autoMigrate: false });
+    expect(cfg.encoding?.file_name).toBe('auto');
+    expect(cfg.quirks?.ignore_pasv_address).toBe(false);
+    expect(cfg.quirks?.tls_check_hostname).toBe(true);
+  });
+
+  it('rejects schema = 0 / 3 / non-integer schema as ConfigValidationError', () => {
+    expect(() => validateConfig({ schema: 0, profile: { p: minimalProfileFixture() } })).toThrow(
+      ConfigValidationError,
+    );
+    expect(() => validateConfig({ schema: 3, profile: { p: minimalProfileFixture() } })).toThrow(
+      ConfigValidationError,
+    );
+    expect(() => validateConfig({ schema: '2', profile: { p: minimalProfileFixture() } })).toThrow(
+      ConfigValidationError,
+    );
+  });
 });
+
+// Test helper used by the schema=v2 validation tests above. Kept at the
+// bottom of the file because it requires the named types to be defined.
+function minimalProfileFixture(): Record<string, unknown> {
+  return {
+    host: 'ftp.example.com',
+    user: 'deploy',
+    remote_root: '/public_html',
+    local_root: '.',
+    keychain_service: 'aiftp:test',
+  };
+}
 
 describe('config: validateConfig', () => {
   const baseProfile = {
@@ -145,8 +211,11 @@ describe('config: validateConfig', () => {
     expect(cfg.profile.production?.host).toBe('ftp.example.com');
   });
 
-  it('rejects unsupported schema version', () => {
-    expect(() => validateConfig({ schema: 2, profile: { production: baseProfile } })).toThrow(
+  it('rejects unsupported schema version (v0.2 accepts 1 and 2; future versions are rejected)', () => {
+    expect(() => validateConfig({ schema: 3, profile: { production: baseProfile } })).toThrow(
+      ConfigValidationError,
+    );
+    expect(() => validateConfig({ schema: 0, profile: { production: baseProfile } })).toThrow(
       ConfigValidationError,
     );
   });

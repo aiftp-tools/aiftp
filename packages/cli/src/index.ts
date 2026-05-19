@@ -22,6 +22,7 @@ import {
   isValidSnapshotId,
   loadConfig,
   loadState,
+  migrateV1ToV2Source,
   runPush,
   runStatus,
   saveState,
@@ -695,6 +696,31 @@ export function createCli(options: CliOptions = {}): Command {
         stdout(`Restored ${path} to ${cmd.output}`);
       },
     );
+
+  const configCmd = program.command('config').description('Manage .aiftp.toml');
+
+  configCmd
+    .command('migrate')
+    .description('Migrate .aiftp.toml from schema v1 to v2')
+    .option('--dry-run', 'Preview the migration without writing')
+    .action(async (cmd: { dryRun?: boolean }) => {
+      const configPath = join(cwd, '.aiftp.toml');
+      const source = await readFile(configPath, 'utf8');
+      const result = migrateV1ToV2Source(source);
+      if (!result.changed) {
+        stdout('Already at latest schema (schema = 2)');
+        return;
+      }
+      if (cmd.dryRun) {
+        stdout('Dry-run preview: schema = 1 -> schema = 2');
+        stdout(result.source);
+        return;
+      }
+      await loadConfig(configPath);
+      stdout(
+        'Migrated .aiftp.toml from schema 1 to schema 2. Original preserved as .aiftp.toml.v1.bak',
+      );
+    });
 
   program
     .command('mcp')

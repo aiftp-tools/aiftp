@@ -1,9 +1,14 @@
-import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { parse as parseToml } from '@iarna/toml';
 import { z } from 'zod';
+import { VERSION } from './index.js';
+import { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
-const SUPPORTED_SCHEMA = 1;
+const SUPPORTED_SCHEMAS = [1, 2] as const;
 const PROTOCOLS = ['ftps', 'ftp'] as const;
+const FTPS_MODES = ['explicit', 'implicit'] as const;
 const ON_LIMIT_EXCEEDED = ['halt', 'rotate', 'warn'] as const;
 const FULL_BACKUP_ON_FIRST_PUSH = ['recommend', 'force', 'off'] as const;
 const FULL_BACKUP_SCHEDULE = ['off', 'daily', 'weekly', 'manual'] as const;
@@ -23,6 +28,9 @@ const profileSchema = z
     local_root: z.string().min(1),
     keychain_service: z.string().min(1),
     server_kind: z.enum(SERVER_KINDS).default('generic'),
+    account: z.string().optional(),
+    ftps_mode: z.enum(FTPS_MODES).optional(),
+    passive_mode: z.boolean().optional(),
   })
   .strict();
 
@@ -93,9 +101,24 @@ const hooksSchema = z
   })
   .strict();
 
+const encodingSchema = z
+  .object({
+    file_name: z.enum(['auto', 'utf-8', 'shift_jis', 'euc-jp']).default('auto'),
+  })
+  .strict();
+
+const quirksSchema = z
+  .object({
+    ignore_pasv_address: z.boolean().default(false),
+    use_mlsd: z.boolean().default(true),
+    tls_check_hostname: z.boolean().default(true),
+    noop_interval_sec: z.number().int().nonnegative().default(0),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
-    schema: z.literal(SUPPORTED_SCHEMA),
+    schema: z.union([z.literal(SUPPORTED_SCHEMAS[0]), z.literal(SUPPORTED_SCHEMAS[1])]),
     profile: z
       .record(z.string(), profileSchema)
       .refine((profiles) => Object.keys(profiles).length > 0, {
@@ -106,6 +129,8 @@ export const configSchema = z
     backup: backupSchema.prefault({}),
     connection: connectionSchema.prefault({}),
     hooks: hooksSchema.prefault({}),
+    encoding: encodingSchema.prefault({}),
+    quirks: quirksSchema.prefault({}),
   })
   .strict();
 
@@ -116,6 +141,12 @@ export type BackupConfig = z.infer<typeof backupSchema>;
 export type ConnectionConfig = z.infer<typeof connectionSchema>;
 export type ExcludeConfig = z.infer<typeof excludeSchema>;
 export type HooksConfig = z.infer<typeof hooksSchema>;
+export type EncodingConfig = z.infer<typeof encodingSchema>;
+export type QuirksConfig = z.infer<typeof quirksSchema>;
+
+export interface LoadConfigOptions {
+  autoMigrate?: boolean;
+}
 
 export class ConfigError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -155,6 +186,12 @@ function rejectForbiddenFields(raw: unknown, path: string[] = []): void {
   }
 }
 
+/**
+ * Synchronous validation against the *current* config schema. v0.2 accepts
+ * both schema=1 and schema=2 to support the auto-migration path through
+ * `loadConfig`. v0.3 will drop v1 acceptance once migration has had a full
+ * release to land.
+ */
 export function validateConfig(raw: unknown): Config {
   rejectForbiddenFields(raw);
   const result = configSchema.safeParse(raw);
@@ -169,7 +206,71 @@ export function validateConfig(raw: unknown): Config {
   return result.data;
 }
 
-export async function loadConfig(path: string): Promise<Config> {
+function parseConfigSource(source: string, configFilePath: string): unknown {
+  try {
+    return parseToml(source);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ConfigParseError(`Failed to parse TOML at ${configFilePath}: ${message}`, {
+      cause: error,
+    });
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function appendMigrationLog(configFilePath: string): Promise<void> {
+  const migrationLogPath = join(dirname(configFilePath), '.aiftp', 'logs', 'migrations.jsonl');
+  await mkdir(dirname(migrationLogPath), { recursive: true });
+  await appendFile(
+    migrationLogPath,
+    `${JSON.stringify({
+      fromSchema: 1,
+      toSchema: 2,
+      migratedAt: new Date().toISOString(),
+      toolVersion: VERSION,
+    })}\n`,
+    'utf8',
+  );
+}
+
+async function writeMigratedConfig(configFilePath: string, source: string): Promise<void> {
+  const backupPath = `${configFilePath}.v1.bak`;
+  if (await pathExists(backupPath)) {
+    throw new ConfigError(`Refusing to migrate because ${backupPath} already exists.`);
+  }
+
+  const tempPath = `${configFilePath}.tmp.${process.pid}.${randomUUID()}`;
+  let originalRenamed = false;
+  try {
+    await writeFile(tempPath, source, { encoding: 'utf8', mode: 0o600 });
+    await rename(configFilePath, backupPath);
+    originalRenamed = true;
+    await rename(tempPath, configFilePath);
+  } catch (error: unknown) {
+    await unlink(tempPath).catch(() => undefined);
+    if (originalRenamed) {
+      await rename(backupPath, configFilePath).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+function shouldAutoMigrate(
+  configFilePath: string,
+  options: LoadConfigOptions | undefined,
+): boolean {
+  return options?.autoMigrate !== false && basename(configFilePath) === '.aiftp.toml';
+}
+
+export async function loadConfig(path: string, options: LoadConfigOptions = {}): Promise<Config> {
   let source: string;
   try {
     source = await readFile(path, 'utf8');
@@ -177,12 +278,15 @@ export async function loadConfig(path: string): Promise<Config> {
     throw new ConfigError(`Failed to read config at ${path}`, { cause: error });
   }
 
-  let parsed: unknown;
-  try {
-    parsed = parseToml(source);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new ConfigParseError(`Failed to parse TOML at ${path}: ${message}`, { cause: error });
+  const parsed = parseConfigSource(source, path);
+  const schema = (parsed as { schema?: unknown }).schema;
+  if (schema === 1 && shouldAutoMigrate(path, options)) {
+    const result = migrateV1ToV2Source(source);
+    if (result.changed) {
+      await writeMigratedConfig(path, result.source);
+      await appendMigrationLog(path);
+    }
+    return validateConfig(parseConfigSource(result.source, path));
   }
 
   return validateConfig(parsed);

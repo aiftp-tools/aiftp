@@ -597,6 +597,77 @@ describe('cli', () => {
     expect(await readFile(existing, 'utf8')).toBe('<h1>restored</h1>\n');
   });
 
+  it('config migrate --dry-run previews the v1->v2 diff without writing to disk', async () => {
+    const v1Source = [
+      'schema = 1',
+      '',
+      '[profile.production]',
+      'host = "ftp.example.com"',
+      'user = "deploy"',
+      'remote_root = "/public_html"',
+      'local_root = "."',
+      'keychain_service = "aiftp:production"',
+      '',
+    ].join('\n');
+    await writeFile(join(cwd, '.aiftp.toml'), v1Source, 'utf8');
+
+    await parse(['config', 'migrate', '--dry-run']);
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/dry-run/i);
+    expect(out).toMatch(/schema = 1.*->.*schema = 2|schema:\s*1\s*->\s*2/u);
+    expect(out).toMatch(/\[encoding\]/u);
+    expect(out).toMatch(/\[quirks\]/u);
+    // Original file untouched. No .bak written.
+    expect(await readFile(join(cwd, '.aiftp.toml'), 'utf8')).toBe(v1Source);
+    await expect(readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).rejects.toThrow();
+  });
+
+  it('config migrate (no --dry-run) migrates the file and creates the .v1.bak', async () => {
+    const v1Source = [
+      'schema = 1',
+      '',
+      '[profile.production]',
+      'host = "ftp.example.com"',
+      'user = "deploy"',
+      'remote_root = "/public_html"',
+      'local_root = "."',
+      'keychain_service = "aiftp:production"',
+      '',
+    ].join('\n');
+    await writeFile(join(cwd, '.aiftp.toml'), v1Source, 'utf8');
+
+    await parse(['config', 'migrate']);
+
+    const onDisk = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(onDisk).toMatch(/^schema = 2/u);
+    expect(await readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).toBe(v1Source);
+    expect(stdout.join('\n')).toMatch(/migrated/i);
+  });
+
+  it('config migrate reports "already at latest" when the file is already v2', async () => {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.production]',
+        'host = "ftp.example.com"',
+        'user = "deploy"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:production"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    await parse(['config', 'migrate']);
+
+    expect(stdout.join('\n')).toMatch(/already.*latest|schema = 2/i);
+    await expect(readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).rejects.toThrow();
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

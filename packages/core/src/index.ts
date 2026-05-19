@@ -28,15 +28,20 @@ export {
   ConfigError,
   ConfigParseError,
   type ConnectionConfig,
+  type EncodingConfig,
   type ExcludeConfig,
   type HooksConfig,
+  type LoadConfigOptions,
   type ProfileConfig,
+  type QuirksConfig,
   type SafetyConfig,
   ConfigValidationError,
   configSchema,
   loadConfig,
   validateConfig,
 } from './config.js';
+
+export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export { computeDiff, type Diff } from './diff.js';
 

@@ -1,0 +1,23 @@
+schema = 2
+
+[profile.production]
+host = "ftp.example.com"
+port = 21
+protocol = "ftps"
+ftps_mode = "explicit"
+passive_mode = true
+user = "deploy-prod"
+account = "billing-account-7"
+remote_root = "/public_html"
+local_root = "./dist"
+keychain_service = "aiftp:example-production"
+server_kind = "starserver"
+
+[encoding]
+file_name = "shift_jis"
+
+[quirks]
+ignore_pasv_address = true
+use_mlsd = false
+tls_check_hostname = true
+noop_interval_sec = 30
