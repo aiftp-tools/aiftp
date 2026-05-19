@@ -8,6 +8,7 @@ import {
   type DoctorReport,
   type ExportProfile,
   FtpClient,
+  type ProfileBlockFields,
   type PushOptions,
   type PushResult,
   type SnapshotMeta,
@@ -15,6 +16,7 @@ import {
   type StatusResult,
   VERSION,
   type VerifyResult,
+  appendProfileBlock,
   backupKeyService,
   checkAll,
   createDefaultBackupStore,
@@ -23,18 +25,24 @@ import {
   generateKey,
   getPassword,
   hasPassword,
+  isValidProfileName,
   isValidSnapshotId,
   loadConfig,
   loadState,
   migrateV1ToV2Source,
   parseFilezillaXml,
   probeFtps,
+  removeProfileBlock,
+  renameProfileBlock,
   renderFilezillaXml,
+  resolveDefaultProfile,
   runDoctor as runCoreDoctor,
   runPush,
   runStatus,
+  saveDefaultProfile,
   saveState,
   setPassword,
+  setProfileField,
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
@@ -532,30 +540,11 @@ interface RunImportFilezillaOptions {
   keychain: CliKeychain;
 }
 
-/**
- * Remove a `[profile.<name>]` block from a TOML source string by simple
- * text-level scanning. Preserves user comments and unrelated sections. Used
- * by `aiftp import filezilla --overwrite` to drop the prior profile before
- * appending the imported one.
- */
-function removeProfileBlock(source: string, name: string): string {
-  const lines = source.split('\n');
-  const target = `[profile.${name}]`;
-  const out: string[] = [];
-  let skipping = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === target) {
-      skipping = true;
-      continue;
-    }
-    if (skipping && trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      skipping = false;
-    }
-    if (!skipping) out.push(line);
-  }
-  return out.join('\n');
-}
+// v0.4 PR #17: the local `removeProfileBlock` was promoted to
+// `packages/core/src/config-edit.ts` as the canonical implementation so it
+// can be shared with the new profile management commands. The core version
+// is imported above and used by both `runImportFilezilla` (overwrite path)
+// and `aiftp profile remove`.
 
 async function runImportFilezilla(options: RunImportFilezillaOptions): Promise<void> {
   const { cwd, xmlPath, dryRun, overwrite, keychainPrefix, stdout, keychain } = options;
@@ -1080,6 +1069,403 @@ export function createCli(options: CliOptions = {}): Command {
   const profileCmd = program
     .command('profile')
     .description('Manage aiftp profiles (export to/import from other tools)');
+
+  // -------------------------------------------------------------------
+  // profile list / current / use
+  // -------------------------------------------------------------------
+
+  profileCmd
+    .command('list')
+    .description('List configured profiles')
+    .option('--json', 'emit JSON instead of a table')
+    .action(async (cmd: { json?: boolean }) => {
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      const names = Object.keys(config.profile);
+      const defaultName = await resolveDefaultProfile(cwd, { availableProfiles: names });
+      const rows = await Promise.all(
+        names.map(async (name) => {
+          const profile = config.profile[name];
+          if (!profile) return null;
+          const credentialsPresent = await keychain.hasPassword(
+            profile.keychain_service,
+            profile.user,
+          );
+          return {
+            name,
+            host: profile.host,
+            user: profile.user,
+            protocol: profile.protocol,
+            server_kind: profile.server_kind,
+            credentialsPresent,
+            isDefault: name === defaultName,
+          };
+        }),
+      );
+      const profiles = rows.filter((r): r is NonNullable<typeof r> => r !== null);
+
+      if (cmd.json) {
+        stdout(JSON.stringify({ schema: 1, profiles }));
+        return;
+      }
+      stdout(
+        'NAME              HOST                          USER        PROTOCOL  CREDS    DEFAULT',
+      );
+      for (const p of profiles) {
+        const creds = p.credentialsPresent ? 'ok     ' : 'missing';
+        const def = p.isDefault ? '*' : ' ';
+        stdout(
+          `${p.name.padEnd(18)}${p.host.padEnd(30)}${p.user.padEnd(12)}${p.protocol.padEnd(10)}${creds}  ${def}`,
+        );
+      }
+    });
+
+  profileCmd
+    .command('current')
+    .description('Show the resolved default profile')
+    .action(async () => {
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      const names = Object.keys(config.profile);
+      const defaultName = await resolveDefaultProfile(cwd, { availableProfiles: names });
+      if (defaultName === null) {
+        stdout(
+          'no default profile pinned (ambiguous). Use `aiftp profile use <name>` to pick one, or set the AIFTP_PROFILE environment variable.',
+        );
+        return;
+      }
+      stdout(defaultName);
+    });
+
+  profileCmd
+    .command('use')
+    .description('Set the workspace default profile')
+    .argument('<name>')
+    .action(async (name: string) => {
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      if (!config.profile[name]) {
+        throw new Error(`Profile not found: ${name}`);
+      }
+      await saveDefaultProfile(cwd, name);
+      stdout(`default profile set to ${name}`);
+    });
+
+  // -------------------------------------------------------------------
+  // profile add / edit
+  // -------------------------------------------------------------------
+
+  profileCmd
+    .command('add')
+    .description('Add a new profile to the existing .aiftp.toml')
+    .argument('<name>')
+    .action(async (name: string) => {
+      if (!isValidProfileName(name)) {
+        throw new Error(
+          `Invalid profile name: ${JSON.stringify(name)}. Use kebab-case (a-z, 0-9, "-").`,
+        );
+      }
+      const tomlPath = join(cwd, '.aiftp.toml');
+      const config = await loadConfig(tomlPath);
+      if (config.profile[name]) {
+        throw new Error(`Profile already exists: ${name}`);
+      }
+      const raw = await prompt([
+        { type: 'text', name: 'host', message: 'FTP host' },
+        { type: 'number', name: 'port', message: 'FTP port', initial: 21 },
+        {
+          type: 'select',
+          name: 'protocol',
+          message: 'Protocol',
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'FTP', value: 'ftp' },
+          ],
+        },
+        { type: 'text', name: 'user', message: 'FTP user' },
+        { type: 'text', name: 'remoteRoot', message: 'Remote root', initial: '/' },
+        { type: 'text', name: 'localRoot', message: 'Local root', initial: '.' },
+        {
+          type: 'text',
+          name: 'keychainService',
+          message: 'Keychain service',
+          initial: `aiftp:${name}`,
+        },
+        {
+          type: 'select',
+          name: 'serverKind',
+          message: 'Server kind',
+          choices: [
+            { title: 'StarServer', value: 'starserver' },
+            { title: 'Lolipop', value: 'lolipop' },
+            { title: 'Sakura', value: 'sakura' },
+            { title: 'Xserver', value: 'xserver' },
+            { title: 'Generic', value: 'generic' },
+          ],
+        },
+        { type: 'password', name: 'password', message: 'FTP password' },
+      ]);
+      const fields: ProfileBlockFields = {
+        host: requireString(raw.host, 'host'),
+        port: requireNumber(raw.port, 'port'),
+        protocol: requireString(raw.protocol, 'protocol') as 'ftp' | 'ftps',
+        user: requireString(raw.user, 'user'),
+        remote_root: requireString(raw.remoteRoot, 'remoteRoot'),
+        local_root: requireString(raw.localRoot, 'localRoot'),
+        keychain_service: requireString(raw.keychainService, 'keychainService'),
+        server_kind: requireString(
+          raw.serverKind,
+          'serverKind',
+        ) as ProfileBlockFields['server_kind'],
+      };
+      const source = await readFile(tomlPath, 'utf8');
+      const updated = appendProfileBlock(source, name, fields);
+      await writeFile(tomlPath, updated, { encoding: 'utf8', mode: 0o600 });
+      await keychain.setPassword(
+        fields.keychain_service,
+        fields.user,
+        requireString(raw.password, 'password'),
+      );
+      stdout(`added profile ${name}`);
+    });
+
+  profileCmd
+    .command('edit')
+    .description('Edit a single field of an existing profile')
+    .argument('<name>')
+    .action(async (name: string) => {
+      const tomlPath = join(cwd, '.aiftp.toml');
+      const config = await loadConfig(tomlPath);
+      if (!config.profile[name]) {
+        throw new Error(`Profile not found: ${name}`);
+      }
+      const raw = await prompt([
+        {
+          type: 'select',
+          name: 'field',
+          message: 'Which field to edit?',
+          choices: [
+            { title: 'host', value: 'host' },
+            { title: 'port', value: 'port' },
+            { title: 'protocol', value: 'protocol' },
+            { title: 'user', value: 'user' },
+            { title: 'remote_root', value: 'remote_root' },
+            { title: 'local_root', value: 'local_root' },
+            { title: 'keychain_service', value: 'keychain_service' },
+            { title: 'server_kind', value: 'server_kind' },
+          ],
+        },
+        { type: 'text', name: 'value', message: 'New value' },
+      ]);
+      const field = requireString(raw.field, 'field');
+      const value = requireString(raw.value, 'value');
+      const source = await readFile(tomlPath, 'utf8');
+      // String fields go through JSON.stringify for safe quoting; numeric/
+      // boolean field literals are passed through verbatim.
+      const literal = field === 'port' ? value : JSON.stringify(value);
+      const updated = setProfileField(source, name, field, literal);
+      await writeFile(tomlPath, updated, { encoding: 'utf8', mode: 0o600 });
+      stdout(`updated [profile.${name}].${field}`);
+    });
+
+  // -------------------------------------------------------------------
+  // profile rename / duplicate / remove
+  // -------------------------------------------------------------------
+
+  profileCmd
+    .command('rename')
+    .description('Rename a profile (config + Keychain entries)')
+    .argument('<old>')
+    .argument('<new>')
+    .action(async (oldName: string, newName: string) => {
+      if (!isValidProfileName(newName)) {
+        throw new Error(
+          `Invalid profile name: ${JSON.stringify(newName)}. Use kebab-case (a-z, 0-9, "-").`,
+        );
+      }
+      const tomlPath = join(cwd, '.aiftp.toml');
+      const config = await loadConfig(tomlPath);
+      const profile = config.profile[oldName];
+      if (!profile) {
+        throw new Error(`Profile not found: ${oldName}`);
+      }
+      if (config.profile[newName]) {
+        throw new Error(`Profile already exists: ${newName}`);
+      }
+      // Keychain follow: copy password + backup-key to a new service name
+      // (we use the same suffix scheme: aiftp:<profile>), then update TOML,
+      // then delete the old entries. If TOML write fails between copy and
+      // delete, the new entries are removed so the operator is not left
+      // with stale credentials they cannot enumerate from the config.
+      const oldService = profile.keychain_service;
+      const newService = oldService.includes(oldName)
+        ? oldService.replace(oldName, newName)
+        : `${oldService}:${newName}`;
+      const backupOldService = `${oldService}:backup-key`;
+      const backupNewService = `${newService}:backup-key`;
+
+      const pw = await keychain.getPassword(oldService, profile.user).catch(() => null);
+      const backupKey = (await keychain.hasPassword(backupOldService, oldName))
+        ? await keychain.getPassword(backupOldService, oldName).catch(() => null)
+        : null;
+
+      if (pw !== null) await keychain.setPassword(newService, profile.user, pw);
+      if (backupKey !== null) await keychain.setPassword(backupNewService, newName, backupKey);
+
+      const source = await readFile(tomlPath, 'utf8');
+      let updated = renameProfileBlock(source, oldName, newName);
+      // Also rewrite keychain_service to point at the new name.
+      updated = setProfileField(updated, newName, 'keychain_service', JSON.stringify(newService));
+      await writeFile(tomlPath, updated, { encoding: 'utf8', mode: 0o600 });
+
+      // Best-effort cleanup of the old Keychain entries.
+      await keychain.deletePassword(oldService, profile.user).catch(() => undefined);
+      if (backupKey !== null) {
+        await keychain.deletePassword(backupOldService, oldName).catch(() => undefined);
+      }
+
+      stdout(`renamed profile ${oldName} -> ${newName}`);
+    });
+
+  profileCmd
+    .command('duplicate')
+    .description('Clone a profile to a new name (credentials are NOT copied by default)')
+    .argument('<src>')
+    .argument('<new>')
+    .option('--copy-credentials', 'also copy the password from Keychain to the new profile')
+    .action(async (src: string, newName: string, cmd: { copyCredentials?: boolean }) => {
+      if (!isValidProfileName(newName)) {
+        throw new Error(
+          `Invalid profile name: ${JSON.stringify(newName)}. Use kebab-case (a-z, 0-9, "-").`,
+        );
+      }
+      const tomlPath = join(cwd, '.aiftp.toml');
+      const config = await loadConfig(tomlPath);
+      const srcProfile = config.profile[src];
+      if (!srcProfile) {
+        throw new Error(`Profile not found: ${src}`);
+      }
+      if (config.profile[newName]) {
+        throw new Error(`Profile already exists: ${newName}`);
+      }
+      const newService = srcProfile.keychain_service.includes(src)
+        ? srcProfile.keychain_service.replace(src, newName)
+        : `${srcProfile.keychain_service}:${newName}`;
+      const fields: ProfileBlockFields = {
+        host: srcProfile.host,
+        port: srcProfile.port,
+        protocol: srcProfile.protocol,
+        user: srcProfile.user,
+        remote_root: srcProfile.remote_root,
+        local_root: srcProfile.local_root,
+        keychain_service: newService,
+        server_kind: srcProfile.server_kind,
+      };
+      if (srcProfile.account) fields.account = srcProfile.account;
+      if (srcProfile.ftps_mode) fields.ftps_mode = srcProfile.ftps_mode;
+      if (srcProfile.passive_mode !== undefined) fields.passive_mode = srcProfile.passive_mode;
+      const source = await readFile(tomlPath, 'utf8');
+      const updated = appendProfileBlock(source, newName, fields);
+      await writeFile(tomlPath, updated, { encoding: 'utf8', mode: 0o600 });
+
+      if (cmd.copyCredentials) {
+        const pw = await keychain
+          .getPassword(srcProfile.keychain_service, srcProfile.user)
+          .catch(() => null);
+        if (pw !== null) {
+          await keychain.setPassword(newService, srcProfile.user, pw);
+          stdout(`duplicated profile ${src} -> ${newName} (credentials copied)`);
+          return;
+        }
+      }
+      stdout(
+        `duplicated profile ${src} -> ${newName}. Run \`aiftp auth set --profile ${newName}\` to store its password.`,
+      );
+    });
+
+  profileCmd
+    .command('remove')
+    .description('Remove a profile (config + Keychain by default)')
+    .argument('<name>')
+    .option('--yes', 'skip the interactive confirmation prompt')
+    .option('--keep-credentials', 'preserve Keychain entries (only remove the config block)')
+    .action(async (name: string, cmd: { yes?: boolean; keepCredentials?: boolean }) => {
+      const tomlPath = join(cwd, '.aiftp.toml');
+      const config = await loadConfig(tomlPath);
+      const profile = config.profile[name];
+      if (!profile) {
+        throw new Error(`Profile not found: ${name}`);
+      }
+      let keepCredentials = cmd.keepCredentials === true;
+      if (!cmd.yes) {
+        const answer = await prompt([
+          {
+            type: 'text',
+            name: 'confirmName',
+            message: `Type "${name}" to confirm removal`,
+          },
+          {
+            type: 'select',
+            name: 'action',
+            message: 'Also delete Keychain entries?',
+            choices: [
+              { title: 'Delete config + Keychain (full removal)', value: 'delete' },
+              { title: 'Delete config only, keep Keychain', value: 'keep' },
+              { title: 'Abort', value: 'abort' },
+            ],
+          },
+        ]);
+        const confirmName = typeof answer.confirmName === 'string' ? answer.confirmName : '';
+        const action = typeof answer.action === 'string' ? answer.action : 'abort';
+        if (confirmName !== name || action === 'abort') {
+          throw new Error('aborted: profile name did not match or action was cancelled');
+        }
+        if (action === 'keep') {
+          keepCredentials = true;
+        }
+      }
+
+      const source = await readFile(tomlPath, 'utf8');
+      const updated = removeProfileBlock(source, name);
+      await writeFile(tomlPath, updated, { encoding: 'utf8', mode: 0o600 });
+
+      if (!keepCredentials) {
+        await keychain
+          .deletePassword(profile.keychain_service, profile.user)
+          .catch(() => undefined);
+        const backupService = `${profile.keychain_service}:backup-key`;
+        if (await keychain.hasPassword(backupService, name).catch(() => false)) {
+          await keychain.deletePassword(backupService, name).catch(() => undefined);
+        }
+      }
+      stdout(`removed profile ${name}`);
+    });
+
+  // -------------------------------------------------------------------
+  // profile test (doctor subset)
+  // -------------------------------------------------------------------
+
+  profileCmd
+    .command('test')
+    .description('Run a connection-only subset of `aiftp doctor` against a profile')
+    .option('-p, --profile <name>', 'profile name', 'production')
+    .option('--json', 'emit JSON instead of a table')
+    .action(async (cmd: { profile: string; json?: boolean }) => {
+      const report = runtime.runDoctor
+        ? await runtime.runDoctor({ cwd, profile: cmd.profile })
+        : await defaultRunDoctor({ cwd, profile: cmd.profile });
+      const subset = report.results.filter((r) =>
+        ['keychain', 'dns', 'tcp', 'ftps-handshake', 'ftps-cert', 'remote-root'].includes(r.id),
+      );
+      if (cmd.json) {
+        stdout(JSON.stringify({ ...report, results: subset }));
+        return;
+      }
+      for (const r of subset) {
+        stdout(`  ${r.id}: ${r.status} -- ${r.message}`);
+      }
+      if (!report.ok) {
+        throw new Error(`profile test: failed (fail=${report.summary.fail})`);
+      }
+    });
+
   profileCmd
     .command('export')
     .description("Export aiftp profiles to another tool's format")

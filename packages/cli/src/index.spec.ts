@@ -1035,6 +1035,260 @@ describe('cli', () => {
     );
   });
 
+  // ---------------------------------------------------------------------
+  // v0.4 PR #17: aiftp profile <subcommand>
+  // ---------------------------------------------------------------------
+
+  async function writeMultiProfileConfig(): Promise<void> {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.production]',
+        'host = "ftp.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "deploy"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:production"',
+        'server_kind = "starserver"',
+        '',
+        '[profile.staging]',
+        'host = "stg.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "stage"',
+        'remote_root = "/stage"',
+        'local_root = "."',
+        'keychain_service = "aiftp:staging"',
+        'server_kind = "generic"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  }
+
+  it('profile list prints every configured profile (default text format)', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'list'], {
+      keychain: keychain(new Set(['aiftp:production:deploy', 'aiftp:staging:stage'])),
+    });
+    const out = stdout.join('\n');
+    expect(out).toContain('production');
+    expect(out).toContain('staging');
+    expect(out).toContain('ftp.example.com');
+    expect(out).toContain('stg.example.com');
+  });
+
+  it('profile list --json emits a structured payload with credentialsPresent and isDefault', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'list', '--json'], {
+      keychain: keychain(new Set(['aiftp:production:deploy'])),
+    });
+    const payload = JSON.parse(stdout.join('\n'));
+    expect(Array.isArray(payload.profiles)).toBe(true);
+    expect(payload.profiles).toHaveLength(2);
+    const prod = payload.profiles.find((p: { name: string }) => p.name === 'production');
+    const stg = payload.profiles.find((p: { name: string }) => p.name === 'staging');
+    expect(prod).toMatchObject({
+      name: 'production',
+      host: 'ftp.example.com',
+      credentialsPresent: true,
+    });
+    expect(stg).toMatchObject({
+      name: 'staging',
+      credentialsPresent: false,
+    });
+  });
+
+  it('profile current reports null when no default is pinned and multiple profiles exist', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'current']);
+    expect(stdout.join('\n')).toMatch(/no default profile pinned|ambiguous/i);
+  });
+
+  it('profile use <name> persists the default and profile current reflects it', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'use', 'staging']);
+    expect(stdout.join('\n')).toMatch(/staging/);
+
+    stdout.length = 0;
+    await parse(['profile', 'current']);
+    expect(stdout.join('\n')).toContain('staging');
+  });
+
+  it('profile use rejects a name that is not in the config', async () => {
+    await writeMultiProfileConfig();
+    await expect(parse(['profile', 'use', 'does-not-exist'])).rejects.toThrow(
+      /not found|not defined/i,
+    );
+  });
+
+  it('profile add <name> appends a new [profile.NAME] block and stores the password in Keychain', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'add', 'demo'], {
+      prompt: prompt({
+        host: 'demo.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'demo',
+        remoteRoot: '/demo',
+        localRoot: '.',
+        keychainService: 'aiftp:demo',
+        serverKind: 'generic',
+        password: 'demo-pw',
+      }),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[profile.demo]');
+    expect(toml).toContain('host = "demo.example.com"');
+    expect(toml).not.toContain('demo-pw');
+    expect(stored).toContainEqual({
+      service: 'aiftp:demo',
+      account: 'demo',
+      password: 'demo-pw',
+    });
+  });
+
+  it('profile add rejects invalid profile names', async () => {
+    await writeMultiProfileConfig();
+    await expect(parse(['profile', 'add', 'Bad Name!'])).rejects.toThrow(/invalid profile name/i);
+  });
+
+  it('profile add rejects duplicate names', async () => {
+    await writeMultiProfileConfig();
+    await expect(parse(['profile', 'add', 'production'])).rejects.toThrow(/already exists/i);
+  });
+
+  it('profile edit <name> replaces a single field via interactive prompt', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'edit', 'production'], {
+      prompt: prompt({ field: 'host', value: 'new.example.com' }),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('host = "new.example.com"');
+    expect(toml).not.toContain('host = "ftp.example.com"');
+    // Other fields preserved
+    expect(toml).toContain('user = "deploy"');
+    expect(toml).toContain('keychain_service = "aiftp:production"');
+  });
+
+  it('profile rename <old> <new> moves Keychain entries and updates the TOML', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'rename', 'staging', 'staging-v2'], {
+      keychain: keychain(new Set(['aiftp:staging:stage', 'aiftp:staging:backup-key:staging'])),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[profile.staging-v2]');
+    expect(toml).not.toContain('[profile.staging]');
+    // Keychain follow: the new service was written, the old one was deleted.
+    expect(stored.find((s) => s.service.includes('staging-v2'))).toBeDefined();
+    expect(deleted.find((d) => d.service === 'aiftp:staging')).toBeDefined();
+  });
+
+  it('profile rename rejects an invalid destination name', async () => {
+    await writeMultiProfileConfig();
+    await expect(parse(['profile', 'rename', 'staging', 'BAD NAME'])).rejects.toThrow(
+      /invalid profile name/i,
+    );
+  });
+
+  it('profile rename rejects when destination already exists', async () => {
+    await writeMultiProfileConfig();
+    await expect(parse(['profile', 'rename', 'staging', 'production'])).rejects.toThrow(
+      /already exists/i,
+    );
+  });
+
+  it('profile duplicate <src> <new> clones the config block but DOES NOT copy credentials by default', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'duplicate', 'production', 'production-clone'], {
+      keychain: keychain(new Set(['aiftp:production:deploy'])),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[profile.production-clone]');
+    expect(toml).toContain('host = "ftp.example.com"');
+    // No Keychain write: stored should not contain a production-clone entry.
+    expect(stored.find((s) => s.service.includes('production-clone'))).toBeUndefined();
+    expect(stdout.join('\n')).toMatch(/auth set.*production-clone/);
+  });
+
+  it('profile duplicate --copy-credentials copies Keychain entries to the new profile', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'duplicate', 'production', 'production-clone', '--copy-credentials'], {
+      keychain: keychain(new Set(['aiftp:production:deploy'])),
+    });
+    expect(stored.find((s) => s.service.includes('production-clone'))).toBeDefined();
+  });
+
+  it('profile remove <name> with --yes deletes the block AND Keychain entries by default', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'remove', 'staging', '--yes'], {
+      keychain: keychain(new Set(['aiftp:staging:stage', 'aiftp:staging:backup-key:staging'])),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).not.toContain('[profile.staging]');
+    expect(deleted.find((d) => d.service === 'aiftp:staging')).toBeDefined();
+  });
+
+  it('profile remove --yes --keep-credentials removes the block but preserves Keychain entries', async () => {
+    await writeMultiProfileConfig();
+    await parse(['profile', 'remove', 'staging', '--yes', '--keep-credentials'], {
+      keychain: keychain(new Set(['aiftp:staging:stage'])),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).not.toContain('[profile.staging]');
+    expect(deleted.find((d) => d.service === 'aiftp:staging')).toBeUndefined();
+  });
+
+  it('profile remove without --yes requires interactive confirmation that matches the profile name', async () => {
+    await writeMultiProfileConfig();
+    // Wrong confirm -> abort
+    await expect(
+      parse(['profile', 'remove', 'staging'], {
+        prompt: prompt({ confirmName: 'wrong-name', action: 'delete' }),
+      }),
+    ).rejects.toThrow(/abort|confirmation|cancel/i);
+
+    // Correct confirm -> proceed
+    await parse(['profile', 'remove', 'staging'], {
+      prompt: prompt({ confirmName: 'staging', action: 'delete' }),
+      keychain: keychain(new Set(['aiftp:staging:stage'])),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).not.toContain('[profile.staging]');
+  });
+
+  it('profile test runs the doctor connection-scope subset against a profile', async () => {
+    await writeMultiProfileConfig();
+    const runtime: CliRuntime = {
+      runDoctor: async (context) => ({
+        ok: true,
+        results: [
+          {
+            id: 'keychain',
+            title: 'Keychain',
+            status: 'pass',
+            message: 'Keychain entry exists.',
+          },
+          {
+            id: 'dns',
+            title: 'DNS',
+            status: 'pass',
+            message: 'DNS resolution succeeded.',
+          },
+        ],
+        summary: { pass: 2, warn: 0, fail: 0, skip: 0 },
+        context,
+      }),
+    };
+    await parse(['profile', 'test', '--profile', 'production'], { runtime });
+    expect(stdout.join('\n')).toMatch(/keychain.*pass/);
+    expect(stdout.join('\n')).toMatch(/dns.*pass/);
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

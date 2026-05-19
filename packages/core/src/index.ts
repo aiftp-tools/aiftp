@@ -62,6 +62,26 @@ export {
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export {
+  appendProfileBlock,
+  extractProfileBlock,
+  findProfileBlockRange,
+  isValidProfileName,
+  type ProfileBlockFields,
+  type ProfileBlockRange,
+  removeProfileBlock,
+  renameProfileBlock,
+  setProfileField,
+} from './config-edit.js';
+
+export {
+  DEFAULT_PROFILE_STATE_FILE,
+  loadDefaultProfile,
+  resolveDefaultProfile,
+  type ResolveDefaultProfileOptions,
+  saveDefaultProfile,
+} from './default-profile.js';
+
+export {
   type ExportProfile,
   type FilezillaEncoding,
   type FilezillaImportResult,
