@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parseFilezillaXml } from './filezilla.js';
+import { parseFilezillaXml, renderFilezillaXml } from './filezilla.js';
+import type { ExportProfile } from './filezilla.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (name: string): string =>
@@ -101,6 +102,86 @@ describe('parseFilezillaXml: password edge cases', () => {
     const xml = await loadFixture('ask-login-no-password.xml');
     const [profile] = parseFilezillaXml(xml).profiles;
     expect(profile?.password.kind).toBe('absent');
+  });
+});
+
+describe('renderFilezillaXml: aiftp -> FileZilla 3 XML', () => {
+  const base: ExportProfile = {
+    name: 'example-production',
+    host: 'ftp.example.com',
+    port: 21,
+    protocol: 'ftps_explicit',
+    user: 'deploy',
+    remote_root: '/public_html',
+    encoding: 'auto',
+  };
+
+  it('produces a well-formed FileZilla3 document with the expected root elements', () => {
+    const xml = renderFilezillaXml([base]);
+    expect(xml).toMatch(/^<\?xml version="1\.0"/);
+    expect(xml).toContain('<FileZilla3');
+    expect(xml).toContain('<Servers>');
+    expect(xml).toContain('</FileZilla3>');
+  });
+
+  it('maps aiftp protocols back to FileZilla numeric codes (4/0/3) and omits SFTP-only fields', () => {
+    const xml = renderFilezillaXml([
+      { ...base, protocol: 'ftp' },
+      { ...base, name: 'tls', protocol: 'ftps_explicit' },
+      { ...base, name: 'imp', protocol: 'ftps_implicit', port: 990 },
+    ]);
+    const servers = xml.split('<Server>').slice(1);
+    expect(servers[0]).toContain('<Protocol>0</Protocol>');
+    expect(servers[1]).toContain('<Protocol>4</Protocol>');
+    expect(servers[2]).toContain('<Protocol>3</Protocol>');
+  });
+
+  it('re-encodes remote_root to the FileZilla token format ("1 0 11 public_html")', () => {
+    const xml = renderFilezillaXml([{ ...base, remote_root: '/public_html' }]);
+    expect(xml).toContain('<RemoteDir>1 0 11 public_html</RemoteDir>');
+  });
+
+  it('re-encodes nested remote_root segments preserving each length prefix', () => {
+    const xml = renderFilezillaXml([{ ...base, remote_root: '/public_html/demo' }]);
+    expect(xml).toContain('<RemoteDir>1 0 11 public_html 4 demo</RemoteDir>');
+  });
+
+  it('emits an empty <Pass></Pass> by default (no Keychain leak via export)', () => {
+    const xml = renderFilezillaXml([base]);
+    expect(xml).toMatch(/<Pass>\s*<\/Pass>|<Pass\/>/);
+    expect(xml).not.toContain('Pass>secret');
+  });
+
+  it('includes Pass only when the caller explicitly passes includePassword=true', () => {
+    const xml = renderFilezillaXml([{ ...base, password: 'topsecret' }], {
+      includePassword: true,
+    });
+    expect(xml).toContain('<Pass encoding="base64">');
+    // base64 of "topsecret"
+    expect(xml).toContain('dG9wc2VjcmV0');
+  });
+
+  it('refuses to embed a password when includePassword is not set, even if one is provided', () => {
+    const xml = renderFilezillaXml([{ ...base, password: 'topsecret' }]);
+    expect(xml).not.toContain('topsecret');
+    expect(xml).not.toContain('dG9wc2VjcmV0');
+  });
+
+  it('encodes Shift_JIS encoding as Custom + CustomEncoding fields', () => {
+    const xml = renderFilezillaXml([{ ...base, encoding: 'shift_jis' }]);
+    expect(xml).toContain('<EncodingType>Custom</EncodingType>');
+    expect(xml).toContain('<CustomEncoding>Shift_JIS</CustomEncoding>');
+  });
+
+  it('round-trips through parse(render(profile)) preserving host / port / user / protocol', () => {
+    const xml = renderFilezillaXml([base]);
+    const { profiles } = parseFilezillaXml(xml);
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]?.host).toBe('ftp.example.com');
+    expect(profiles[0]?.port).toBe(21);
+    expect(profiles[0]?.user).toBe('deploy');
+    expect(profiles[0]?.protocol).toBe('ftps_explicit');
+    expect(profiles[0]?.remote_root).toBe('/public_html');
   });
 });
 

@@ -299,6 +299,142 @@ function walkServers(
   }
 }
 
+/** Minimal data needed to round-trip an aiftp profile into FileZilla XML. */
+export interface ExportProfile {
+  /** Profile name -- becomes both the FileZilla <Name> and the inline label. */
+  name: string;
+  host: string;
+  port: number;
+  protocol: FilezillaProtocol | 'ftp' | 'ftps_explicit' | 'ftps_implicit';
+  user: string;
+  account?: string;
+  passive_mode?: boolean;
+  encoding?: FilezillaEncoding;
+  timezone_offset_min?: number;
+  remote_root: string;
+  /** Only used when `RenderOptions.includePassword === true`. */
+  password?: string;
+}
+
+export interface RenderOptions {
+  /**
+   * When true, embed each profile's `password` (base64-encoded) into the
+   * resulting XML's `<Pass>` element. Off by default -- exporting credentials
+   * is explicit and noisy by design.
+   */
+  includePassword?: boolean;
+}
+
+function protocolToCode(protocol: ExportProfile['protocol']): string {
+  switch (protocol) {
+    case 'ftp':
+      return '0';
+    case 'sftp':
+      return '1';
+    case 'ftps_implicit':
+      return '3';
+    case 'ftps_explicit':
+      return '4';
+  }
+}
+
+function encodeRemoteDir(remoteRoot: string): string {
+  // Reverse of `decodeRemoteDir`. We emit Unix-style ("1 0") because aiftp
+  // does not preserve drive letters.
+  const segments = remoteRoot
+    .replace(/^\/+/, '')
+    .split('/')
+    .filter((segment) => segment.length > 0);
+  if (segments.length === 0) return '1 0';
+  const encoded = segments.map((segment) => `${segment.length} ${segment}`).join(' ');
+  return `1 0 ${encoded}`;
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;');
+}
+
+function encodingToFilezilla(encoding: FilezillaEncoding | undefined): {
+  encodingType: string;
+  customEncoding?: string;
+} {
+  switch (encoding) {
+    case 'utf-8':
+      return { encodingType: 'UTF-8' };
+    case 'shift_jis':
+      return { encodingType: 'Custom', customEncoding: 'Shift_JIS' };
+    case 'euc-jp':
+      return { encodingType: 'Custom', customEncoding: 'EUC-JP' };
+    default:
+      return { encodingType: 'Auto' };
+  }
+}
+
+function renderServer(profile: ExportProfile, includePassword: boolean): string {
+  const code = protocolToCode(profile.protocol);
+  const pasv =
+    profile.passive_mode === true
+      ? 'MODE_PASSIVE'
+      : profile.passive_mode === false
+        ? 'MODE_ACTIVE'
+        : 'MODE_DEFAULT';
+  const { encodingType, customEncoding } = encodingToFilezilla(profile.encoding);
+
+  const passElement =
+    includePassword && profile.password
+      ? `<Pass encoding="base64">${xmlEscape(Buffer.from(profile.password, 'utf8').toString('base64'))}</Pass>`
+      : '<Pass></Pass>';
+
+  const lines: string[] = [
+    '    <Server>',
+    `      <Host>${xmlEscape(profile.host)}</Host>`,
+    `      <Port>${profile.port}</Port>`,
+    `      <Protocol>${code}</Protocol>`,
+    '      <Type>0</Type>',
+    `      <User>${xmlEscape(profile.user)}</User>`,
+    `      ${passElement}`,
+    `      <Account>${profile.account ? xmlEscape(profile.account) : ''}</Account>`,
+    `      <Logontype>${profile.user ? '1' : '0'}</Logontype>`,
+    `      <TimezoneOffset>${profile.timezone_offset_min ?? 0}</TimezoneOffset>`,
+    `      <PasvMode>${pasv}</PasvMode>`,
+    '      <MaximumMultipleConnections>2</MaximumMultipleConnections>',
+    `      <EncodingType>${encodingType}</EncodingType>`,
+  ];
+  if (customEncoding) {
+    lines.push(`      <CustomEncoding>${xmlEscape(customEncoding)}</CustomEncoding>`);
+  }
+  lines.push('      <BypassProxy>0</BypassProxy>');
+  lines.push(`      <Name>${xmlEscape(profile.name)}</Name>`);
+  lines.push('      <LocalDir></LocalDir>');
+  lines.push(`      <RemoteDir>${encodeRemoteDir(profile.remote_root)}</RemoteDir>`);
+  lines.push('      <SyncBrowsing>0</SyncBrowsing>');
+  lines.push(`      ${xmlEscape(profile.name)}`);
+  lines.push('    </Server>');
+  return lines.join('\n');
+}
+
+/**
+ * Render an array of aiftp profiles as a FileZilla 3 sitemanager XML
+ * document. Round-trips through `parseFilezillaXml` for the fields that
+ * actually matter (host / port / protocol / user / remote_root / encoding).
+ * Passwords are *never* embedded unless the caller explicitly opts in via
+ * `options.includePassword = true`; the default emits empty `<Pass>` tags.
+ */
+export function renderFilezillaXml(
+  profiles: readonly ExportProfile[],
+  options: RenderOptions = {},
+): string {
+  const includePassword = options.includePassword === true;
+  const head = '<?xml version="1.0" encoding="UTF-8"?>';
+  const root = '<FileZilla3 version="3.66.0" platform="aiftp-export">';
+  const inner = profiles.map((p) => renderServer(p, includePassword)).join('\n');
+  return `${head}\n${root}\n  <Servers>\n${inner}\n  </Servers>\n</FileZilla3>\n`;
+}
+
 export function parseFilezillaXml(xml: string): FilezillaImportResult {
   if (typeof xml !== 'string' || xml.trim().length === 0) {
     throw new Error('Failed to parse FileZilla XML: empty input');

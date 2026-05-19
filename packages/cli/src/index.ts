@@ -6,6 +6,7 @@ import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
   type DoctorReport,
+  type ExportProfile,
   FtpClient,
   type PushOptions,
   type PushResult,
@@ -27,6 +28,7 @@ import {
   loadState,
   migrateV1ToV2Source,
   parseFilezillaXml,
+  renderFilezillaXml,
   runDoctor as runCoreDoctor,
   runPush,
   runStatus,
@@ -991,6 +993,84 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error(`aiftp doctor: diagnostic checks failed (fail=${report.summary.fail})`);
       }
     });
+
+  const profileCmd = program
+    .command('profile')
+    .description('Manage aiftp profiles (export to/import from other tools)');
+  profileCmd
+    .command('export')
+    .description("Export aiftp profiles to another tool's format")
+    .argument('<format>', 'export format (currently: filezilla)')
+    .requiredOption('-o, --output <path>', 'output file path')
+    .option('-p, --profile <name>', 'restrict export to a single profile')
+    .option(
+      '--include-password',
+      'embed credentials from Keychain in the output (default: empty Pass)',
+    )
+    .action(
+      async (
+        format: string,
+        cmd: { output: string; profile?: string; includePassword?: boolean },
+      ) => {
+        if (format !== 'filezilla') {
+          throw new Error(`Unsupported export format: ${format} (only 'filezilla' is supported)`);
+        }
+        const outputPath = restrictToProject(cwd, cmd.output);
+        const config = await loadConfig(join(cwd, '.aiftp.toml'));
+        const entries = Object.entries(config.profile).filter(
+          ([name]) => cmd.profile === undefined || name === cmd.profile,
+        );
+        if (entries.length === 0) {
+          throw new Error(
+            cmd.profile ? `Profile not found: ${cmd.profile}` : 'No profiles found in .aiftp.toml',
+          );
+        }
+
+        const exportProfiles: ExportProfile[] = [];
+        for (const [name, profile] of entries) {
+          if (!profile) continue;
+          const protocol = profile.ftps_mode
+            ? profile.ftps_mode === 'explicit'
+              ? 'ftps_explicit'
+              : 'ftps_implicit'
+            : profile.protocol === 'ftps'
+              ? 'ftps_explicit'
+              : 'ftp';
+          let password: string | undefined;
+          if (cmd.includePassword) {
+            try {
+              password = await keychain.getPassword(profile.keychain_service, profile.user);
+            } catch {
+              stdout(`  warning: could not fetch password for ${name} from Keychain (no entry?)`);
+            }
+          }
+          exportProfiles.push({
+            name,
+            host: profile.host,
+            port: profile.port,
+            protocol,
+            user: profile.user,
+            account: profile.account,
+            passive_mode: profile.passive_mode,
+            encoding: config.encoding?.file_name,
+            remote_root: profile.remote_root,
+            password,
+          });
+        }
+
+        if (cmd.includePassword) {
+          stdout(
+            'warning: --include-password embeds sensitive credentials in the XML; treat the output file as a secret.',
+          );
+        }
+        const xml = renderFilezillaXml(exportProfiles, {
+          includePassword: cmd.includePassword === true,
+        });
+        await mkdir(dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, xml, { encoding: 'utf8', mode: 0o600 });
+        stdout(`wrote ${exportProfiles.length} profile(s) to ${cmd.output}`);
+      },
+    );
 
   const importCmd = program.command('import').description('Import settings from other tools');
   importCmd

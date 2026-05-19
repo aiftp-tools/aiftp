@@ -915,6 +915,81 @@ describe('cli', () => {
     expect(stored.find((s) => s.account === 'locked')).toBeUndefined();
   });
 
+  it('profile export filezilla writes FileZilla XML covering all configured profiles by default', async () => {
+    await writeConfig();
+    const outPath = join(cwd, 'exported.xml');
+
+    await parse(['profile', 'export', 'filezilla', '-o', outPath]);
+
+    const xml = await readFile(outPath, 'utf8');
+    expect(xml).toContain('<FileZilla3');
+    expect(xml).toContain('<Host>ftp.example.com</Host>');
+    expect(xml).toContain('<User>deploy-user</User>');
+    expect(xml).toContain('<Name>production</Name>');
+    // Default: no password leakage.
+    expect(xml).not.toContain('Pass>password');
+    expect(stdout.join('\n')).toMatch(/wrote.*exported\.xml|exported 1 profile/);
+  });
+
+  it('profile export filezilla --profile <name> restricts the export to one profile', async () => {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 1',
+        '',
+        '[profile.production]',
+        'host = "ftp.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "deploy-user"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:production"',
+        'server_kind = "starserver"',
+        '',
+        '[profile.staging]',
+        'host = "ftp.staging.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "stage-user"',
+        'remote_root = "/staging"',
+        'local_root = "."',
+        'keychain_service = "aiftp:staging"',
+        'server_kind = "generic"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const outPath = join(cwd, 'one.xml');
+
+    await parse(['profile', 'export', 'filezilla', '--profile', 'staging', '-o', outPath]);
+
+    const xml = await readFile(outPath, 'utf8');
+    expect(xml).toContain('<Host>ftp.staging.example.com</Host>');
+    expect(xml).not.toContain('ftp.example.com');
+  });
+
+  it('profile export filezilla --include-password fetches credentials from Keychain', async () => {
+    await writeConfig();
+    const outPath = join(cwd, 'with-pass.xml');
+    const credentials = new Set(['aiftp:production:deploy-user']);
+
+    await parse(['profile', 'export', 'filezilla', '-o', outPath, '--include-password'], {
+      keychain: keychain(credentials),
+    });
+
+    const xml = await readFile(outPath, 'utf8');
+    expect(xml).toMatch(/<Pass encoding="base64">[A-Za-z0-9+/=]+<\/Pass>/);
+    expect(stdout.join('\n')).toMatch(/include-password|sensitive/i);
+  });
+
+  it('profile export filezilla refuses to write outside the project root', async () => {
+    await writeConfig();
+    await expect(parse(['profile', 'export', 'filezilla', '-o', '../escape.xml'])).rejects.toThrow(
+      /outside.*project root|--output/i,
+    );
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

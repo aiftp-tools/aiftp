@@ -54,12 +54,15 @@ export {
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export {
+  type ExportProfile,
   type FilezillaEncoding,
   type FilezillaImportResult,
   type FilezillaPasswordStatus,
   type FilezillaProtocol,
   type ImportedProfile,
   parseFilezillaXml,
+  type RenderOptions,
+  renderFilezillaXml,
 } from './importers/filezilla.js';
 
 export { computeDiff, type Diff } from './diff.js';
