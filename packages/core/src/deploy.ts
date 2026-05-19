@@ -219,19 +219,23 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
     const uploaded: UploadedFileResult[] = [];
     const verifyAfterUpload = options.safety?.verifyAfterUpload ?? 'size';
     const createdDirs = new Set<string>();
-    const normalizedRemoteRoot = options.remoteRoot ? options.remoteRoot.replace(/\/+$/u, '') : '';
-
     for (const path of planned) {
       const absoluteLocalPath = localPath(options.localRoot, path);
       const absoluteRemotePath = remotePath(options.remoteRoot, path);
 
       if (options.uploader.mkdir) {
+        // v0.2.5 (was: also skipped when parentDir === normalizedRemoteRoot,
+        // which caused the very first push to a custom `remote_root` to fail
+        // because nothing ever created `remote_root` itself on the server).
+        // FtpClient.mkdir uses basic-ftp's ensureDir (mkdir -p semantics) so
+        // calling it on an already-existing path is a cheap cd, not a real
+        // MKD. The createdDirs Set still dedup's repeated calls within one
+        // push, so removing the skip costs at most one cd per push.
         const parentDir = posix.dirname(absoluteRemotePath);
         if (
           parentDir !== '.' &&
           parentDir !== '/' &&
           parentDir !== '' &&
-          parentDir !== normalizedRemoteRoot &&
           !createdDirs.has(parentDir)
         ) {
           await options.uploader.mkdir(parentDir);

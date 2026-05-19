@@ -364,14 +364,50 @@ describe('deploy engine', () => {
       uploader,
     });
 
-    expect(mkdirCalls).toEqual(['/public_html/assets/css', '/public_html/assets/js']);
+    // v0.2.5: the configured remoteRoot itself is no longer skipped --
+    // mkdir is called for /public_html so first-time pushes to a fresh
+    // remote_root succeed. basic-ftp's ensureDir treats already-existing
+    // paths as a no-op (cd succeeds, no MKD sent) so this is cheap.
+    expect(mkdirCalls).toEqual([
+      '/public_html/assets/css',
+      '/public_html/assets/js',
+      '/public_html',
+    ]);
     expect(events).toEqual([
       'mkdir:/public_html/assets/css',
       'upload:/public_html/assets/css/main.css',
       'mkdir:/public_html/assets/js',
       'upload:/public_html/assets/js/app.js',
+      'mkdir:/public_html',
       'upload:/public_html/index.html',
     ]);
+  });
+
+  it('calls mkdir on the configured remoteRoot itself so first-time pushes auto-create it', async () => {
+    await writeLocal('index.html', '<h1>fresh</h1>');
+    const mkdirCalls: string[] = [];
+    const backupStore = createBackupStore();
+    const uploader: DeployUploader = {
+      mkdir: async (remoteDir) => {
+        mkdirCalls.push(remoteDir);
+      },
+      upload: async (localPath, remotePath) => {
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+    };
+
+    await runPush({
+      localRoot,
+      remoteRoot: '/aiftp-test',
+      state: { schema: 1, files: {} },
+      excluder: createExcluder(),
+      backupStore,
+      uploader,
+      safety: { verifyAfterUpload: 'off' },
+    });
+
+    expect(mkdirCalls).toEqual(['/aiftp-test']);
   });
 
   it('skips mkdir when uploader does not implement it (backward compat)', async () => {

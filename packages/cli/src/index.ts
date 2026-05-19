@@ -1185,6 +1185,36 @@ export function createCli(options: CliOptions = {}): Command {
     );
 
   program
+    .command('ls')
+    .description('List a remote FTP directory (read-only diagnostic for exploring the server)')
+    .argument('[remote-path]', 'remote path to list', '/')
+    .option('-p, --profile <name>', 'profile name', 'production')
+    .option('--long', 'include file size, type, and modified time')
+    .action(async (remotePath: string, cmd: { profile: string; long?: boolean }) => {
+      const client = await createDefaultFtpClient(cwd, cmd.profile, keychain);
+      try {
+        const entries = await client.list(remotePath);
+        if (entries.length === 0) {
+          stdout(`(empty: ${remotePath})`);
+          return;
+        }
+        for (const entry of entries) {
+          if (cmd.long) {
+            const kind = entry.type === 'directory' ? 'd' : entry.type === 'file' ? '-' : '?';
+            const mtime = entry.modifiedAt
+              ? entry.modifiedAt.toISOString()
+              : '                    ';
+            stdout(`${kind} ${String(entry.size).padStart(12)} ${mtime} ${entry.name}`);
+          } else {
+            stdout(entry.type === 'directory' ? `${entry.name}/` : entry.name);
+          }
+        }
+      } finally {
+        await client.disconnect().catch(() => undefined);
+      }
+    });
+
+  program
     .command('mcp')
     .description('Start the aiftp MCP server over stdio')
     .action(async () => {
