@@ -25,6 +25,14 @@ export interface FtpsProbeResult {
   mlsdSupported: boolean;
   sizeSupported: boolean;
   remoteRootCwdOk: boolean;
+  /**
+   * Server / client error message captured when `cd(remote_root)` fails.
+   * Populated only when `remoteRootCwdOk === false`. Used by `aiftp doctor`
+   * to surface the actual FTP reply (typically a 550) plus the configured
+   * remote_root in the `remote-root` result's `details`, so an operator
+   * does not have to re-run with `--verbose` to diagnose.
+   */
+  remoteRootCwdError?: string;
 }
 
 export interface NetworkProbeResult {
@@ -174,8 +182,13 @@ function ftpsResults(profile: ProfileConfig, probe: FtpsProbeResult): CheckResul
       status: probe.remoteRootCwdOk ? 'pass' : 'fail',
       message: probe.remoteRootCwdOk
         ? 'remote_root is reachable.'
-        : 'remote_root could not be selected.',
-      recommendation: probe.remoteRootCwdOk ? undefined : 'Check remote_root in .aiftp.toml',
+        : `CWD ${profile.remote_root} failed: ${probe.remoteRootCwdError ?? 'unknown error'}`,
+      details: probe.remoteRootCwdOk
+        ? undefined
+        : { path: profile.remote_root, error: probe.remoteRootCwdError ?? null },
+      recommendation: probe.remoteRootCwdOk
+        ? undefined
+        : 'Either run `aiftp push` first (v0.1.1+ auto-creates parent directories), or set remote_root in .aiftp.toml to a path that already exists on the server.',
     },
   ];
 }

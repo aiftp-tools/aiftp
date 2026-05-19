@@ -136,12 +136,17 @@ export async function probeFtps(context: FtpProbeContext): Promise<FtpsProbeResu
   }
 
   // CWD probe. False on any error (550, 530, network drop mid-probe, etc.).
+  // Capture the error message so the doctor report can surface the actual
+  // FTP reply rather than "could not be selected" -- a 550 vs 530 vs a
+  // network error suggest very different fixes.
   let remoteRootCwdOk = false;
+  let remoteRootCwdError: string | undefined;
   try {
     await client.cd(remoteRoot);
     remoteRootCwdOk = true;
-  } catch {
+  } catch (error: unknown) {
     remoteRootCwdOk = false;
+    remoteRootCwdError = error instanceof Error ? error.message : String(error);
   }
 
   return {
@@ -152,5 +157,6 @@ export async function probeFtps(context: FtpProbeContext): Promise<FtpsProbeResu
     mlsdSupported,
     sizeSupported,
     remoteRootCwdOk,
+    remoteRootCwdError,
   };
 }

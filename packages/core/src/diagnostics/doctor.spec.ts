@@ -219,6 +219,33 @@ describe('runDoctor: FTPS probe checks', () => {
     expect(cwd?.recommendation).toMatch(/remote_root/);
   });
 
+  it('exposes the cd() error message and configured path on remote-root: fail', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () =>
+        makeConfig({ remote_root: '/glocalworks.co.jp/public_html/aiftp-test' }),
+      probeFtps: async () => ({
+        handshakeOk: true,
+        certCommonName: 'ftp.example.com',
+        certAltNames: ['ftp.example.com'],
+        pasvAddressLeak: null,
+        mlsdSupported: true,
+        sizeSupported: true,
+        remoteRootCwdOk: false,
+        remoteRootCwdError:
+          'cd(/glocalworks.co.jp/public_html/aiftp-test): not found or permission denied (550)',
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    const cwd = report.results.find((r) => r.id === 'remote-root');
+    expect(cwd?.status).toBe('fail');
+    expect(cwd?.details).toMatchObject({
+      path: '/glocalworks.co.jp/public_html/aiftp-test',
+      error: expect.stringMatching(/550|not found/i),
+    });
+    expect(cwd?.recommendation).toMatch(/aiftp push|auto-create|remote_root/i);
+  });
+
   it('skips ftps-* and pasv / mlsd / size / remote-root checks when probeFtps is not provided', async () => {
     const deps: DoctorDeps = { ...happyDeps(), probeFtps: undefined };
     const report = await runDoctor(deps, { profile: 'production' });

@@ -133,6 +133,30 @@ describe('probeFtps (with stubbed FtpProbeClient)', () => {
     expect(result.remoteRootCwdOk).toBe(false);
   });
 
+  it('captures the cd() error message on remote-root failure for downstream diagnostics', async () => {
+    const result = await probeFtps({
+      client: makeClient({
+        cd: async () => {
+          throw new Error('cd(/does-not-exist): not found or permission denied (550)');
+        },
+      }),
+      requestedHost: 'ftp.example.com',
+      remoteRoot: '/does-not-exist',
+    });
+    expect(result.remoteRootCwdOk).toBe(false);
+    expect(result.remoteRootCwdError).toMatch(/550|not found/i);
+  });
+
+  it('leaves remoteRootCwdError undefined on success', async () => {
+    const result = await probeFtps({
+      client: makeClient(),
+      requestedHost: 'ftp.example.com',
+      remoteRoot: '/public_html',
+    });
+    expect(result.remoteRootCwdOk).toBe(true);
+    expect(result.remoteRootCwdError).toBeUndefined();
+  });
+
   it('reports cert as undefined when the client has no TLS (plain FTP)', async () => {
     const result = await probeFtps({
       client: makeClient({
