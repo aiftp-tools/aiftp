@@ -668,6 +668,76 @@ describe('cli', () => {
     await expect(readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).rejects.toThrow();
   });
 
+  it('doctor reports a summary line in human format when checks pass', async () => {
+    await writeConfig();
+    await writeFile(join(cwd, '.gitignore'), 'node_modules/\n.aiftp/\n', 'utf8');
+    const runtime: CliRuntime = {
+      runDoctor: async (context) => ({
+        ok: true,
+        results: [
+          {
+            id: 'config-file',
+            title: '.aiftp.toml',
+            status: 'pass',
+            message: 'schema=2',
+          },
+        ],
+        summary: { pass: 1, warn: 0, fail: 0, skip: 0 },
+        context,
+      }),
+    };
+    await parse(['doctor', '--profile', 'production'], { runtime });
+    const out = stdout.join('\n');
+    expect(out).toMatch(/pass=1/);
+    expect(out).toMatch(/fail=0/);
+    expect(out).toMatch(/config-file.*pass/);
+  });
+
+  it('doctor --json emits the raw DoctorReport on stdout', async () => {
+    await writeConfig();
+    const runtime: CliRuntime = {
+      runDoctor: async () => ({
+        ok: false,
+        results: [
+          {
+            id: 'config-file',
+            title: '.aiftp.toml',
+            status: 'fail',
+            message: 'missing',
+            recommendation: 'Run aiftp init.',
+          },
+        ],
+        summary: { pass: 0, warn: 0, fail: 1, skip: 0 },
+      }),
+    };
+    await parse(['doctor', '--profile', 'production', '--json'], { runtime });
+    const json = JSON.parse(stdout.join('\n'));
+    expect(json.ok).toBe(false);
+    expect(json.summary.fail).toBe(1);
+    expect(json.results[0].id).toBe('config-file');
+  });
+
+  it('doctor exits with a non-zero code when any check fails', async () => {
+    await writeConfig();
+    const runtime: CliRuntime = {
+      runDoctor: async () => ({
+        ok: false,
+        results: [
+          {
+            id: 'keychain',
+            title: 'Keychain',
+            status: 'fail',
+            message: 'missing entry',
+          },
+        ],
+        summary: { pass: 0, warn: 0, fail: 1, skip: 0 },
+      }),
+    };
+    await expect(parse(['doctor', '--profile', 'production'], { runtime })).rejects.toThrow(
+      /diagnostic.*failed|fail/i,
+    );
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

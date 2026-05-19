@@ -41,6 +41,16 @@ export {
   validateConfig,
 } from './config.js';
 
+export {
+  type CheckResult,
+  type CheckStatus,
+  type DoctorDeps,
+  type DoctorReport,
+  type FtpsProbeResult,
+  type NetworkProbeResult,
+  runDoctor,
+} from './diagnostics/doctor.js';
+
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export { computeDiff, type Diff } from './diff.js';

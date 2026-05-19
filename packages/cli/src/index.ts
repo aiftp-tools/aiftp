@@ -1,8 +1,11 @@
+import { lookup } from 'node:dns/promises';
 import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
+  type DoctorReport,
   FtpClient,
   type PushOptions,
   type PushResult,
@@ -23,6 +26,7 @@ import {
   loadConfig,
   loadState,
   migrateV1ToV2Source,
+  runDoctor as runCoreDoctor,
   runPush,
   runStatus,
   saveState,
@@ -60,11 +64,17 @@ export interface CliMcpContext {
   cwd: string;
 }
 
+export interface CliDoctorContext {
+  cwd: string;
+  profile: string;
+}
+
 export interface CliRuntime {
   runStatus?(options: StatusOptions): Promise<StatusResult>;
   runPush?(options: PushOptions): Promise<PushResult>;
   createUploader?(context: CliContext): Promise<DeployUploader>;
   createBackupStore?(context: CliContext): Promise<CliBackupStore>;
+  runDoctor?(context: CliDoctorContext): Promise<DoctorReport>;
   startMcp?(context: CliMcpContext): Promise<void>;
 }
 
@@ -377,6 +387,59 @@ async function defaultStartMcp(context: CliMcpContext): Promise<void> {
     startStdioServer(options: { cwd?: string }): Promise<void>;
   };
   await mod.startStdioServer({ cwd: context.cwd });
+}
+
+async function probeTcp(host: string, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolveProbe) => {
+    const socket = createConnection({ host, port });
+
+    const settle = (ok: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolveProbe(ok);
+    };
+
+    socket.setTimeout(3000);
+    socket.once('connect', () => settle(true));
+    socket.once('timeout', () => settle(false));
+    socket.once('error', () => settle(false));
+  });
+}
+
+async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport> {
+  return runCoreDoctor(
+    {
+      readConfig: async () => {
+        try {
+          return await loadConfig(join(context.cwd, '.aiftp.toml'));
+        } catch {
+          return null;
+        }
+      },
+      readGitignore: async () => {
+        try {
+          return await readFile(join(context.cwd, '.gitignore'), 'utf8');
+        } catch {
+          return null;
+        }
+      },
+      hasKeychainEntry: (service, account) => hasPassword(service, account),
+      probeNetwork: async (host, port) => {
+        try {
+          const records = await lookup(host, { all: true });
+          return {
+            dnsOk: true,
+            tcpOk: await probeTcp(host, port),
+            addresses: records.map((record) => record.address),
+          };
+        } catch {
+          return { dnsOk: false, tcpOk: false, addresses: [] };
+        }
+      },
+      probeFtps: undefined,
+    },
+    { profile: context.profile },
+  );
 }
 
 export function createCli(options: CliOptions = {}): Command {
@@ -720,6 +783,33 @@ export function createCli(options: CliOptions = {}): Command {
       stdout(
         'Migrated .aiftp.toml from schema 1 to schema 2. Original preserved as .aiftp.toml.v1.bak',
       );
+    });
+
+  program
+    .command('doctor')
+    .description('Diagnose aiftp configuration and connectivity')
+    .option('-p, --profile <name>', 'profile name', 'production')
+    .option('--json', 'emit raw DoctorReport as JSON')
+    .action(async (cmd: { profile: string; json?: boolean }) => {
+      const report = runtime.runDoctor
+        ? await runtime.runDoctor({ cwd, profile: cmd.profile })
+        : await defaultRunDoctor({ cwd, profile: cmd.profile });
+
+      if (cmd.json) {
+        stdout(JSON.stringify(report));
+        return;
+      }
+
+      stdout(
+        `summary: pass=${report.summary.pass} warn=${report.summary.warn} fail=${report.summary.fail} skip=${report.summary.skip}`,
+      );
+      for (const result of report.results) {
+        stdout(`  ${result.id}: ${result.status} -- ${result.message}`);
+      }
+
+      if (!report.ok) {
+        throw new Error(`aiftp doctor: diagnostic checks failed (fail=${report.summary.fail})`);
+      }
     });
 
   program
