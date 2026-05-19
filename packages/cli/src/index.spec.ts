@@ -139,6 +139,51 @@ describe('cli', () => {
     expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
   });
 
+  it('init with server_kind=starserver writes [quirks].tls_check_hostname = false and warns about it', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'starserver',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toMatch(/^schema = 2/u);
+    expect(toml).toMatch(/\[quirks\]/);
+    expect(toml).toMatch(/tls_check_hostname = false/);
+    expect(stderr.join('\n')).toMatch(/star\.ne\.jp|tls_check_hostname|certificate/i);
+  });
+
+  it('init with server_kind=generic does NOT auto-disable tls_check_hostname', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).not.toMatch(/tls_check_hostname = false/);
+  });
+
   it('init warns when remote_root starts with a leading "/" (shared-host gotcha)', async () => {
     await writeFile(join(cwd, '.gitignore'), '', 'utf8');
     await parse(['init'], {

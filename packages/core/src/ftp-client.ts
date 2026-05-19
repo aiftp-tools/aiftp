@@ -449,4 +449,72 @@ export class FtpClient {
       }
     }
   }
+
+  // ---------------------------------------------------------------------
+  // Diagnostic helpers (used by packages/core/src/diagnostics/ftp-probe.ts).
+  // These are deliberately narrow so the probe module does not reach into
+  // basic-ftp internals.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Return the TLS peer certificate when the underlying socket is a
+   * TLSSocket, or `null` for plain FTP / pre-connect / unsupported sockets.
+   */
+  getPeerCertificate(): { subject?: { CN?: string }; subjectaltname?: string } | null {
+    try {
+      const client = this.requireConnection();
+      // basic-ftp exposes the active socket on .ftp.socket; the raw type is
+      // a Node net.Socket | tls.TLSSocket. We duck-type via getPeerCertificate.
+      const socket = (
+        client as unknown as {
+          ftp: { socket?: { getPeerCertificate?: () => unknown } };
+        }
+      ).ftp.socket;
+      if (!socket || typeof socket.getPeerCertificate !== 'function') return null;
+      const cert = socket.getPeerCertificate();
+      if (!cert || typeof cert !== 'object') return null;
+      return cert as { subject?: { CN?: string }; subjectaltname?: string };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Return the server's FEAT response keyed by uppercase feature name.
+   * Useful for detecting MLSD / SIZE / AUTH TLS support.
+   */
+  async getFeatures(): Promise<Map<string, string>> {
+    const client = this.requireConnection();
+    try {
+      return await client.features();
+    } catch (error: unknown) {
+      throw mapFtpError(error, 'FEAT');
+    }
+  }
+
+  /**
+   * Send a raw FTP command and return the parsed reply code + message.
+   */
+  async sendRaw(command: string): Promise<{ code: number; message: string }> {
+    const client = this.requireConnection();
+    try {
+      const response = await client.send(command);
+      return { code: response.code, message: response.message };
+    } catch (error: unknown) {
+      throw mapFtpError(error, `send(${command})`);
+    }
+  }
+
+  /**
+   * Change working directory. Thin wrapper around basic-ftp's `cd` so the
+   * diagnostic probe can verify a configured `remote_root` resolves.
+   */
+  async cd(remotePath: string): Promise<void> {
+    const client = this.requireConnection();
+    try {
+      await client.cd(remotePath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `cd(${remotePath})`);
+    }
+  }
 }

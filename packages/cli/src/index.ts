@@ -28,6 +28,7 @@ import {
   loadState,
   migrateV1ToV2Source,
   parseFilezillaXml,
+  probeFtps,
   renderFilezillaXml,
   runDoctor as runCoreDoctor,
   runPush,
@@ -136,8 +137,8 @@ function quote(value: string): string {
 }
 
 function renderConfig(answers: InitAnswers): string {
-  return [
-    'schema = 1',
+  const lines: string[] = [
+    'schema = 2',
     '',
     `[profile.${answers.profile}]`,
     `host = ${quote(answers.host)}`,
@@ -149,7 +150,26 @@ function renderConfig(answers: InitAnswers): string {
     `keychain_service = ${quote(answers.keychainService)}`,
     `server_kind = ${quote(answers.serverKind)}`,
     '',
-  ].join('\n');
+  ];
+
+  if (answers.serverKind === 'starserver') {
+    // Star Server presents `*.star.ne.jp` cert for `*.stars.ne.jp` hosts.
+    // We pre-set the documented quirk so the operator does not have to
+    // hand-edit the file after the first hostname-mismatch error. The
+    // CLI emits a stderr warning when this happens so the trade-off is
+    // explicit, not silent.
+    lines.push(
+      '[quirks]',
+      '# Star Server quirk: certificate CN is *.star.ne.jp while customer',
+      '# hosts are usually *.stars.ne.jp, so TLS hostname verification',
+      '# fails by default. We disable hostname-only checking here. aiftp',
+      '# still requires a valid certificate chain.',
+      'tls_check_hostname = false',
+      '',
+    );
+  }
+
+  return lines.join('\n');
 }
 
 async function ensureGitignore(cwd: string): Promise<void> {
@@ -427,6 +447,13 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         }
       },
       hasKeychainEntry: (service, account) => hasPassword(service, account),
+      getKeychainPassword: async (service, account) => {
+        try {
+          return await getPassword(service, account);
+        } catch {
+          return null;
+        }
+      },
       probeNetwork: async (host, port) => {
         try {
           const records = await lookup(host, { all: true });
@@ -439,7 +466,46 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
           return { dnsOk: false, tcpOk: false, addresses: [] };
         }
       },
-      probeFtps: undefined,
+      probeFtps: async (profile, password) => {
+        const client = new FtpClient({
+          host: profile.host,
+          port: profile.port,
+          user: profile.user,
+          password,
+          protocol: profile.protocol,
+          requireTls: true,
+          // The probe is the one place we *want* to keep verification on so
+          // a hostname mismatch surfaces as a hard error rather than
+          // silently being accepted. Operators who need to bypass it use
+          // [quirks].tls_check_hostname in v0.2.1+.
+          verifyCertificate: true,
+        });
+        try {
+          await client.connect();
+          return await probeFtps({
+            client: {
+              getPeerCertificate: () => client.getPeerCertificate(),
+              getFeatures: () => client.getFeatures(),
+              sendRaw: (cmd) => client.sendRaw(cmd),
+              cd: (path) => client.cd(path),
+            },
+            requestedHost: profile.host,
+            remoteRoot: profile.remote_root,
+          });
+        } catch {
+          // Any connection error is reported as "handshake failed" by the
+          // caller; we return the shape doctor.ts expects.
+          return {
+            handshakeOk: false,
+            pasvAddressLeak: null,
+            mlsdSupported: false,
+            sizeSupported: false,
+            remoteRootCwdOk: false,
+          };
+        } finally {
+          await client.disconnect().catch(() => undefined);
+        }
+      },
     },
     { profile: context.profile },
   );
@@ -692,6 +758,12 @@ export function createCli(options: CliOptions = {}): Command {
       if (answers.remoteRoot.startsWith('/')) {
         stderr(
           `Warning: remote_root starts with "/" (${answers.remoteRoot}). On shared hosts (StarServer / Lolipop / Sakura / Xserver) the actual upload root is often "/<your-domain>/public_html/..." or "/<your-user>/public_html/...". Confirm with your provider's FTP setup guide that the leading "/" is intended.`,
+        );
+      }
+
+      if (answers.serverKind === 'starserver') {
+        stderr(
+          'Warning: server_kind = "starserver" — Star Server presents a *.star.ne.jp certificate for *.stars.ne.jp hostnames. aiftp will set [quirks].tls_check_hostname = false in your .aiftp.toml so the deploy works out of the box. The certificate chain itself is still verified.',
         );
       }
 

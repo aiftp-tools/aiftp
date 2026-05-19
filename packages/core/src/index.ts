@@ -51,6 +51,14 @@ export {
   runDoctor,
 } from './diagnostics/doctor.js';
 
+export {
+  type FtpProbeClient,
+  type FtpProbeContext,
+  isPrivateIp,
+  parsePasvReply,
+  probeFtps,
+} from './diagnostics/ftp-probe.js';
+
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export {

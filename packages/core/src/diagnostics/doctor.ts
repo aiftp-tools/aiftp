@@ -37,6 +37,14 @@ export interface DoctorDeps {
   readConfig(): Promise<Config | null>;
   readGitignore(): Promise<string | null>;
   hasKeychainEntry(service: string, account: string): Promise<boolean>;
+  /**
+   * Fetch the actual password for a profile from the keychain. Optional —
+   * when undefined the FTPS probe receives an empty string and most real
+   * servers will reject AUTH/USER, surfacing as `ftps-handshake: fail`.
+   * Set only when the caller has accepted the keychain auth prompt cost
+   * (Touch ID etc.).
+   */
+  getKeychainPassword?(service: string, account: string): Promise<string | null>;
   probeNetwork(host: string, port: number): Promise<NetworkProbeResult>;
   probeFtps?(profile: ProfileConfig, password: string): Promise<FtpsProbeResult>;
 }
@@ -280,6 +288,10 @@ export async function runDoctor(
     return report(results);
   }
 
-  results.push(...ftpsResults(profile, await deps.probeFtps(profile, '')));
+  const password = deps.getKeychainPassword
+    ? ((await deps.getKeychainPassword(profile.keychain_service, profile.user).catch(() => null)) ??
+      '')
+    : '';
+  results.push(...ftpsResults(profile, await deps.probeFtps(profile, password)));
   return report(results);
 }
