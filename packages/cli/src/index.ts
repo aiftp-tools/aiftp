@@ -469,18 +469,27 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         }
       },
       probeFtps: async (profile, password) => {
+        // Mirror the production push/restore wiring so the probe reflects
+        // what the operator's actual deploy will see. If the operator has
+        // explicitly opted into [quirks].tls_check_hostname = false (the
+        // documented Star Server workaround), the probe respects that --
+        // otherwise the probe could not even complete the handshake on
+        // hosts the operator has already decided are acceptable. The
+        // separate `ftps-cert` doctor check still warns based on the
+        // *post-connect* cert CN / altName vs requested host comparison,
+        // so a mismatch is still surfaced as a warning even when the
+        // hostname check itself is suppressed.
+        const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
         const client = new FtpClient({
           host: profile.host,
           port: profile.port,
           user: profile.user,
           password,
           protocol: profile.protocol,
-          requireTls: true,
-          // The probe is the one place we *want* to keep verification on so
-          // a hostname mismatch surfaces as a hard error rather than
-          // silently being accepted. Operators who need to bypass it use
-          // [quirks].tls_check_hostname in v0.2.1+.
-          verifyCertificate: true,
+          requireTls: probeConfig?.safety.require_tls ?? true,
+          verifyCertificate: probeConfig?.safety.verify_certificate ?? true,
+          skipHostnameCheck: probeConfig?.quirks?.tls_check_hostname === false,
+          timeoutMs: probeConfig?.connection.timeout_ms,
         });
         try {
           await client.connect();
