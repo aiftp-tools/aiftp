@@ -26,6 +26,7 @@ import {
   loadConfig,
   loadState,
   migrateV1ToV2Source,
+  parseFilezillaXml,
   runDoctor as runCoreDoctor,
   runPush,
   runStatus,
@@ -442,6 +443,185 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
   );
 }
 
+interface RunImportFilezillaOptions {
+  cwd: string;
+  xmlPath: string;
+  dryRun: boolean;
+  overwrite: boolean;
+  keychainPrefix: string;
+  stdout: (line: string) => void;
+  keychain: CliKeychain;
+}
+
+/**
+ * Remove a `[profile.<name>]` block from a TOML source string by simple
+ * text-level scanning. Preserves user comments and unrelated sections. Used
+ * by `aiftp import filezilla --overwrite` to drop the prior profile before
+ * appending the imported one.
+ */
+function removeProfileBlock(source: string, name: string): string {
+  const lines = source.split('\n');
+  const target = `[profile.${name}]`;
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === target) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      skipping = false;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join('\n');
+}
+
+async function runImportFilezilla(options: RunImportFilezillaOptions): Promise<void> {
+  const { cwd, xmlPath, dryRun, overwrite, keychainPrefix, stdout, keychain } = options;
+  const absoluteXmlPath = isAbsolute(xmlPath) ? xmlPath : join(cwd, xmlPath);
+  const xml = await readFile(absoluteXmlPath, 'utf8');
+  const result = parseFilezillaXml(xml);
+
+  // Dry-run reads the existing profile list from the raw TOML to avoid
+  // triggering the v1 -> v2 auto-migration as a side effect. The non-dry-run
+  // path uses loadConfig (with auto-migrate) because the user is opting in
+  // to a write anyway.
+  const tomlPath = join(cwd, '.aiftp.toml');
+  let existingNames: Set<string>;
+  if (dryRun) {
+    const rawSource = await readFile(tomlPath, 'utf8');
+    existingNames = new Set(
+      Array.from(rawSource.matchAll(/^\[profile\.([^\]]+)\]/gmu)).map((m) => m[1] ?? ''),
+    );
+  } else {
+    const existingConfig = await loadConfig(tomlPath);
+    existingNames = new Set(Object.keys(existingConfig.profile));
+  }
+
+  type WriteEntry = {
+    name: string;
+    lines: string[];
+    keychainService: string;
+    user: string;
+    passwordValue: string | null;
+    warnings: string[];
+    isOverwrite: boolean;
+  };
+
+  const queued: WriteEntry[] = [];
+  const skipped: Array<{ name: string; reason: string }> = [];
+
+  for (const profile of result.profiles) {
+    if (profile.protocol === 'sftp') {
+      skipped.push({
+        name: profile.name,
+        reason: `SFTP not supported by aiftp; skipped ${profile.name}`,
+      });
+      continue;
+    }
+    if (profile.password.kind === 'master-encrypted') {
+      skipped.push({
+        name: profile.name,
+        reason: `master password protected entry skipped: ${profile.name}`,
+      });
+      continue;
+    }
+    const conflict = existingNames.has(profile.name);
+    if (conflict && !overwrite) {
+      skipped.push({
+        name: profile.name,
+        reason: `name conflict, skipped (use --overwrite): ${profile.name}`,
+      });
+      continue;
+    }
+
+    const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+    const ftpsMode = profile.protocol.startsWith('ftps_')
+      ? profile.protocol === 'ftps_explicit'
+        ? 'explicit'
+        : 'implicit'
+      : undefined;
+    const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+    const keychainService = `${keychainPrefix}:${profile.name}`;
+    const lines: string[] = [
+      '',
+      `[profile.${profile.name}]`,
+      `host = ${JSON.stringify(profile.host)}`,
+      `port = ${port}`,
+      `protocol = ${JSON.stringify(aiftpProtocol)}`,
+      `user = ${JSON.stringify(profile.user)}`,
+      `remote_root = ${JSON.stringify(profile.remote_root)}`,
+      'local_root = "."',
+      `keychain_service = ${JSON.stringify(keychainService)}`,
+      'server_kind = "generic"',
+    ];
+    if (ftpsMode) lines.push(`ftps_mode = ${JSON.stringify(ftpsMode)}`);
+    if (profile.passive_mode === true) lines.push('passive_mode = true');
+    if (profile.passive_mode === false) lines.push('passive_mode = false');
+    if (profile.account) lines.push(`account = ${JSON.stringify(profile.account)}`);
+
+    const passwordValue =
+      profile.password.kind === 'plaintext' || profile.password.kind === 'encoded'
+        ? profile.password.value
+        : null;
+
+    queued.push({
+      name: profile.name,
+      lines,
+      keychainService,
+      user: profile.user,
+      passwordValue,
+      warnings: profile.warnings,
+      isOverwrite: conflict,
+    });
+  }
+
+  if (dryRun) {
+    stdout(`dry-run mode: would import ${queued.length} profile(s), skipped ${skipped.length}`);
+    for (const entry of queued) {
+      stdout(
+        `would create [profile.${entry.name}] host=${entry.lines
+          .find((l) => l.startsWith('host = '))
+          ?.replace(/^host = "?|"?$/gu, '')} user=${entry.user} password=***`,
+      );
+      for (const w of entry.warnings) stdout(`  warning: ${w}`);
+    }
+    for (const s of skipped) stdout(`  skipped: ${s.reason}`);
+    return;
+  }
+
+  let source = await readFile(tomlPath, 'utf8');
+  for (const entry of queued) {
+    if (entry.isOverwrite) {
+      source = removeProfileBlock(source, entry.name);
+    }
+  }
+  if (queued.some((e) => e.isOverwrite)) {
+    await writeFile(tomlPath, source, 'utf8');
+  }
+
+  const appendChunk = queued.flatMap((e) => e.lines).join('\n');
+  if (appendChunk.length > 0) {
+    const prefix = source.endsWith('\n') ? '' : '\n';
+    await appendFile(tomlPath, `${prefix}${appendChunk}\n`, 'utf8');
+  }
+
+  for (const entry of queued) {
+    if (entry.passwordValue !== null) {
+      await keychain.setPassword(entry.keychainService, entry.user, entry.passwordValue);
+    }
+  }
+
+  stdout(
+    `imported ${queued.length} profile(s), skipped ${skipped.length}, warnings ${result.warnings.length}`,
+  );
+  for (const s of skipped) stdout(`  skipped: ${s.reason}`);
+  for (const w of result.warnings) stdout(`  warning: ${w}`);
+  for (const entry of queued) for (const w of entry.warnings) stdout(`  warning: ${w}`);
+}
+
 export function createCli(options: CliOptions = {}): Command {
   const cwd = options.cwd ?? process.cwd();
   const prompt = options.prompt ?? defaultPrompt;
@@ -811,6 +991,35 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error(`aiftp doctor: diagnostic checks failed (fail=${report.summary.fail})`);
       }
     });
+
+  const importCmd = program.command('import').description('Import settings from other tools');
+  importCmd
+    .command('filezilla')
+    .description('Import profiles from a FileZilla sitemanager.xml')
+    .argument('<path>', 'path to sitemanager.xml')
+    .option('--dry-run', 'preview the import without writing')
+    .option('--overwrite', 'replace existing profiles with the same name')
+    .option(
+      '--keychain-prefix <prefix>',
+      'Keychain service prefix used for imported credentials',
+      'aiftp:imported',
+    )
+    .action(
+      async (
+        xmlPath: string,
+        cmd: { dryRun?: boolean; overwrite?: boolean; keychainPrefix: string },
+      ) => {
+        await runImportFilezilla({
+          cwd,
+          xmlPath,
+          dryRun: cmd.dryRun === true,
+          overwrite: cmd.overwrite === true,
+          keychainPrefix: cmd.keychainPrefix,
+          stdout,
+          keychain,
+        });
+      },
+    );
 
   program
     .command('mcp')

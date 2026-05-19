@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FileZilla3 version="3.66.0" platform="mac">
+    <Servers>
+        <Server>
+            <Host>ftp.example.co.jp</Host>
+            <Port>21</Port>
+            <Protocol>4</Protocol>
+            <Type>0</Type>
+            <User>jpuser</User>
+            <Pass encoding="base64">aGl0c3Vqaw==</Pass>
+            <Logontype>1</Logontype>
+            <PasvMode>MODE_PASSIVE</PasvMode>
+            <EncodingType>Custom</EncodingType>
+            <CustomEncoding>Shift_JIS</CustomEncoding>
+            <Name>日本のサーバ</Name>
+            <RemoteDir>1 0 11 public_html</RemoteDir>
+            日本のサーバ
+        </Server>
+    </Servers>
+</FileZilla3>

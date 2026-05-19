@@ -21,6 +21,7 @@
   "dependencies": {
     "@iarna/toml": "^2.2.5",
     "basic-ftp": "^6.0.1",
+    "fast-xml-parser": "^5.8.0",
     "picomatch": "^4.0.4",
     "zod": "^4.4.3"
   },

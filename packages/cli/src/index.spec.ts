@@ -738,6 +738,183 @@ describe('cli', () => {
     );
   });
 
+  it('import filezilla --dry-run lists profiles without writing anything', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3>',
+      '<Servers>',
+      '<Server>',
+      '<Host>ftp.example.com</Host>',
+      '<Port>21</Port>',
+      '<Protocol>4</Protocol>',
+      '<User>deploy</User>',
+      '<Pass encoding="base64">cGFzcw==</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>Imported Site</Name>',
+      '<RemoteDir>1 0 11 public_html</RemoteDir>',
+      '</Server>',
+      '</Servers>',
+      '</FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sitemanager.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+    const beforeToml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath, '--dry-run']);
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/dry-run/i);
+    expect(out).toMatch(/imported-site/);
+    expect(out).toMatch(/ftp\.example\.com/);
+    // Password must be redacted in CLI output.
+    expect(out).not.toMatch(/pass\b.*encoded\b.*[^*]/i);
+    expect(out).not.toContain('cGFzcw==');
+    // Nothing written.
+    expect(await readFile(join(cwd, '.aiftp.toml'), 'utf8')).toBe(beforeToml);
+    expect(stored).toEqual([]);
+  });
+
+  it('import filezilla adds a new profile to .aiftp.toml and stores the password in Keychain', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3>',
+      '<Servers>',
+      '<Server>',
+      '<Host>ftp.example.com</Host>',
+      '<Port>21</Port>',
+      '<Protocol>4</Protocol>',
+      '<User>deploy</User>',
+      '<Pass encoding="base64">cGFzcw==</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>Imported Site</Name>',
+      '<RemoteDir>1 0 11 public_html</RemoteDir>',
+      '</Server>',
+      '</Servers>',
+      '</FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sitemanager.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath]);
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[profile.imported-site]');
+    expect(toml).toContain('host = "ftp.example.com"');
+    expect(toml).not.toContain('password'); // never written
+    expect(toml).not.toContain('cGFzcw==');
+    expect(stored).toContainEqual({
+      service: expect.stringMatching(/aiftp:imported/),
+      account: 'deploy',
+      password: 'pass',
+    });
+  });
+
+  it('import filezilla --skip (default) leaves existing profiles untouched on name conflict', async () => {
+    await writeConfig(); // already has [profile.production]
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3><Servers><Server>',
+      '<Host>conflict.example.com</Host>',
+      '<Port>21</Port>',
+      '<Protocol>0</Protocol>',
+      '<User>other</User>',
+      '<Pass encoding="base64">b3RoZXI=</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>production</Name>',
+      '<RemoteDir>1 0 4 root</RemoteDir>',
+      '</Server></Servers></FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sm.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath]);
+
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    // production stayed untouched
+    expect(config.profile.production?.host).toBe('ftp.example.com');
+    expect(stdout.join('\n')).toMatch(/skipped.*production|conflict.*skip/i);
+  });
+
+  it('import filezilla --overwrite replaces an existing profile of the same name', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3><Servers><Server>',
+      '<Host>new-host.example.com</Host>',
+      '<Port>21</Port>',
+      '<Protocol>0</Protocol>',
+      '<User>overwriter</User>',
+      '<Pass encoding="base64">b3Y=</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>production</Name>',
+      '<RemoteDir>1 0 4 root</RemoteDir>',
+      '</Server></Servers></FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sm.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath, '--overwrite']);
+
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe('new-host.example.com');
+    expect(config.profile.production?.user).toBe('overwriter');
+  });
+
+  it('import filezilla skips SFTP entries with a warning (aiftp does not yet support SFTP)', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3><Servers><Server>',
+      '<Host>sftp.example.com</Host>',
+      '<Port>22</Port>',
+      '<Protocol>1</Protocol>',
+      '<User>sftp</User>',
+      '<Pass encoding="base64">cw==</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>SFTP Box</Name>',
+      '<RemoteDir>1 0 4 root</RemoteDir>',
+      '</Server></Servers></FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sm.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath]);
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/sftp.*not supported|skipped.*SFTP/i);
+    // No profile was written.
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).not.toContain('sftp-box');
+  });
+
+  it('import filezilla refuses to write master-password-encrypted entries and warns the operator', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0"?>',
+      '<FileZilla3><Servers><Server>',
+      '<Host>ftp.example.com</Host>',
+      '<Port>21</Port>',
+      '<Protocol>4</Protocol>',
+      '<User>locked</User>',
+      '<Pass encoding="crypt" pubkey="ABC">BLOB</Pass>',
+      '<Logontype>1</Logontype>',
+      '<Name>Locked Box</Name>',
+      '<RemoteDir>1 0 4 root</RemoteDir>',
+      '</Server></Servers></FileZilla3>',
+    ].join('\n');
+    const xmlPath = join(cwd, 'sm.xml');
+    await writeFile(xmlPath, xml, 'utf8');
+
+    await parse(['import', 'filezilla', xmlPath]);
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/master password|encrypted/i);
+    // No Keychain write for unrecoverable passwords.
+    expect(stored.find((s) => s.account === 'locked')).toBeUndefined();
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

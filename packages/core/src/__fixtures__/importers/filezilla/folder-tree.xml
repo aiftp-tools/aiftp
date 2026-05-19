@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FileZilla3 version="3.66.0" platform="mac">
+    <Servers>
+        <Folder expanded="1">Clients
+            <Folder expanded="1">Acme Corp
+                <Server>
+                    <Host>ftp.acme.example.com</Host>
+                    <Port>21</Port>
+                    <Protocol>4</Protocol>
+                    <Type>0</Type>
+                    <User>acme-deploy</User>
+                    <Pass encoding="base64">YWNtZS1zZWNyZXQ=</Pass>
+                    <Logontype>1</Logontype>
+                    <PasvMode>MODE_PASSIVE</PasvMode>
+                    <EncodingType>Auto</EncodingType>
+                    <Name>Production</Name>
+                    <RemoteDir>1 0 11 public_html</RemoteDir>
+                    Acme Production
+                </Server>
+                <Server>
+                    <Host>ftp.acme.example.com</Host>
+                    <Port>21</Port>
+                    <Protocol>4</Protocol>
+                    <Type>0</Type>
+                    <User>acme-staging</User>
+                    <Pass encoding="base64">c3RhZ2luZw==</Pass>
+                    <Logontype>1</Logontype>
+                    <PasvMode>MODE_PASSIVE</PasvMode>
+                    <EncodingType>Auto</EncodingType>
+                    <Name>Staging</Name>
+                    <RemoteDir>1 0 7 staging</RemoteDir>
+                    Acme Staging
+                </Server>
+            </Folder>
+            <Server>
+                <Host>ftp.beta.example.com</Host>
+                <Port>21</Port>
+                <Protocol>0</Protocol>
+                <Type>0</Type>
+                <User>beta-user</User>
+                <Pass encoding="base64">YmV0YS1wYXNz</Pass>
+                <Logontype>1</Logontype>
+                <PasvMode>MODE_PASSIVE</PasvMode>
+                <EncodingType>Auto</EncodingType>
+                <Name>Beta Direct</Name>
+                <RemoteDir>1 0 11 public_html</RemoteDir>
+                Beta Direct
+            </Server>
+        </Folder>
+    </Servers>
+</FileZilla3>

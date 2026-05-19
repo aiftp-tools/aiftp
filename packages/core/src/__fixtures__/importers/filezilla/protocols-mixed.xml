@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FileZilla3 version="3.66.0" platform="mac">
+    <Servers>
+        <Server>
+            <Host>ftp-plain.example.com</Host>
+            <Port>21</Port>
+            <Protocol>0</Protocol>
+            <User>plain</User>
+            <Pass encoding="base64">cGxhaW4=</Pass>
+            <Logontype>1</Logontype>
+            <Name>Plain FTP</Name>
+            <RemoteDir>1 0 4 root</RemoteDir>
+        </Server>
+        <Server>
+            <Host>ftps-explicit.example.com</Host>
+            <Port>21</Port>
+            <Protocol>4</Protocol>
+            <User>explicit</User>
+            <Pass encoding="base64">ZXhwbA==</Pass>
+            <Logontype>1</Logontype>
+            <Name>FTPES Explicit</Name>
+            <RemoteDir>1 0 4 root</RemoteDir>
+        </Server>
+        <Server>
+            <Host>ftps-implicit.example.com</Host>
+            <Port>990</Port>
+            <Protocol>3</Protocol>
+            <User>implicit</User>
+            <Pass encoding="base64">aW1wbA==</Pass>
+            <Logontype>1</Logontype>
+            <Name>FTPIS Implicit</Name>
+            <RemoteDir>1 0 4 root</RemoteDir>
+        </Server>
+        <Server>
+            <Host>sftp.example.com</Host>
+            <Port>22</Port>
+            <Protocol>1</Protocol>
+            <User>sftp-user</User>
+            <Pass encoding="base64">c2Z0cA==</Pass>
+            <Logontype>1</Logontype>
+            <Name>SFTP Site</Name>
+            <RemoteDir>1 0 4 root</RemoteDir>
+        </Server>
+    </Servers>
+</FileZilla3>
