@@ -10,6 +10,8 @@ import {
 } from './keychain.js';
 
 const onMacOS = process.platform === 'darwin';
+const onWindows = process.platform === 'win32';
+const onUnsupported = !onMacOS && !onWindows;
 const inCI = process.env.CI === 'true';
 
 /**
@@ -77,16 +79,19 @@ describe('keychain: argument validation (cross-platform)', () => {
   });
 });
 
-describe.skipIf(onMacOS)('keychain: non-macOS platform guard', () => {
-  it('setPassword throws KeychainPlatformError off-macOS', async () => {
+describe.skipIf(!onUnsupported)('keychain: unsupported platform guard (linux / *bsd)', () => {
+  // v0.3 added Windows support, so the guard only fires on platforms we
+  // explicitly do not target. Linux desktops with libsecret etc. are a
+  // post-1.0 candidate (Phase 2+).
+  it('setPassword throws KeychainPlatformError', async () => {
     await expect(setPassword('svc', 'account', 'pw')).rejects.toBeInstanceOf(KeychainPlatformError);
   });
 
-  it('getPassword throws KeychainPlatformError off-macOS', async () => {
+  it('getPassword throws KeychainPlatformError', async () => {
     await expect(getPassword('svc', 'account')).rejects.toBeInstanceOf(KeychainPlatformError);
   });
 
-  it('deletePassword throws KeychainPlatformError off-macOS', async () => {
+  it('deletePassword throws KeychainPlatformError', async () => {
     await expect(deletePassword('svc', 'account')).rejects.toBeInstanceOf(KeychainPlatformError);
   });
 });

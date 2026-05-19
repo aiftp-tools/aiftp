@@ -24,6 +24,10 @@ const MAX_BUFFER = 1024 * 1024;
  * its hex output mode (which is lossy for round-tripping). Entries that lack
  * the prefix are treated as foreign (manually added by the user via Keychain
  * Access or by another tool) and returned as-is.
+ *
+ * The same envelope is used by both the macOS and Windows backends so a
+ * password written on one platform is decoded the same way on the other (in
+ * principle -- in practice they don't share a vault).
  */
 const STORAGE_PREFIX = 'aiftp-v1:';
 
@@ -33,9 +37,6 @@ function encodeStored(password: string): string {
 
 function decodeStored(raw: string): string {
   if (!raw.startsWith(STORAGE_PREFIX)) {
-    // Foreign entry. Return verbatim and let the caller deal with encoding
-    // quirks. We do not attempt to detect `security`'s hex fallback because
-    // it cannot be distinguished reliably from ordinary hex-looking passwords.
     return raw;
   }
   const payload = raw.slice(STORAGE_PREFIX.length);
@@ -63,23 +64,34 @@ export class KeychainPlatformError extends KeychainError {
   }
 }
 
-function assertSupportedPlatform(): void {
-  if (process.platform !== 'darwin') {
-    throw new KeychainPlatformError(
-      `Keychain is only available on macOS. Current platform: ${process.platform}. Windows support is planned for Phase 1.5.`,
-    );
-  }
-}
-
 function assertNonEmpty(value: string, name: string): void {
   if (typeof value !== 'string' || value.length === 0) {
     throw new KeychainError(`${name} must be a non-empty string`);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Backend interface + dependency injection seam
+// ---------------------------------------------------------------------------
+
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+export type ExecFn = (cmd: string, args: readonly string[]) => Promise<ExecResult>;
+
+export interface KeychainBackend {
+  setPassword(service: string, account: string, password: string): Promise<void>;
+  getPassword(service: string, account: string): Promise<string>;
+  deletePassword(service: string, account: string): Promise<void>;
+}
+
 interface ExecError extends Error {
   code?: number;
   stderr?: string;
+  stdout?: string;
 }
 
 function isExecError(error: unknown): error is ExecError {
@@ -87,94 +99,274 @@ function isExecError(error: unknown): error is ExecError {
 }
 
 /**
- * Stores a password in the macOS Keychain under (service, account).
- * If an entry already exists, it is updated atomically (-U flag).
- *
- * SECURITY NOTE: the password is passed via the `-w` argument of the
- * `security` binary. For the duration of the child process the password
- * is visible in process arguments (e.g., via `ps`). This is a known
- * limitation of the macOS `security` CLI; switching to a native binding
- * (@napi-rs/keyring) is on the Phase 2 backlog.
+ * Default `ExecFn` that wraps Node's `execFile`. The factory pattern lets
+ * tests substitute a stub exec while keeping the backend logic pure.
  */
+function defaultExec(): ExecFn {
+  return async (cmd, args) => {
+    try {
+      const { stdout, stderr } = await execFileAsync(cmd, [...args], { maxBuffer: MAX_BUFFER });
+      return { stdout, stderr, code: 0 };
+    } catch (error: unknown) {
+      if (isExecError(error)) {
+        return {
+          stdout: error.stdout ?? '',
+          stderr: error.stderr ?? error.message,
+          code: typeof error.code === 'number' ? error.code : 1,
+        };
+      }
+      throw error;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// macOS backend (security command)
+// ---------------------------------------------------------------------------
+
+export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
+  return {
+    async setPassword(service, account, password) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      if (typeof password !== 'string') {
+        throw new KeychainError('password must be a string');
+      }
+      const result = await exec(SECURITY_BIN, [
+        'add-generic-password',
+        '-s',
+        service,
+        '-a',
+        account,
+        '-w',
+        encodeStored(password),
+        '-U',
+      ]);
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to store Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
+        );
+      }
+    },
+
+    async getPassword(service, account) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      const result = await exec(SECURITY_BIN, [
+        'find-generic-password',
+        '-s',
+        service,
+        '-a',
+        account,
+        '-w',
+      ]);
+      if (result.code === ERR_SEC_ITEM_NOT_FOUND) {
+        throw new KeychainNotFoundError(service, account);
+      }
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to read Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
+        );
+      }
+      return decodeStored(result.stdout.replace(/\r?\n$/, ''));
+    },
+
+    async deletePassword(service, account) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      const result = await exec(SECURITY_BIN, [
+        'delete-generic-password',
+        '-s',
+        service,
+        '-a',
+        account,
+      ]);
+      if (result.code === ERR_SEC_ITEM_NOT_FOUND) {
+        throw new KeychainNotFoundError(service, account);
+      }
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to delete Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
+        );
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Windows backend (cmdkey for write/delete, PowerShell + Win32 CredRead for read)
+// ---------------------------------------------------------------------------
+
+const CMDKEY_BIN = 'cmdkey';
+const POWERSHELL_BIN = 'powershell';
+
+/**
+ * Compose the Credential Manager target name for a (service, account) pair.
+ * We use `<service>:<account>` so a single Windows account can own multiple
+ * aiftp credentials without collisions.
+ */
+function windowsTarget(service: string, account: string): string {
+  return `${service}:${account}`;
+}
+
+/**
+ * PowerShell script template that reads the password via Win32 `CredRead`.
+ * `$target` is the only externally-bound variable -- it is set in the
+ * preamble we prepend before sending the script to PowerShell. The script
+ * prints the password to stdout (no trailing newline) on success, prints
+ * nothing (exit 0) when the credential does not exist, and writes errors to
+ * stderr with a non-zero exit on real failures.
+ */
+const PS_CRED_READ_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class AiftpCredManager {
+  [DllImport("Advapi32.dll", SetLastError=true, EntryPoint="CredReadW", CharSet=CharSet.Unicode)]
+  private static extern bool CredRead(string target, uint type, uint flags, out IntPtr cred);
+  [DllImport("Advapi32.dll", SetLastError=true)]
+  private static extern void CredFree(IntPtr ptr);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  private struct CREDENTIAL {
+    public uint Flags;
+    public uint Type;
+    public string TargetName;
+    public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public uint CredentialBlobSize;
+    public IntPtr CredentialBlob;
+    public uint Persist;
+    public uint AttributeCount;
+    public IntPtr Attributes;
+    public string TargetAlias;
+    public string UserName;
+  }
+  public static string Read(string target) {
+    IntPtr ptr;
+    if (!CredRead(target, 1, 0, out ptr)) return null;
+    try {
+      var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+      if (cred.CredentialBlobSize == 0) return "";
+      byte[] bytes = new byte[cred.CredentialBlobSize];
+      Marshal.Copy(cred.CredentialBlob, bytes, 0, (int)cred.CredentialBlobSize);
+      return Encoding.Unicode.GetString(bytes);
+    } finally { CredFree(ptr); }
+  }
+}
+"@
+$result = [AiftpCredManager]::Read($target)
+if ($result -eq $null) { exit 0 }
+[Console]::Out.Write($result)
+`;
+
+function escapePowerShellSingleQuoted(value: string): string {
+  return value.replace(/'/gu, "''");
+}
+
+export function createWindowsKeychainBackend(exec: ExecFn): KeychainBackend {
+  return {
+    async setPassword(service, account, password) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      if (typeof password !== 'string') {
+        throw new KeychainError('password must be a string');
+      }
+      const target = windowsTarget(service, account);
+      const result = await exec(CMDKEY_BIN, [
+        `/generic:${target}`,
+        `/user:${account}`,
+        `/pass:${encodeStored(password)}`,
+      ]);
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to store Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || result.stdout.trim()}`,
+        );
+      }
+    },
+
+    async getPassword(service, account) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      const target = windowsTarget(service, account);
+      const escaped = escapePowerShellSingleQuoted(target);
+      const script = `$target = '${escaped}'\n${PS_CRED_READ_SCRIPT}`;
+      const result = await exec(POWERSHELL_BIN, [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ]);
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to read Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || `exit ${result.code}`}`,
+        );
+      }
+      const raw = result.stdout.replace(/\r?\n$/u, '');
+      if (raw.length === 0) {
+        throw new KeychainNotFoundError(service, account);
+      }
+      return decodeStored(raw);
+    },
+
+    async deletePassword(service, account) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      const target = windowsTarget(service, account);
+      const result = await exec(CMDKEY_BIN, [`/delete:${target}`]);
+      if (result.code !== 0) {
+        // cmdkey returns "Element not found." in stderr for unknown targets.
+        if (/element not found|cannot find/iu.test(result.stderr) || result.code === 1) {
+          throw new KeychainNotFoundError(service, account);
+        }
+        throw new KeychainError(
+          `Failed to delete Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || result.stdout.trim()}`,
+        );
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Platform routing for the public API
+// ---------------------------------------------------------------------------
+
+let cachedBackend: KeychainBackend | undefined;
+
+function backend(): KeychainBackend {
+  if (cachedBackend) return cachedBackend;
+  if (process.platform === 'darwin') {
+    cachedBackend = createDarwinKeychainBackend(defaultExec());
+  } else if (process.platform === 'win32') {
+    cachedBackend = createWindowsKeychainBackend(defaultExec());
+  } else {
+    throw new KeychainPlatformError(
+      `Keychain backend not available for platform '${process.platform}'. aiftp supports macOS and Windows.`,
+    );
+  }
+  return cachedBackend;
+}
+
+// Test helper: reset the cached backend (used by Linux platform-guard test).
+export function _resetKeychainBackendForTests(): void {
+  cachedBackend = undefined;
+}
+
 export async function setPassword(
   service: string,
   account: string,
   password: string,
 ): Promise<void> {
-  assertSupportedPlatform();
-  assertNonEmpty(service, 'service');
-  assertNonEmpty(account, 'account');
-  if (typeof password !== 'string') {
-    throw new KeychainError('password must be a string');
-  }
-
-  try {
-    await execFileAsync(
-      SECURITY_BIN,
-      ['add-generic-password', '-s', service, '-a', account, '-w', encodeStored(password), '-U'],
-      { maxBuffer: MAX_BUFFER },
-    );
-  } catch (error: unknown) {
-    const detail = isExecError(error) ? error.stderr || error.message : String(error);
-    throw new KeychainError(
-      `Failed to store Keychain entry for service='${service}' account='${account}': ${detail.trim()}`,
-      { cause: error },
-    );
-  }
+  return backend().setPassword(service, account, password);
 }
 
-/**
- * Retrieves a password from the macOS Keychain.
- * Throws KeychainNotFoundError if (service, account) does not exist.
- */
 export async function getPassword(service: string, account: string): Promise<string> {
-  assertSupportedPlatform();
-  assertNonEmpty(service, 'service');
-  assertNonEmpty(account, 'account');
-
-  try {
-    const { stdout } = await execFileAsync(
-      SECURITY_BIN,
-      ['find-generic-password', '-s', service, '-a', account, '-w'],
-      { maxBuffer: MAX_BUFFER },
-    );
-    // `security -w` outputs the stored value followed by a newline.
-    // Strip the trailing LF/CRLF and decode our storage envelope.
-    return decodeStored(stdout.replace(/\r?\n$/, ''));
-  } catch (error: unknown) {
-    if (isExecError(error) && error.code === ERR_SEC_ITEM_NOT_FOUND) {
-      throw new KeychainNotFoundError(service, account, { cause: error });
-    }
-    const detail = isExecError(error) ? error.stderr || error.message : String(error);
-    throw new KeychainError(
-      `Failed to read Keychain entry for service='${service}' account='${account}': ${detail.trim()}`,
-      { cause: error },
-    );
-  }
+  return backend().getPassword(service, account);
 }
 
-/**
- * Deletes a Keychain entry. Throws KeychainNotFoundError if it does not exist.
- */
 export async function deletePassword(service: string, account: string): Promise<void> {
-  assertSupportedPlatform();
-  assertNonEmpty(service, 'service');
-  assertNonEmpty(account, 'account');
-
-  try {
-    await execFileAsync(SECURITY_BIN, ['delete-generic-password', '-s', service, '-a', account], {
-      maxBuffer: MAX_BUFFER,
-    });
-  } catch (error: unknown) {
-    if (isExecError(error) && error.code === ERR_SEC_ITEM_NOT_FOUND) {
-      throw new KeychainNotFoundError(service, account, { cause: error });
-    }
-    const detail = isExecError(error) ? error.stderr || error.message : String(error);
-    throw new KeychainError(
-      `Failed to delete Keychain entry for service='${service}' account='${account}': ${detail.trim()}`,
-      { cause: error },
-    );
-  }
+  return backend().deletePassword(service, account);
 }
 
 /**

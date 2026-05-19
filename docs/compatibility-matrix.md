@@ -121,7 +121,15 @@ returned `index.html` after the push. End-to-end loop confirmed.
 |---|---|---|
 | Server reports private PASV address behind NAT | `[quirks].ignore_pasv_address = true` | Use the control connection's host instead of the PASV reply |
 | MLSD not supported | `[quirks].use_mlsd = false` | Fall back to LIST parsing (basic-ftp default) |
-| Idle disconnect under N seconds | `[quirks].noop_interval_sec = <secs>` | Send NOOP keepalive (planned wiring — exposed in schema, not yet sent automatically) |
+| Idle disconnect under N seconds | `[quirks].noop_interval_sec = <secs>` | Send NOOP keepalive (wired in v0.2.2; basic-ftp control connection receives NOOP every N seconds) |
+
+## Operator platform support
+
+| Platform | Status | Credential storage |
+|---|---|---|
+| macOS 12+ (Monterey or newer) | ✅ verified end-to-end (Star Server) | macOS Keychain via the `security` CLI |
+| Windows 10+ / Windows 11 | ✅ v0.3 — CI green on `windows-latest` for Node 22 / 24, awaiting first live operator run | Windows Credential Manager via `cmdkey` + PowerShell-hosted Win32 `CredRead` |
+| Linux | ❌ not supported in v0.3 | `libsecret` is a Phase 2+ candidate |
 
 ## How to contribute a new row
 

@@ -24,7 +24,7 @@ AI agent — and protects against the new failure modes that brings:
 |---|---|
 | AI overwrites a production file with broken HTML | **Encrypted local backup of the remote version is taken before every push** |
 | AI generates syntax-broken PHP / JSON | **Pre-flight `php -l` / JSON / HTML checks** |
-| AI sees the password in chat history | **Credentials live in macOS Keychain, never in TOML, never in AI context** |
+| AI sees the password in chat history | **Credentials live in OS keychain (macOS Keychain / Windows Credential Manager), never in TOML, never in AI context** |
 | AI commits `.env` to FTP | **Hard-excluded files: `.env`, `wp-config.php`, `*.pem`, `db.php`, ...** |
 | AI fires an unintended real push from an MCP tool call | **Two-step `aiftp_push_prepare` → `aiftp_push_confirm` gate** |
 | Two agents race on the same site | **Server-side lock file** |
@@ -60,7 +60,7 @@ AI agent — and protects against the new failure modes that brings:
 
 ```bash
 # 1. Initialize a new project (asks host, port, protocol, etc.;
-#    stores the password in macOS Keychain)
+#    stores the password in macOS Keychain or Windows Credential Manager)
 aiftp init
 
 # 2. Already have a FileZilla site list? Import it.
@@ -151,7 +151,7 @@ pnpm biome check packages
 | **Walkthrough** | [docs/v0.2-walkthrough.md](docs/v0.2-walkthrough.md) |
 | **Compatibility** | [docs/compatibility-matrix.md](docs/compatibility-matrix.md) |
 | **FFFTP/FileZilla migration** | [docs/migration-from-ffftp.md](docs/migration-from-ffftp.md) |
-| **Target OS** | macOS (Phase 1 — verified). Windows + Keychain (DPAPI) coming in v0.3 / Phase 1.5 |
+| **Target OS** | macOS ✅ (end-to-end verified on Star Server). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
 | **Language** | TypeScript / Node.js 22+ |
 | **License** | MIT |
 

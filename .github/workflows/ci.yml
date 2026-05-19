@@ -16,7 +16,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        # v0.3 added Windows credential support; the unit-test suite runs the
+        # Windows-backend logic against a stubbed exec on every OS so the
+        # macOS runner still covers the Windows code path. The windows-latest
+        # row additionally exercises the Node toolchain natively (pnpm,
+        # build, typecheck, biome, vitest) on a real Windows runner so any
+        # path-separator / line-ending regression surfaces here, not at the
+        # user's machine.
+        os: [macos-latest, windows-latest]
         node: [22, 24]
 
     steps:
