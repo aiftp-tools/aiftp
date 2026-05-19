@@ -18,7 +18,7 @@ Legend:
 
 | Provider | TLS hostname | PASV | MLSD | SIZE | Encoding | `server_kind` preset | Status |
 |---|---|---|---|---|---|---|---|
-| **Star Server**（スターサーバー） | ⚠️ `*.star.ne.jp` vs `*.stars.ne.jp` mismatch | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `starserver` | ✅ verified end-to-end on `glocalworks.co.jp` (v0.2.0) + doctor probe v0.2.3 |
+| **Star Server**（スターサーバー） | ⚠️ `*.star.ne.jp` vs `*.stars.ne.jp` mismatch | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `starserver` | ✅ end-to-end push + doctor verified on `glocalworks.co.jp` Master FTP account (v0.2.5, 2026-05-19) |
 | ロリポップ | — | — | — | — | — | `lolipop` | — |
 | さくらインターネット | — | — | — | — | — | `sakura` | — |
 | エックスサーバー | — | — | — | — | — | `xserver` | — |
@@ -48,12 +48,32 @@ quirk too, so the handshake step succeeds on Star Server while the
 `ftps-cert` check still surfaces the mismatch as a `warn` with the
 cert CN / SAN / requested host in `details`.
 
-### Live `aiftp doctor` output on Star Server (v0.2.3, 2026-05-19)
+### Star Server account types
+
+Star Server exposes FTP through two account shapes that have *different
+chroot layouts*. This matters when you choose `remote_root`:
+
+| Account | Chroot at | `remote_root` shape | Example |
+|---|---|---|---|
+| **Master FTP** (control panel default) | `/<home-dir>/` (above all domains) | `/<your-domain>/public_html/<subpath>` | `/glocalworks.co.jp/public_html/aiftp-test` |
+| **Sub FTP** (per-domain) | `/<your-domain>/public_html/` | `/<subpath>` or `/` | `/aiftp-test` |
+
+If you don't know which one you have, run `aiftp ls /` and look at what's
+visible at the root:
+
+- **Multiple domain directories** (`glocalworks.co.jp/`, `u16tanaka.com/`,
+  ...) → Master FTP
+- **Web files directly** (`index.html`, `wp-content/`, ...) → Sub FTP
+
+`aiftp ls` was added in v0.2.5 specifically for this diagnosis.
+
+### Live `aiftp doctor` output on Star Server (v0.2.5, 2026-05-19, Master FTP)
 
 Profile: `glocalworks.co.jp` → `glocalworks.stars.ne.jp` (`157.112.187.94:21`)
+`remote_root = "/glocalworks.co.jp/public_html/aiftp-test"` (Master FTP)
 
 ```text
-summary: pass=9 warn=2 fail=1 skip=0
+summary: pass=10 warn=2 fail=0 skip=0
 
 config-file:     pass
 profile-exists:  pass
@@ -66,16 +86,26 @@ ftps-cert:       warn  (CN=*.star.ne.jp; requested glocalworks.stars.ne.jp)
 pasv:            pass  (no NAT leak)
 mlsd:            warn  (FEAT does not advertise MLSD; LIST fallback works)
 size:            pass  (SIZE supported)
-remote-root:     fail  (CWD <remote_root> returns non-2xx; under investigation)
+remote-root:     pass  (CWD <remote_root> succeeds after v0.2.5 auto-mkdir)
 ```
 
-The `remote-root: fail` is an open investigation: end-to-end `aiftp
-push` succeeds on this same profile (verified during the v0.2.0
-walkthrough), so the probe's `CWD <remote_root>` is hitting something
-that basic-ftp's `STOR /<remote_root>/<file>` path does not. Plausible
-cause: chrooted FTP where absolute-path `CWD` is rejected even though
-absolute-path `STOR` is accepted. Likely fixed in v0.2.4 by switching
-the probe to a less strict reachability check (`PWD` + `LIST`).
+`aiftp push` upload succeeded; `aiftp ls /glocalworks.co.jp/public_html/aiftp-test`
+returned `index.html` after the push. End-to-end loop confirmed.
+
+### Investigation history (v0.2.3 → v0.2.5)
+
+- **v0.2.3**: probe reported `remote-root: fail` with the vague message
+  `remote_root could not be selected.`
+- **v0.2.4**: surfaced the actual FTP reply (`550 not found`) and the
+  configured path in `details`, so the operator can diagnose without
+  re-running with `--verbose`.
+- **v0.2.5**: the underlying cause turned out to be that the deploy
+  engine deliberately skipped `mkdir` on the configured `remote_root`
+  itself (v0.1.1 design bug — intended as "operator told us this
+  exists" optimisation, but broke first-time pushes to fresh
+  subdirectories). v0.2.5 removed the skip; `ensureDir`'s mkdir-p
+  semantics handle the existing-dir case as a single cd. v0.2.5 also
+  added `aiftp ls` for read-only server exploration.
 
 ## Generic / VPS
 
