@@ -1,3 +1,4 @@
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
@@ -58,6 +59,8 @@ export interface AiftpMcpOptions {
 export type AiftpToolName =
   | 'aiftp_status'
   | 'aiftp_push'
+  | 'aiftp_push_prepare'
+  | 'aiftp_push_confirm'
   | 'aiftp_backup_list'
   | 'aiftp_backup_restore'
   | 'aiftp_backup_verify'
@@ -83,6 +86,20 @@ const pushSchema = profileSchema
   .extend({
     files: z.array(z.string().min(1)).optional(),
     dry_run: z.boolean().default(true),
+  })
+  .strict();
+
+const pushPrepareSchema = profileSchema
+  .extend({
+    files: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+const pushConfirmSchema = profileSchema
+  .extend({
+    plan_id: z.string().min(1),
+    diff_hash: z.string().min(1),
+    confirm_token: z.string().min(1),
   })
   .strict();
 
@@ -121,6 +138,8 @@ const listRemoteSchema = profileSchema
 const toolSchemas = {
   aiftp_status: profileSchema,
   aiftp_push: pushSchema,
+  aiftp_push_prepare: pushPrepareSchema,
+  aiftp_push_confirm: pushConfirmSchema,
   aiftp_backup_list: profileSchema,
   aiftp_backup_restore: backupRestoreSchema,
   aiftp_backup_verify: backupVerifySchema,
@@ -131,7 +150,11 @@ const toolSchemas = {
 
 const toolDescriptions = {
   aiftp_status: 'Show local deployment diff.',
-  aiftp_push: 'Run a dry-run or real push through the configured aiftp profile.',
+  aiftp_push: 'Run a dry-run push. For a real push, use aiftp_push_prepare + aiftp_push_confirm.',
+  aiftp_push_prepare:
+    'Prepare a real push: returns plan_id, diff_hash, confirm_token, expected_file_count, and expected_remote_root. Pass these back to aiftp_push_confirm within the TTL to actually upload.',
+  aiftp_push_confirm:
+    'Confirm a previously-prepared real push. Requires the exact plan_id / diff_hash / confirm_token from aiftp_push_prepare.',
   aiftp_backup_list: 'List encrypted backup snapshots.',
   aiftp_backup_restore: 'Restore one file from a backup snapshot to a local output path.',
   aiftp_backup_verify: 'Verify a backup snapshot.',
@@ -278,6 +301,11 @@ async function handleStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToo
 
 async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushSchema.parse(rawArgs ?? {});
+  if (args.dry_run === false) {
+    throw new Error(
+      'aiftp_push refuses dry_run=false. Use the two-step flow: aiftp_push_prepare to get a plan_id/diff_hash/confirm_token, then aiftp_push_confirm to actually upload.',
+    );
+  }
   const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
   const profile = config.profile[args.profile];
   if (!profile) {
@@ -339,6 +367,182 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
   return textResult({ ok: true, profile: args.profile, result });
 }
 
+// ---------------------------------------------------------------------------
+// Two-step push: prepare + confirm.
+// ---------------------------------------------------------------------------
+
+interface PreparedPushPlan {
+  planId: string;
+  diffHash: string;
+  confirmToken: string;
+  profile: string;
+  files?: readonly string[];
+  expectedFileCount: number;
+  expectedRemoteRoot: string;
+  createdAt: number;
+}
+
+const PLAN_TTL_MS = 5 * 60 * 1000;
+const planStore = new Map<string, PreparedPushPlan>();
+
+function pruneExpiredPlans(now: number): void {
+  for (const [id, plan] of planStore) {
+    if (now - plan.createdAt > PLAN_TTL_MS) planStore.delete(id);
+  }
+}
+
+function hashPlannedFiles(files: readonly string[]): string {
+  const stable = [...files].sort().join('\n');
+  return createHash('sha256').update(stable).digest('hex');
+}
+
+async function executePush(
+  app: AiftpMcpApp,
+  args: { profile: string; files?: readonly string[]; dry_run: boolean },
+): Promise<PushResult> {
+  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const profile = config.profile[args.profile];
+  if (!profile) {
+    throw new Error(`Profile not found: ${args.profile}`);
+  }
+  const runtimeStore = await app.runtime.createBackupStore?.({
+    cwd: app.cwd,
+    profileName: args.profile,
+  });
+  const runtimeUploader = await app.runtime.createUploader?.({
+    cwd: app.cwd,
+    profileName: args.profile,
+  });
+  const needsDefaultFtp =
+    !app.runtime.runPush &&
+    !args.dry_run &&
+    (runtimeStore === undefined || runtimeUploader === undefined);
+  const sharedFtpClient = needsDefaultFtp
+    ? await createDefaultFtpClient(app.cwd, args.profile)
+    : undefined;
+  try {
+    const backupStore = await pushBackupStoreFor(
+      app,
+      args.profile,
+      args.dry_run,
+      sharedFtpClient,
+      runtimeStore,
+    );
+    const uploader =
+      runtimeUploader ??
+      (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
+    return await (app.runtime.runPush ?? runPush)({
+      ...(await loadStatusContext(app.cwd, args.profile)),
+      backupStore: backupStore as unknown as PushOptions['backupStore'],
+      uploader,
+      remoteRoot: profile.remote_root,
+      files: args.files ? [...args.files] : undefined,
+      dryRun: args.dry_run,
+      safety: {
+        maxFilesPerPush: config.safety.max_files_per_push,
+        maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
+        verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+      },
+      preflight: (paths) => checkAll(paths),
+    });
+  } finally {
+    await sharedFtpClient?.disconnect();
+  }
+}
+
+async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  const args = pushPrepareSchema.parse(rawArgs ?? {});
+  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const profile = config.profile[args.profile];
+  if (!profile) {
+    throw new Error(`Profile not found: ${args.profile}`);
+  }
+  // Run a dry-run to compute the plan + diff that the operator will later
+  // be confirming. The diff_hash binds the confirm to *this* set of files;
+  // if anything changes between prepare and confirm (e.g. the user edits
+  // another file), the hash will not match and confirm refuses.
+  const previewResult = await executePush(app, {
+    profile: args.profile,
+    files: args.files,
+    dry_run: true,
+  });
+  const now = Date.now();
+  pruneExpiredPlans(now);
+  const planId = randomUUID();
+  const diffHash = hashPlannedFiles(previewResult.planned);
+  const confirmToken = randomBytes(24).toString('base64url');
+  planStore.set(planId, {
+    planId,
+    diffHash,
+    confirmToken,
+    profile: args.profile,
+    files: args.files,
+    expectedFileCount: previewResult.planned.length,
+    expectedRemoteRoot: profile.remote_root,
+    createdAt: now,
+  });
+  return textResult({
+    ok: true,
+    profile: args.profile,
+    plan_id: planId,
+    diff_hash: diffHash,
+    confirm_token: confirmToken,
+    expected_file_count: previewResult.planned.length,
+    expected_remote_root: profile.remote_root,
+    diff: previewResult.diff,
+    planned: previewResult.planned,
+    ttl_ms: PLAN_TTL_MS,
+  });
+}
+
+async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  const args = pushConfirmSchema.parse(rawArgs ?? {});
+  const now = Date.now();
+  pruneExpiredPlans(now);
+  const plan = planStore.get(args.plan_id);
+  if (!plan) {
+    throw new Error(
+      `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_push_prepare again to obtain a fresh plan.`,
+    );
+  }
+  if (plan.profile !== args.profile) {
+    throw new Error(
+      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${args.profile}".`,
+    );
+  }
+  if (plan.diffHash !== args.diff_hash) {
+    throw new Error(
+      'diff_hash mismatch: the local diff drifted between prepare and confirm. Call aiftp_push_prepare again to inspect the new plan.',
+    );
+  }
+  if (plan.confirmToken !== args.confirm_token) {
+    throw new Error('confirm_token mismatch: refusing to push.');
+  }
+  // Consume the plan before performing the side-effectful push so a second
+  // confirm with the same token cannot replay the upload.
+  planStore.delete(args.plan_id);
+  const result = await executePush(app, {
+    profile: plan.profile,
+    files: plan.files,
+    dry_run: false,
+  });
+  if (!result.dryRun) {
+    await saveState(stateDir(app.cwd, plan.profile), result.nextState);
+    await appendLogEntry(app.cwd, {
+      at: new Date().toISOString(),
+      event: 'push',
+      profile: plan.profile,
+      uploaded: result.uploaded.length,
+    });
+  }
+  return textResult({
+    ok: true,
+    profile: plan.profile,
+    plan_id: args.plan_id,
+    result,
+  });
+}
+
 async function handleBackupList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = profileSchema.parse(rawArgs ?? {});
   const snapshots = await (await backupStoreFor(app, args.profile)).listSnapshots();
@@ -387,6 +591,8 @@ async function handleListRemote(app: AiftpMcpApp, rawArgs: unknown): Promise<Cal
 const handlers = {
   aiftp_status: handleStatus,
   aiftp_push: handlePush,
+  aiftp_push_prepare: handlePushPrepare,
+  aiftp_push_confirm: handlePushConfirm,
   aiftp_backup_list: handleBackupList,
   aiftp_backup_restore: handleBackupRestore,
   aiftp_backup_verify: handleBackupVerify,
@@ -407,9 +613,57 @@ export async function callAiftpTool(
   }
 }
 
+/**
+ * Build a safe, AI-consumable summary of `.aiftp.toml`. This is what
+ * `aiftp://config` returns over MCP -- the raw TOML would leak host /
+ * user / remote_root / keychain_service to any tool that can read the
+ * resource, which Codex flagged in the v0.2 plan review.
+ */
+async function buildConfigSummary(app: AiftpMcpApp): Promise<{
+  schema: number;
+  encoding: { file_name: string };
+  profiles: Record<
+    string,
+    {
+      protocol: string;
+      ftps_mode?: string;
+      server_kind: string;
+      passive_mode?: boolean;
+      credentials_configured: boolean;
+    }
+  >;
+}> {
+  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const profiles: Record<
+    string,
+    {
+      protocol: string;
+      ftps_mode?: string;
+      server_kind: string;
+      passive_mode?: boolean;
+      credentials_configured: boolean;
+    }
+  > = {};
+  for (const [name, profile] of Object.entries(config.profile)) {
+    if (!profile) continue;
+    profiles[name] = {
+      protocol: profile.protocol,
+      ftps_mode: profile.ftps_mode,
+      server_kind: profile.server_kind,
+      passive_mode: profile.passive_mode,
+      credentials_configured: Boolean(profile.keychain_service && profile.user),
+    };
+  }
+  return {
+    schema: config.schema,
+    encoding: { file_name: config.encoding?.file_name ?? 'auto' },
+    profiles,
+  };
+}
+
 export async function readAiftpResource(app: AiftpMcpApp, uri: string): Promise<string> {
   if (uri === 'aiftp://config') {
-    return readFile(join(app.cwd, '.aiftp.toml'), 'utf8');
+    return JSON.stringify(await buildConfigSummary(app));
   }
   const statePrefix = 'aiftp://state/';
   if (uri.startsWith(statePrefix)) {

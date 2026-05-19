@@ -116,6 +116,191 @@ describe('mcp', () => {
     ).rejects.toThrow();
   });
 
+  it('aiftp_push (no dry_run flag) refuses to perform a real upload — use prepare/confirm', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        throw new Error('runPush should not be called for refused real-push request');
+      },
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push', {
+      profile: 'production',
+      dry_run: false,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/prepare\/confirm|two-step|aiftp_push_prepare/i);
+  });
+
+  it('aiftp_push_prepare returns plan_id, diff_hash, confirm_token, and expected counts', async () => {
+    await writeConfig();
+    const pushResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html', 'about.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['about.html', 'index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => pushResult,
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+    });
+    const parsed = parseText(result);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(parsed.diff_hash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(parsed.confirm_token).toMatch(/.{16,}/u);
+    expect(parsed.expected_file_count).toBe(2);
+    expect(parsed.expected_remote_root).toBe('/public_html');
+    expect(parsed.profile).toBe('production');
+  });
+
+  it('aiftp_push_confirm requires matching plan_id, diff_hash, and confirm_token', async () => {
+    await writeConfig();
+    const dryRunResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const realResult: PushResult = {
+      ...dryRunResult,
+      dryRun: false,
+      uploaded: [
+        {
+          path: 'index.html',
+          localPath: 'idx',
+          remotePath: '/public_html/index.html',
+          size: 42,
+          hash: 'h',
+        },
+      ],
+      nextState: { schema: 1, files: {} },
+    };
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) => (opts.dryRun ? dryRunResult : realResult),
+      createBackupStore: async () => ({
+        listSnapshots: async () => [],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.alloc(0),
+        createAutoSnapshot: async () => ({
+          id: 'stub-snap',
+          type: 'auto',
+          createdAt: '2026-05-19T00:00:00.000Z',
+          fileCount: 0,
+          totalBytes: 0,
+          files: [],
+        }),
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+    };
+
+    // Wrong token: rejected.
+    const wrongToken = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: 'wrong-token',
+    });
+    expect(wrongToken.isError).toBe(true);
+    expect(JSON.stringify(wrongToken.content)).toMatch(/confirm_token|token mismatch/i);
+
+    // Wrong diff_hash: rejected (something changed between prepare/confirm).
+    const wrongHash = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: 'a'.repeat(64),
+      confirm_token: prepared.confirm_token,
+    });
+    expect(wrongHash.isError).toBe(true);
+    expect(JSON.stringify(wrongHash.content)).toMatch(/diff_hash|drift/i);
+
+    // Correct values: real push runs.
+    const confirmRaw = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    if (confirmRaw.isError) {
+      throw new Error(`confirm failed unexpectedly: ${JSON.stringify(confirmRaw.content)}`);
+    }
+    const confirmed = parseText(confirmRaw) as {
+      ok: boolean;
+      result: { dryRun: boolean; uploaded: unknown[] };
+    };
+    expect(confirmed.result.dryRun).toBe(false);
+    expect(confirmed.result.uploaded).toHaveLength(1);
+  });
+
+  it('aiftp_push_confirm rejects a stale plan_id (already consumed)', async () => {
+    await writeConfig();
+    const pushResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) =>
+        opts.dryRun
+          ? pushResult
+          : { ...pushResult, dryRun: false, nextState: { schema: 2, files: {} } },
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    );
+    // First confirm consumes the plan.
+    await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    // Second confirm with the same plan_id must fail.
+    const replay = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(replay.isError).toBe(true);
+    expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+  });
+
+  it('aiftp://config resource returns a redacted JSON summary (no host / user / keychain_service)', async () => {
+    await writeConfig();
+    const resource = await readAiftpResource(createAiftpMcp({ cwd }), 'aiftp://config');
+    const parsed = JSON.parse(resource);
+    expect(parsed.schema).toBeTypeOf('number');
+    expect(parsed.profiles).toBeTypeOf('object');
+    expect(parsed.profiles.production).toBeTypeOf('object');
+    expect(parsed.profiles.production.host).toBeUndefined();
+    expect(parsed.profiles.production.user).toBeUndefined();
+    expect(parsed.profiles.production.keychain_service).toBeUndefined();
+    expect(parsed.profiles.production.remote_root).toBeUndefined();
+    // Non-sensitive metadata is allowed.
+    expect(parsed.profiles.production.protocol).toBe('ftps');
+    expect(parsed.profiles.production.server_kind).toBe('starserver');
+  });
+
   it('aiftp_backup_list, restore, verify, prune, log, and list_remote delegate safely', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp'), { recursive: true });
@@ -201,7 +386,9 @@ describe('mcp', () => {
 
     const app = createAiftpMcp({ cwd });
 
-    expect(await readAiftpResource(app, 'aiftp://config')).toContain('[profile.production]');
+    expect(
+      JSON.parse(await readAiftpResource(app, 'aiftp://config')).profiles.production,
+    ).toBeTypeOf('object');
     expect(JSON.parse(await readAiftpResource(app, 'aiftp://state/production'))).toEqual({
       schema: 1,
       files: {},
