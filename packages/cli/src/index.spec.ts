@@ -139,6 +139,48 @@ describe('cli', () => {
     expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
   });
 
+  it('init warns when remote_root starts with a leading "/" (shared-host gotcha)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'starserver',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+    const warning = stderr.join('\n');
+    expect(warning).toMatch(/remote_root.*\//i);
+    expect(warning).toMatch(/shared host|leading.*\//i);
+  });
+
+  it('init does not warn when remote_root has no leading "/"', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+    expect(stderr.join('\n')).not.toMatch(/remote_root/);
+  });
+
   it('init refuses to overwrite existing config unless --force is passed', async () => {
     await writeConfig();
 

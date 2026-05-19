@@ -10,6 +10,7 @@ import {
   FtpError,
   FtpNotFoundError,
   FtpTlsError,
+  mapFtpError,
 } from './ftp-client.js';
 
 // ---------------------------------------------------------------------------
@@ -138,10 +139,68 @@ describe('FtpError hierarchy', () => {
     expect(err.name).toBe('FtpTlsError');
   });
 
+  it('FtpTlsError carries certificate diagnostic fields when provided', () => {
+    const err = new FtpTlsError('tls altname mismatch', {
+      certCommonName: '*.star.ne.jp',
+      certAltNames: ['*.star.ne.jp', 'star.ne.jp'],
+      actualHost: 'ftp.stars.ne.jp',
+      recommendedAction:
+        'After confirming server identity through another channel, set safety.verify_certificate=false in .aiftp.toml and retry.',
+    });
+    expect(err.certCommonName).toBe('*.star.ne.jp');
+    expect(err.certAltNames).toEqual(['*.star.ne.jp', 'star.ne.jp']);
+    expect(err.actualHost).toBe('ftp.stars.ne.jp');
+    expect(err.recommendedAction).toContain('verify_certificate=false');
+  });
+
   it('FtpConnectionError extends FtpError', () => {
     const err = new FtpConnectionError('conn');
     expect(err).toBeInstanceOf(FtpError);
     expect(err.name).toBe('FtpConnectionError');
+  });
+});
+
+describe('mapFtpError: TLS hostname diagnostics', () => {
+  it('extracts cert CN / SAN / host from ERR_TLS_CERT_ALTNAME_INVALID and adds a recommended action', () => {
+    // Synthesize a Node TLS altname-mismatch error shape. Node's actual error
+    // attaches `code`, `host`, `cert`, and `reason` properties.
+    const rawError = Object.assign(
+      new Error(
+        "Hostname/IP does not match certificate's altnames: Host: ftp.stars.ne.jp. is not in the cert's altnames: DNS:*.star.ne.jp, DNS:star.ne.jp",
+      ),
+      {
+        code: 'ERR_TLS_CERT_ALTNAME_INVALID',
+        host: 'ftp.stars.ne.jp',
+        cert: {
+          subject: { CN: '*.star.ne.jp' },
+          subjectaltname: 'DNS:*.star.ne.jp, DNS:star.ne.jp',
+        },
+      },
+    );
+
+    const mapped = mapFtpError(rawError, 'connect');
+
+    expect(mapped).toBeInstanceOf(FtpTlsError);
+    const tlsErr = mapped as FtpTlsError;
+    expect(tlsErr.certCommonName).toBe('*.star.ne.jp');
+    expect(tlsErr.certAltNames).toEqual(['*.star.ne.jp', 'star.ne.jp']);
+    expect(tlsErr.actualHost).toBe('ftp.stars.ne.jp');
+    expect(tlsErr.recommendedAction).toMatch(/verify_certificate\s*=\s*false/);
+    expect(tlsErr.message).toContain('*.star.ne.jp');
+    expect(tlsErr.message).toContain('ftp.stars.ne.jp');
+  });
+
+  it('does not attach altname diagnostics for unrelated TLS errors', () => {
+    const rawError = Object.assign(new Error('expired'), {
+      code: 'CERT_HAS_EXPIRED',
+    });
+
+    const mapped = mapFtpError(rawError, 'connect');
+
+    expect(mapped).toBeInstanceOf(FtpTlsError);
+    const tlsErr = mapped as FtpTlsError;
+    expect(tlsErr.certCommonName).toBeUndefined();
+    expect(tlsErr.actualHost).toBeUndefined();
   });
 });
 

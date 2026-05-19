@@ -21,10 +21,30 @@ export class FtpAuthError extends FtpError {
   }
 }
 
+export interface FtpTlsErrorDiagnostics {
+  /** CN from the server certificate's subject, when available. */
+  certCommonName?: string;
+  /** Parsed list of DNS / IP altnames from the server certificate. */
+  certAltNames?: string[];
+  /** The host the client was trying to connect to (from Node's TLS error). */
+  actualHost?: string;
+  /** Human-readable next step the operator can take to unblock themselves. */
+  recommendedAction?: string;
+}
+
 export class FtpTlsError extends FtpError {
-  constructor(message: string, options?: { cause?: unknown }) {
+  readonly certCommonName?: string;
+  readonly certAltNames?: string[];
+  readonly actualHost?: string;
+  readonly recommendedAction?: string;
+
+  constructor(message: string, options?: { cause?: unknown } & FtpTlsErrorDiagnostics) {
     super(message, options);
     this.name = 'FtpTlsError';
+    this.certCommonName = options?.certCommonName;
+    this.certAltNames = options?.certAltNames;
+    this.actualHost = options?.actualHost;
+    this.recommendedAction = options?.recommendedAction;
   }
 }
 
@@ -97,11 +117,47 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  * Best-effort: the FTP reply code is the strongest signal; if it is
  * missing, the message text is sniffed for known phrases.
  */
-function mapFtpError(error: unknown, context: string): FtpError {
+/**
+ * Parse a Node TLS cert's `subjectaltname` field (e.g.
+ * "DNS:*.star.ne.jp, DNS:star.ne.jp, IP Address:10.0.0.1") into a plain
+ * list of altname values without the `DNS:` / `IP Address:` prefix.
+ */
+function parseSubjectAltName(raw: unknown): string[] | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .map((entry) => entry.replace(/^(?:DNS|IP Address|URI|email):\s*/iu, ''))
+    .filter((entry) => entry.length > 0);
+}
+
+function diagnoseAltnameError(err: {
+  host?: unknown;
+  cert?: { subject?: { CN?: unknown }; subjectaltname?: unknown };
+}): FtpTlsErrorDiagnostics {
+  const host = typeof err?.host === 'string' ? err.host : undefined;
+  const cn = typeof err?.cert?.subject?.CN === 'string' ? err.cert.subject.CN : undefined;
+  const altNames = parseSubjectAltName(err?.cert?.subjectaltname);
+  const recommendedAction =
+    'After confirming the server identity through another channel (control panel, support, DNS), set safety.verify_certificate=false in .aiftp.toml and retry. aiftp does not silently bypass TLS hostname checks.';
+  return {
+    certCommonName: cn,
+    certAltNames: altNames,
+    actualHost: host,
+    recommendedAction,
+  };
+}
+
+export function mapFtpError(error: unknown, context: string): FtpError {
   if (error instanceof FtpError) {
     return error;
   }
-  const err = error as { code?: number | string; message?: string };
+  const err = error as {
+    code?: number | string;
+    message?: string;
+    host?: unknown;
+    cert?: { subject?: { CN?: unknown }; subjectaltname?: unknown };
+  };
   const code = typeof err?.code === 'number' ? err.code : undefined;
   const msg = err?.message ?? String(error);
 
@@ -116,6 +172,18 @@ function mapFtpError(error: unknown, context: string): FtpError {
       'ERR_TLS_CERT_ALTNAME_INVALID',
     ]);
     if (tlsCodes.has(err.code)) {
+      // Only ALTNAME errors carry the cert / host details we want to surface.
+      // For other TLS failures (expired, self-signed, etc.) we still wrap as
+      // FtpTlsError but without specific diagnostic fields.
+      if (err.code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
+        const diagnostics = diagnoseAltnameError(err);
+        const altList = diagnostics.certAltNames?.join(', ') ?? '(none)';
+        const enhanced = `${context}: TLS hostname mismatch. Server certificate CN="${diagnostics.certCommonName ?? '?'}" altNames=[${altList}] does not cover requested host "${diagnostics.actualHost ?? '?'}". ${diagnostics.recommendedAction ?? ''}`;
+        return new FtpTlsError(enhanced.trim(), {
+          cause: error,
+          ...diagnostics,
+        });
+      }
       return new FtpTlsError(`${context}: TLS verification failed (${err.code}): ${msg}`, {
         cause: error,
       });

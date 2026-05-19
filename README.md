@@ -11,9 +11,14 @@ Real-world checklist verified on a production Star Server account:
 push, encrypted backup capture from the remote, restore-to-pre-push,
 TLS warning, hard-excluded credentials, Keychain-resident secrets.
 
-Phase 1.1 follow-ups (auto-mkdir parent directories, init UX for
-`/`-prefixed `remote_root` on shared hosts, server-specific TLS quirks)
-are tracked in `../docs/spec.md` and will land in v0.2.
+Phase 1.1 follow-ups land in v0.1.1: automatic `mkdir` of parent
+directories before upload, `aiftp backup restore` hardening (snapshot
+ID validation, `--output` path traversal guard, `--force` overwrite
+flag), `aiftp init` warning for `/`-prefixed `remote_root` on shared
+hosts, and richer TLS hostname-mismatch diagnostics (the server CN /
+altNames and a recommended next step are surfaced — aiftp never
+silently disables certificate verification). The FFFTP / FileZilla
+import suite lands in v0.2 (see `../docs/spec.md` §17.6 and §付録 C).
 
 ---
 

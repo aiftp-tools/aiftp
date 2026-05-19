@@ -443,6 +443,12 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error('Explicit consent is required before initializing aiftp.');
       }
 
+      if (answers.remoteRoot.startsWith('/')) {
+        stderr(
+          `Warning: remote_root starts with "/" (${answers.remoteRoot}). On shared hosts (StarServer / Lolipop / Sakura / Xserver) the actual upload root is often "/<your-domain>/public_html/..." or "/<your-user>/public_html/...". Confirm with your provider's FTP setup guide that the leading "/" is intended.`,
+        );
+      }
+
       await writeFile(configPath, renderConfig(answers), { encoding: 'utf8', mode: 0o600 });
       await ensureGitignore(cwd);
       await keychain.setPassword(answers.keychainService, answers.user, answers.password);
