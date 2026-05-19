@@ -381,7 +381,7 @@ describe('cli', () => {
     const fakeStore: CliBackupStore = {
       listSnapshots: async () => [
         {
-          id: 'snap-1',
+          id: '2026-05-18T12-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
           type: 'auto',
           createdAt: '2026-05-18T12:00:00.000Z',
           fileCount: 1,
@@ -397,14 +397,15 @@ describe('cli', () => {
       createBackupStore: async () => fakeStore,
     };
 
+    const validId = '2026-05-18T12-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
     await parse(['backup', 'list', '--profile', 'production'], { runtime });
-    await parse(['backup', 'verify', 'snap-1', '--profile', 'production'], { runtime });
+    await parse(['backup', 'verify', validId, '--profile', 'production'], { runtime });
     await parse(['backup', 'prune', '--keep', '1', '--profile', 'production'], { runtime });
     await parse(
       [
         'backup',
         'restore',
-        'snap-1',
+        validId,
         'index.html',
         '--output',
         'restored/index.html',
@@ -414,8 +415,8 @@ describe('cli', () => {
       { runtime },
     );
 
-    expect(stdout).toContain('snap-1 auto 2026-05-18T12:00:00.000Z files=1 bytes=18');
-    expect(stdout).toContain('snap-1 ok checked=1');
+    expect(stdout).toContain(`${validId} auto 2026-05-18T12:00:00.000Z files=1 bytes=18`);
+    expect(stdout).toContain(`${validId} ok checked=1`);
     expect(stdout).toContain('Pruned 1 snapshot(s)');
     expect(await readFile(join(cwd, 'restored', 'index.html'), 'utf8')).toBe('<h1>restored</h1>\n');
   });
@@ -424,6 +425,134 @@ describe('cli', () => {
     await expect(parse(['backup', 'prune', '--keep', 'abc'])).rejects.toThrow(
       '--keep must be a non-negative integer',
     );
+  });
+
+  it('backup restore rejects an empty snapshot id', async () => {
+    await writeConfig();
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => {
+        throw new Error('should not be called');
+      },
+    };
+    await expect(
+      parse(['backup', 'restore', '', 'index.html', '--output', 'restored.html'], {
+        runtime: { createBackupStore: async () => fakeStore },
+      }),
+    ).rejects.toThrow(/snapshot id is required/i);
+  });
+
+  it('backup restore rejects a whitespace-only snapshot id', async () => {
+    await writeConfig();
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => {
+        throw new Error('should not be called');
+      },
+    };
+    await expect(
+      parse(['backup', 'restore', '   ', 'index.html', '--output', 'restored.html'], {
+        runtime: { createBackupStore: async () => fakeStore },
+      }),
+    ).rejects.toThrow(/snapshot id is required/i);
+  });
+
+  it('backup restore rejects a malformed snapshot id', async () => {
+    await writeConfig();
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => {
+        throw new Error('should not be called');
+      },
+    };
+    await expect(
+      parse(['backup', 'restore', '../etc/passwd', 'index.html', '--output', 'restored.html'], {
+        runtime: { createBackupStore: async () => fakeStore },
+      }),
+    ).rejects.toThrow(/invalid snapshot id/i);
+  });
+
+  it('backup restore rejects an --output path outside the project root', async () => {
+    await writeConfig();
+    const restored = Buffer.from('<h1>restored</h1>\n', 'utf8');
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => restored,
+    };
+    await expect(
+      parse(
+        [
+          'backup',
+          'restore',
+          '2026-05-18T12-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          'index.html',
+          '--output',
+          '../escape.html',
+        ],
+        { runtime: { createBackupStore: async () => fakeStore } },
+      ),
+    ).rejects.toThrow(/--output.*(outside|project root)/i);
+  });
+
+  it('backup restore refuses to overwrite an existing output without --force', async () => {
+    await writeConfig();
+    const existing = join(cwd, 'already-there.html');
+    await writeFile(existing, 'pre-existing content', 'utf8');
+    const restored = Buffer.from('<h1>restored</h1>\n', 'utf8');
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => restored,
+    };
+    await expect(
+      parse(
+        [
+          'backup',
+          'restore',
+          '2026-05-18T12-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          'index.html',
+          '--output',
+          'already-there.html',
+        ],
+        { runtime: { createBackupStore: async () => fakeStore } },
+      ),
+    ).rejects.toThrow(/already exists.*--force/i);
+    expect(await readFile(existing, 'utf8')).toBe('pre-existing content');
+  });
+
+  it('backup restore overwrites an existing output when --force is set', async () => {
+    await writeConfig();
+    const existing = join(cwd, 'replaced.html');
+    await writeFile(existing, 'pre-existing content', 'utf8');
+    const restored = Buffer.from('<h1>restored</h1>\n', 'utf8');
+    const fakeStore: CliBackupStore = {
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => restored,
+    };
+    await parse(
+      [
+        'backup',
+        'restore',
+        '2026-05-18T12-00-00-000Z-auto-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        'index.html',
+        '--output',
+        'replaced.html',
+        '--force',
+      ],
+      { runtime: { createBackupStore: async () => fakeStore } },
+    );
+    expect(await readFile(existing, 'utf8')).toBe('<h1>restored</h1>\n');
   });
 
   it('mcp starts the stdio MCP server through the configured runtime', async () => {

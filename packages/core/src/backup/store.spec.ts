@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateKey } from '../encryption.js';
 import { createExcluder } from '../exclude.js';
-import { BackupLimitError, type BackupSource, BackupStore, type SnapshotMeta } from './store.js';
+import {
+  BackupLimitError,
+  type BackupSource,
+  BackupStore,
+  type SnapshotMeta,
+  isValidSnapshotId,
+} from './store.js';
 
 function sha256(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
@@ -172,5 +178,65 @@ describe('BackupStore', () => {
     expect(snapshot.files[0]?.sha256Original).toBe(
       sha256(sourceFiles.get('index.html') ?? Buffer.alloc(0)),
     );
+  });
+
+  it('round-trips multibyte (UTF-8) and Shift_JIS-style byte content for filenames', async () => {
+    // Filename containing characters that span the same byte range as Shift_JIS
+    // (e.g. half-width katakana and CJK ideographs in UTF-8). The path is a JS
+    // string, but the manifest is encrypted as JSON bytes -- regressions here
+    // would silently corrupt non-ASCII paths.
+    const jpName = 'メモ／テスト_2026年5月.html';
+    const cafeName = 'café-régression.html';
+    const jpContent = Buffer.from('<h1>テスト</h1>\n', 'utf8');
+    const cafeContent = Buffer.from('Bonjour à tous\n', 'utf8');
+    sourceFiles.set(jpName, jpContent);
+    sourceFiles.set(cafeName, cafeContent);
+
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot([jpName, cafeName]);
+
+    expect(snapshot.files.map((f) => f.path).sort()).toEqual([cafeName, jpName].sort());
+
+    await expect(store.restoreFile(snapshot.id, jpName)).resolves.toEqual(jpContent);
+    await expect(store.restoreFile(snapshot.id, cafeName)).resolves.toEqual(cafeContent);
+  });
+
+  it('rejects missing files in restoreFile with a clear BackupError', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot(['index.html']);
+
+    await expect(store.restoreFile(snapshot.id, 'does-not-exist.html')).rejects.toThrow(
+      /Snapshot file not found/,
+    );
+  });
+});
+
+describe('isValidSnapshotId', () => {
+  it('accepts an id produced by createSnapshotId (ISO-timestamp + type + uuid)', () => {
+    expect(
+      isValidSnapshotId('2026-05-18T12-30-00-000Z-auto-12345678-1234-1234-1234-123456789012'),
+    ).toBe(true);
+    expect(
+      isValidSnapshotId('2026-05-18T12-30-00-000Z-full-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
+    ).toBe(true);
+  });
+
+  it('rejects empty and whitespace-only strings', () => {
+    expect(isValidSnapshotId('')).toBe(false);
+    expect(isValidSnapshotId('   ')).toBe(false);
+    expect(isValidSnapshotId('\t\n')).toBe(false);
+  });
+
+  it('rejects path traversal and separator characters', () => {
+    expect(isValidSnapshotId('../etc/passwd')).toBe(false);
+    expect(isValidSnapshotId('foo/bar')).toBe(false);
+    expect(isValidSnapshotId('foo\\bar')).toBe(false);
+    expect(isValidSnapshotId('snap-1')).toBe(false); // wrong shape
+  });
+
+  it('rejects unknown snapshot types', () => {
+    expect(
+      isValidSnapshotId('2026-05-18T12-30-00-000Z-bogus-12345678-1234-1234-1234-123456789012'),
+    ).toBe(false);
   });
 });

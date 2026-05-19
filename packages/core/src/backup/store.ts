@@ -66,6 +66,19 @@ export class BackupLimitError extends BackupError {
   }
 }
 
+// Snapshot ids are produced by createSnapshotId() as:
+//   `${isoTimestampWithColonsReplaced}-${type}-${uuidv4}`
+// e.g. "2026-05-18T12-30-00-000Z-auto-12345678-1234-1234-1234-123456789012".
+// The regex below is intentionally strict so user-supplied ids cannot escape
+// the snapshots directory or trigger an ENOENT on `manifest.enc` by passing
+// empty / path-traversal / unexpected-format strings.
+const SNAPSHOT_ID_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-(auto|full)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+export function isValidSnapshotId(id: string): boolean {
+  return typeof id === 'string' && SNAPSHOT_ID_PATTERN.test(id);
+}
+
 function normalizePath(path: string): string {
   let normalized = path.replace(/\\/g, '/');
   while (normalized.startsWith('./')) {

@@ -1,5 +1,5 @@
 import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
@@ -19,6 +19,7 @@ import {
   generateKey,
   getPassword,
   hasPassword,
+  isValidSnapshotId,
   loadConfig,
   loadState,
   runPush,
@@ -207,6 +208,37 @@ async function loadProfile(cwd: string, name: string) {
 
 function projectPath(cwd: string, path: string): string {
   return isAbsolute(path) ? path : join(cwd, path);
+}
+
+/**
+ * Resolve `path` relative to `cwd` and verify the result stays inside the
+ * project root. Absolute paths are accepted only when they already resolve
+ * inside `cwd`. Throws otherwise. Used by destructive write operations such
+ * as `backup restore --output ...` to prevent accidental writes outside the
+ * project (path traversal via `..` or absolute escape).
+ */
+function restrictToProject(cwd: string, path: string): string {
+  if (path.length === 0) {
+    throw new Error('--output path must not be empty');
+  }
+  const cwdResolved = resolve(cwd);
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(cwdResolved, path);
+  const rel = relative(cwdResolved, absolute);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`--output ${path} resolves outside the project root`);
+  }
+  return absolute;
+}
+
+function validateSnapshotIdArg(id: string): void {
+  if (id.trim().length === 0) {
+    throw new Error('Snapshot id is required');
+  }
+  if (!isValidSnapshotId(id)) {
+    throw new Error(
+      `Invalid snapshot id: ${JSON.stringify(id)}. Expected format like "<iso-timestamp>-<auto|full>-<uuid>" (see \`aiftp backup list\`).`,
+    );
+  }
 }
 
 function stateDir(cwd: string, profileName: string): string {
@@ -639,13 +671,24 @@ export function createCli(options: CliOptions = {}): Command {
     .argument('<path>')
     .option('-p, --profile <name>', 'profile name', 'production')
     .requiredOption('--output <path>', 'local restore output path')
-    .action(async (id: string, path: string, cmd: { profile: string; output: string }) => {
-      const data = await (await backupStoreFor(cmd.profile)).restoreFile(id, path);
-      const output = projectPath(cwd, cmd.output);
-      await mkdir(dirname(output), { recursive: true });
-      await writeFile(output, data);
-      stdout(`Restored ${path} to ${cmd.output}`);
-    });
+    .option('-f, --force', 'overwrite the --output file if it already exists')
+    .action(
+      async (
+        id: string,
+        path: string,
+        cmd: { profile: string; output: string; force?: boolean },
+      ) => {
+        validateSnapshotIdArg(id);
+        const output = restrictToProject(cwd, cmd.output);
+        if (!cmd.force && (await exists(output))) {
+          throw new Error(`--output ${cmd.output} already exists. Pass --force to overwrite.`);
+        }
+        const data = await (await backupStoreFor(cmd.profile)).restoreFile(id, path);
+        await mkdir(dirname(output), { recursive: true });
+        await writeFile(output, data);
+        stdout(`Restored ${path} to ${cmd.output}`);
+      },
+    );
 
   program
     .command('mcp')

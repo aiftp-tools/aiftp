@@ -14,6 +14,7 @@ export {
   type BackupSource,
   BackupStore,
   type BackupStoreOptions,
+  isValidSnapshotId,
   type SnapshotFileMeta,
   type SnapshotId,
   type SnapshotMeta,
