@@ -63,6 +63,8 @@ export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export { isProdProfile } from './safety.js';
 
+export { type ParseFfftpIniOptions, parseFfftpIni } from './importers/ffftp.js';
+
 export {
   type ResolveRollbackTargetOptions,
   type RollbackBackupStore,

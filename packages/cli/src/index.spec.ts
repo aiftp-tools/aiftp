@@ -1441,6 +1441,42 @@ describe('cli', () => {
     await expect(parse(['rollback', '--dry-run'], { runtime })).rejects.toThrow(/steps|snapshot/i);
   });
 
+  it('import ffftp parses a Shift_JIS ffftp.ini and queues profiles for import (v0.7.0 #3)', async () => {
+    // ASCII-only ffftp.ini content (which is identical in SJIS/UTF-8
+    // bytes) — keeps the test free of an iconv-lite dependency at the
+    // CLI test layer. The Shift_JIS-decoding code path is exercised in
+    // core/src/importers/ffftp.spec.ts with real SJIS fixtures.
+    const iniBytes = Buffer.from(
+      [
+        '[Options]',
+        'Version=5',
+        '',
+        '[host0]',
+        'HostName=Star Server Production',
+        'HostAddress=ftp.example.jp',
+        'Port=21',
+        'UserName=deploy',
+        'RemoteDir=/public_html',
+        'UseSecure=1',
+        'PassV=1',
+        'KanjiCode=1',
+        '',
+      ].join('\r\n'),
+      'utf8',
+    );
+    await writeConfig();
+    const iniPath = join(cwd, 'ffftp.ini');
+    await writeFile(iniPath, iniBytes);
+
+    await parse(['import', 'ffftp', iniPath, '--dry-run']);
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/dry-run/i);
+    // Sanitized profile name from "Star Server Production"
+    expect(out).toMatch(/star-server-production/);
+    expect(out).toMatch(/ftp\.example\.jp/);
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

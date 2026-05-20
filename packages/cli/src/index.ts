@@ -34,6 +34,7 @@ import {
   loadConfig,
   loadState,
   migrateV1ToV2Source,
+  parseFfftpIni,
   parseFilezillaXml,
   probeFtps,
   removeProfileBlock,
@@ -682,10 +683,68 @@ interface RunImportFilezillaOptions {
 // and `aiftp profile remove`.
 
 async function runImportFilezilla(options: RunImportFilezillaOptions): Promise<void> {
-  const { cwd, xmlPath, dryRun, overwrite, keychainPrefix, stdout, keychain } = options;
+  const { xmlPath, cwd } = options;
   const absoluteXmlPath = isAbsolute(xmlPath) ? xmlPath : join(cwd, xmlPath);
   const xml = await readFile(absoluteXmlPath, 'utf8');
   const result = parseFilezillaXml(xml);
+  await runImportApply({
+    cwd: options.cwd,
+    result,
+    dryRun: options.dryRun,
+    overwrite: options.overwrite,
+    keychainPrefix: options.keychainPrefix,
+    stdout: options.stdout,
+    keychain: options.keychain,
+  });
+}
+
+/**
+ * v0.7.0 #3: import an FFFTP `ffftp.ini`. Reads as raw bytes, decodes
+ * Shift_JIS via iconv-lite, normalizes into the same `ImportedProfile[]`
+ * shape the FileZilla parser emits, and funnels through `runImportApply`.
+ * Conflict handling / password-skip semantics / Keychain writes are
+ * therefore identical to `aiftp import filezilla`. Passwords are NOT
+ * decrypted (FFFTP's Mask scheme is non-standard); `parseFfftpIni`
+ * emits `password.kind = 'master-encrypted'` which `runImportApply`
+ * skips. Operator runs `aiftp auth <profile>` after import.
+ */
+async function runImportFfftp(options: {
+  cwd: string;
+  iniPath: string;
+  dryRun: boolean;
+  overwrite: boolean;
+  keychainPrefix: string;
+  stdout: (line: string) => void;
+  keychain: CliKeychain;
+}): Promise<void> {
+  const absoluteIniPath = isAbsolute(options.iniPath)
+    ? options.iniPath
+    : join(options.cwd, options.iniPath);
+  const bytes = await readFile(absoluteIniPath);
+  const result = parseFfftpIni(bytes);
+  await runImportApply({
+    cwd: options.cwd,
+    result,
+    dryRun: options.dryRun,
+    overwrite: options.overwrite,
+    keychainPrefix: options.keychainPrefix,
+    stdout: options.stdout,
+    keychain: options.keychain,
+  });
+}
+
+interface RunImportApplyOptions {
+  cwd: string;
+  result: ReturnType<typeof parseFilezillaXml>;
+  dryRun: boolean;
+  overwrite: boolean;
+  keychainPrefix: string;
+  stdout: (line: string) => void;
+  keychain: CliKeychain;
+}
+
+async function runImportApply(options: RunImportApplyOptions): Promise<void> {
+  const { cwd, result, dryRun, overwrite, keychainPrefix, stdout, keychain } = options;
 
   // Dry-run reads the existing profile list from the raw TOML to avoid
   // triggering the v1 -> v2 auto-migration as a side effect. The non-dry-run
@@ -1755,6 +1814,42 @@ export function createCli(options: CliOptions = {}): Command {
           stdout,
           keychain,
         });
+      },
+    );
+
+  importCmd
+    .command('ffftp')
+    .description('Import profiles from an FFFTP ffftp.ini (Shift_JIS supported via iconv-lite)')
+    .argument('<path>', 'path to ffftp.ini (typically %APPDATA%/FFFTP/ffftp.ini on Windows)')
+    .option('--dry-run', 'preview the import without writing')
+    .option('--overwrite', 'replace existing profiles with the same name')
+    .option(
+      '--keychain-prefix <prefix>',
+      'Keychain service prefix used for imported credentials',
+      'aiftp:imported',
+    )
+    .action(
+      async (
+        iniPath: string,
+        cmd: { dryRun?: boolean; overwrite?: boolean; keychainPrefix: string },
+      ) => {
+        await runImportFfftp({
+          cwd,
+          iniPath,
+          dryRun: cmd.dryRun === true,
+          overwrite: cmd.overwrite === true,
+          keychainPrefix: cmd.keychainPrefix,
+          stdout,
+          keychain,
+        });
+        // FFFTP passwords are not decrypted; the operator must set them
+        // separately via Keychain. Surface the next-step instruction so
+        // the import doesn't feel "half done".
+        if (cmd.dryRun !== true) {
+          stdout(
+            'Note: FFFTP passwords are encrypted with a non-standard scheme and were NOT imported. Run `aiftp auth <profile>` to set each password in Keychain.',
+          );
+        }
       },
     );
 
