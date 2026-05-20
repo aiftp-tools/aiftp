@@ -100,14 +100,38 @@ export interface AiftpMcpApp {
 }
 
 /**
- * `profile` is intentionally optional. When the caller omits it, the server
- * resolves the default via `resolveDefaultProfile()` (env > `.aiftp/state`
- * file > single-profile fallback). Hard-coding "production" here would
- * regress single-profile configs whose only profile is named "staging" etc.
+ * `profile` is intentionally optional on read-only / dry-run schemas. When
+ * the caller omits it, the server resolves the default via
+ * `resolveDefaultProfile()` (env > `.aiftp/state` file > single-profile
+ * fallback). Hard-coding "production" here would regress single-profile
+ * configs whose only profile is named "staging" etc.
+ *
+ * Confirm schemas (`pushConfirmSchema`, `backupRestoreConfirmSchema`) use
+ * `requiredProfileSchema` instead — they MUST be invoked with the same
+ * profile name the prepare step returned, otherwise an AIFTP_PROFILE flip
+ * between prepare and confirm could change the default resolution and
+ * trigger a misleading "profile mismatch" instead of an intentional skip.
  */
 const profileSchema = z
   .object({
-    profile: z.string().min(1).optional(),
+    profile: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Profile name from .aiftp.toml. Optional — when omitted, resolved via AIFTP_PROFILE env > .aiftp/state/_default-profile.json > sole-profile fallback. Errors when multi-profile config has nothing pinned.',
+      ),
+  })
+  .strict();
+
+const requiredProfileSchema = z
+  .object({
+    profile: z
+      .string()
+      .min(1)
+      .describe(
+        'Profile name from .aiftp.toml. Required for confirm steps so the prepare-time profile is echoed back verbatim (no default resolution).',
+      ),
   })
   .strict();
 
@@ -126,7 +150,7 @@ const pushPrepareSchema = profileSchema
   })
   .strict();
 
-const pushConfirmSchema = profileSchema
+const pushConfirmSchema = requiredProfileSchema
   .extend({
     plan_id: z.string().min(1),
     diff_hash: z.string().min(1),
@@ -150,7 +174,7 @@ const backupRestorePrepareSchema = profileSchema
   })
   .strict();
 
-const backupRestoreConfirmSchema = profileSchema
+const backupRestoreConfirmSchema = requiredProfileSchema
   .extend({
     plan_id: z.string().min(1),
     diff_hash: z.string().min(1),
@@ -219,15 +243,33 @@ const toolDescriptions = {
   aiftp_log: 'Read recent local aiftp operation log entries.',
   aiftp_list_remote: 'List a remote directory through the configured runtime.',
   aiftp_profile_list:
-    'List profiles from .aiftp.toml with host (non-credential), credentialsPresent (keychain probe), and isDefault flags. Read-only.',
+    'List profiles from .aiftp.toml as redacted summaries: name, protocol, server_kind, credentialsStatus (present/missing/unknown), isDefault. Host / user / remote_root / keychain_service are NEVER surfaced (mirrors aiftp://config redaction policy). Read-only.',
   aiftp_profile_current:
     'Return the resolved default profile name (AIFTP_PROFILE env > .aiftp/state file > single-profile fallback), or null when ambiguous. Read-only.',
   aiftp_profile_test:
-    'Run a connection-subset of doctor against the chosen profile via runtime.runDoctor (excludes config/file checks). Read-only.',
+    'Run the connection-subset of doctor against the chosen profile. Requires the server to be constructed with `runtime.runDoctor` (the CLI wires it; bare MCP servers refuse the call). Excludes local-only checks (config-file, gitignore, profile-exists). The `ok` flag is recomputed from the filtered subset. Read-only.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
   return isAbsolute(path) ? path : join(cwd, path);
+}
+
+/**
+ * Read `.aiftp.toml` from `cwd` and wrap any failure with a message that
+ * tells the AI agent what file the MCP server was trying to read. Without
+ * this wrapper, an `ENOENT` from `loadConfig` surfaces through `toolError`
+ * as a bare `ENOENT: no such file or directory` which is hard for an AI
+ * agent to act on. Codex review flagged the missing context.
+ */
+async function loadConfigForMcp(cwd: string): Promise<Awaited<ReturnType<typeof loadConfig>>> {
+  try {
+    return await loadConfig(join(cwd, '.aiftp.toml'));
+  } catch (error: unknown) {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not read .aiftp.toml in ${cwd}. Run \`aiftp init\` to scaffold one, or cd into a project that has it. Underlying error: ${cause}`,
+    );
+  }
 }
 
 /**
@@ -244,15 +286,23 @@ function projectPath(cwd: string, path: string): string {
  * Throws when no profile can be determined (multi-profile config with
  * nothing pinned) so the caller surfaces a clear error instead of operating
  * on the wrong target.
+ *
+ * Optional `preloadedConfig` short-circuits the disk read for handlers that
+ * already had to call `loadConfigForMcp()` themselves — this avoids the
+ * double fs.readFile that Claude review flagged in v0.4.1 RC.
  */
-async function resolveProfileArg(cwd: string, requested: string | undefined): Promise<string> {
+async function resolveProfileArg(
+  cwd: string,
+  requested: string | undefined,
+  preloadedConfig?: Awaited<ReturnType<typeof loadConfig>>,
+): Promise<string> {
   if (requested && requested.length > 0) return requested;
-  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+  const config = preloadedConfig ?? (await loadConfigForMcp(cwd));
   const available = Object.keys(config.profile);
   const resolved = await resolveDefaultProfile(cwd, { availableProfiles: available });
   if (!resolved) {
     throw new Error(
-      'Could not resolve a default profile. Set AIFTP_PROFILE, run `aiftp profile use <name>`, or pass `profile` explicitly.',
+      'Could not resolve a default profile from .aiftp.toml. Set AIFTP_PROFILE, run `aiftp profile use <name>`, or pass `profile` explicitly.',
     );
   }
   return resolved;
@@ -266,8 +316,12 @@ function logPath(cwd: string): string {
   return join(cwd, '.aiftp', 'log.jsonl');
 }
 
-async function loadStatusContext(cwd: string, profileName: string): Promise<StatusOptions> {
-  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+async function loadStatusContext(
+  cwd: string,
+  profileName: string,
+  preloadedConfig?: Awaited<ReturnType<typeof loadConfig>>,
+): Promise<StatusOptions> {
+  const config = preloadedConfig ?? (await loadConfigForMcp(cwd));
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
@@ -306,7 +360,7 @@ function unavailableUploader(): DeployUploader {
 }
 
 async function createDefaultFtpClient(cwd: string, profileName: string): Promise<FtpClient> {
-  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(cwd);
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
@@ -386,9 +440,12 @@ function toolError(error: unknown): CallToolResult {
 
 async function handleStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = profileSchema.parse(rawArgs ?? {});
-  const profile = await resolveProfileArg(app.cwd, args.profile);
+  // Pre-load once and pass through so we avoid the double fs.readFile
+  // that Claude review flagged in v0.4.1 RC.
+  const config = await loadConfigForMcp(app.cwd);
+  const profile = await resolveProfileArg(app.cwd, args.profile, config);
   const status = await (app.runtime.runStatus ?? runStatus)(
-    await loadStatusContext(app.cwd, profile),
+    await loadStatusContext(app.cwd, profile, config),
   );
   return textResult({ ok: true, profile, status });
 }
@@ -400,8 +457,8 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       'aiftp_push refuses dry_run=false. Use the two-step flow: aiftp_push_prepare to get a plan_id/diff_hash/confirm_token, then aiftp_push_confirm to actually upload.',
     );
   }
-  const profileName = await resolveProfileArg(app.cwd, args.profile);
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
+  const profileName = await resolveProfileArg(app.cwd, args.profile, config);
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
@@ -434,7 +491,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       runtimeUploader ??
       (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
     return (app.runtime.runPush ?? runPush)({
-      ...(await loadStatusContext(app.cwd, profileName)),
+      ...(await loadStatusContext(app.cwd, profileName, config)),
       backupStore: backupStore as unknown as PushOptions['backupStore'],
       uploader,
       remoteRoot: profile.remote_root,
@@ -495,7 +552,7 @@ async function executePush(
   app: AiftpMcpApp,
   args: { profile: string; files?: readonly string[]; dry_run: boolean },
 ): Promise<PushResult> {
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
   const profile = config.profile[args.profile];
   if (!profile) {
     throw new Error(`Profile not found: ${args.profile}`);
@@ -527,7 +584,7 @@ async function executePush(
       runtimeUploader ??
       (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
     return await (app.runtime.runPush ?? runPush)({
-      ...(await loadStatusContext(app.cwd, args.profile)),
+      ...(await loadStatusContext(app.cwd, args.profile, config)),
       backupStore: backupStore as unknown as PushOptions['backupStore'],
       uploader,
       remoteRoot: profile.remote_root,
@@ -547,8 +604,8 @@ async function executePush(
 
 async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushPrepareSchema.parse(rawArgs ?? {});
-  const profileName = await resolveProfileArg(app.cwd, args.profile);
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
+  const profileName = await resolveProfileArg(app.cwd, args.profile, config);
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
@@ -593,7 +650,11 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
 
 async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushConfirmSchema.parse(rawArgs ?? {});
-  const profileName = await resolveProfileArg(app.cwd, args.profile);
+  // profile is required at the schema level (see requiredProfileSchema) so
+  // an AIFTP_PROFILE flip between prepare and confirm cannot silently change
+  // which plan we look up. Operators must echo back the exact profile name
+  // returned by aiftp_push_prepare.
+  const profileName = args.profile;
   const now = Date.now();
   pruneExpiredPlans(now);
   const plan = planStore.get(args.plan_id);
@@ -743,7 +804,9 @@ async function handleBackupRestoreConfirm(
   rawArgs: unknown,
 ): Promise<CallToolResult> {
   const args = backupRestoreConfirmSchema.parse(rawArgs ?? {});
-  const profileName = await resolveProfileArg(app.cwd, args.profile);
+  // profile required for the same race-prevention reason as
+  // handlePushConfirm — operators must echo the prepare-time profile back.
+  const profileName = args.profile;
   const now = Date.now();
   pruneExpiredRestorePlans(now);
   const plan = restorePlanStore.get(args.plan_id);
@@ -819,41 +882,60 @@ async function handleListRemote(app: AiftpMcpApp, rawArgs: unknown): Promise<Cal
 // `/mcp` users see the same name as `aiftp profile current`.
 // ---------------------------------------------------------------------------
 
+/**
+ * Tri-state credential probe result. Distinguishes "Keychain entry is
+ * missing" from "we couldn't probe the Keychain at all" (network drive
+ * unavailable, security CLI errored, etc.). Codex review flagged that
+ * silently coercing both to `false` would mislead an AI agent into a
+ * remediation loop ("set the password again", which won't help if the
+ * underlying error is something else).
+ */
+type CredentialsStatus = 'present' | 'missing' | 'unknown';
+
+/**
+ * Profile summary returned by `aiftp_profile_list`. Mirrors the redaction
+ * policy of the `aiftp://config` MCP resource — host / port / user /
+ * remote_root / keychain_service are NEVER surfaced to MCP clients.
+ *
+ * - `name`, `protocol`, `server_kind` are non-sensitive metadata.
+ * - `credentialsStatus` is a tri-state Keychain probe result.
+ * - `isDefault` mirrors `resolveDefaultProfile` so callers can mirror the
+ *   operator's `aiftp profile current` view.
+ */
 interface ProfileSummary {
   name: string;
-  host: string;
-  port: number;
   protocol: string;
-  user: string;
-  remote_root: string;
   server_kind: string;
-  credentialsPresent: boolean;
+  credentialsStatus: CredentialsStatus;
   isDefault: boolean;
 }
 
 async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   noArgsSchema.parse(rawArgs ?? {});
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
   const names = Object.keys(config.profile);
   const defaultName = await resolveDefaultProfile(app.cwd, { availableProfiles: names });
   const profiles: ProfileSummary[] = [];
   for (const name of names) {
     const profile = config.profile[name];
     if (!profile) continue;
-    // Keychain probe — never reads the secret value itself, only checks
-    // whether an entry exists. Safe to surface to AI agents.
-    const credentialsPresent = await hasPassword(profile.keychain_service, profile.user).catch(
-      () => false,
-    );
+    // Keychain probe — `security find-generic-password` on macOS and
+    // CredRead on Windows only check whether an entry exists; they do not
+    // expose the secret value. We surface three states so an AI agent can
+    // tell "missing password" apart from "Keychain access blocked".
+    let credentialsStatus: CredentialsStatus;
+    try {
+      credentialsStatus = (await hasPassword(profile.keychain_service, profile.user))
+        ? 'present'
+        : 'missing';
+    } catch {
+      credentialsStatus = 'unknown';
+    }
     profiles.push({
       name,
-      host: profile.host,
-      port: profile.port,
       protocol: profile.protocol,
-      user: profile.user,
-      remote_root: profile.remote_root,
       server_kind: profile.server_kind,
-      credentialsPresent,
+      credentialsStatus,
       isDefault: defaultName === name,
     });
   }
@@ -862,7 +944,7 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
 
 async function handleProfileCurrent(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   noArgsSchema.parse(rawArgs ?? {});
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
   const available = Object.keys(config.profile);
   const resolved = await resolveDefaultProfile(app.cwd, { availableProfiles: available });
   return textResult({ ok: true, profile: resolved });
@@ -891,22 +973,25 @@ async function handleProfileTest(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   const profile = await resolveProfileArg(app.cwd, args.profile);
   if (!app.runtime.runDoctor) {
     throw new Error(
-      'aiftp_profile_test requires a runtime.runDoctor hook. The MCP server does not run network probes by default.',
+      'aiftp_profile_test requires a runtime.runDoctor hook. The MCP server does not run network probes by default — use the aiftp CLI or wire runtime.runDoctor when constructing the server.',
     );
   }
   const report = await app.runtime.runDoctor({ cwd: app.cwd, profileName: profile });
   const filtered = report.results.filter((r) => CONNECTION_TEST_CHECK_IDS.has(r.id));
-  return textResult({
-    ok: report.ok,
-    profile,
-    results: filtered,
-    summary: {
-      pass: filtered.filter((r) => r.status === 'pass').length,
-      warn: filtered.filter((r) => r.status === 'warn').length,
-      fail: filtered.filter((r) => r.status === 'fail').length,
-      skip: filtered.filter((r) => r.status === 'skip').length,
-    },
-  });
+  // Recompute summary AND ok from the filtered set. Forwarding report.ok
+  // (the full-doctor verdict) would surface non-connection failures
+  // (e.g. `config-file` parse warnings, `gitignore` missing entries) as
+  // `ok: false` even when the connection itself is healthy — which is
+  // misleading for a tool whose contract is "test the connection". Codex
+  // review caught this inconsistency in v0.4.1 RC.
+  const summary = {
+    pass: filtered.filter((r) => r.status === 'pass').length,
+    warn: filtered.filter((r) => r.status === 'warn').length,
+    fail: filtered.filter((r) => r.status === 'fail').length,
+    skip: filtered.filter((r) => r.status === 'skip').length,
+  };
+  const ok = summary.fail === 0;
+  return textResult({ ok, profile, results: filtered, summary });
 }
 
 const handlers = {
@@ -959,7 +1044,7 @@ async function buildConfigSummary(app: AiftpMcpApp): Promise<{
     }
   >;
 }> {
-  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const config = await loadConfigForMcp(app.cwd);
   const profiles: Record<
     string,
     {

@@ -289,23 +289,34 @@ describe('mcp', () => {
   // v0.4.1: profile read-only MCP tools + default resolver unification
   // -----------------------------------------------------------------
 
-  it('aiftp_profile_list returns the structured profile array with credentialsPresent + isDefault', async () => {
+  it('aiftp_profile_list returns a REDACTED profile array (no host/port/user/remote_root)', async () => {
+    // Mirrors the aiftp://config resource redaction policy. The MCP server
+    // must never surface FTP host / username / remote_root through tools an
+    // AI agent can call — those values combined with the credential probe
+    // would otherwise leak attack-surface metadata to any MCP client.
     await writeConfig();
     const app = createAiftpMcp({ cwd });
     const result = await callAiftpTool(app, 'aiftp_profile_list', {});
     const parsed = parseText(result) as {
-      profiles: Array<{
-        name: string;
-        host: string;
-        credentialsPresent: boolean;
-        isDefault: boolean;
-      }>;
+      profiles: Array<Record<string, unknown>>;
     };
     expect(parsed.profiles).toHaveLength(1);
-    expect(parsed.profiles[0]).toMatchObject({
+    const entry = parsed.profiles[0] as Record<string, unknown>;
+    // Allowed (non-sensitive) fields:
+    expect(entry).toMatchObject({
       name: 'production',
-      host: 'ftp.example.com',
+      protocol: 'ftps',
+      server_kind: 'starserver',
+      isDefault: true,
     });
+    // Credentials probe is allowed but must be tri-state.
+    expect(['present', 'missing', 'unknown']).toContain(entry.credentialsStatus);
+    // Redacted (sensitive) fields:
+    expect(entry.host).toBeUndefined();
+    expect(entry.port).toBeUndefined();
+    expect(entry.user).toBeUndefined();
+    expect(entry.remote_root).toBeUndefined();
+    expect(entry.keychain_service).toBeUndefined();
   });
 
   it('aiftp_profile_current resolves the default and reports its name (or null when ambiguous)', async () => {
@@ -339,6 +350,52 @@ describe('mcp', () => {
     expect(ids).toContain('keychain');
     expect(ids).toContain('dns');
     expect(ids).not.toContain('config-file');
+  });
+
+  it('aiftp_profile_test recomputes ok from the FILTERED results (Codex review)', async () => {
+    // Codex review pointed out: forwarding report.ok would surface non-
+    // connection failures (e.g. config-file or gitignore) as `ok: false`
+    // even though the connection itself is healthy. ok must be derived
+    // from the same filtered set we return to the caller.
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runDoctor: async () => ({
+        ok: false, // Original report failed because of a non-connection check.
+        results: [
+          { id: 'config-file', title: '.aiftp.toml', status: 'fail', message: 'parse error' },
+          { id: 'keychain', title: 'Keychain', status: 'pass', message: 'ok' },
+          { id: 'dns', title: 'DNS', status: 'pass', message: 'resolved' },
+          { id: 'tcp', title: 'TCP', status: 'pass', message: 'ok' },
+        ],
+        summary: { pass: 3, warn: 0, fail: 1, skip: 0 },
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(
+      await callAiftpTool(app, 'aiftp_profile_test', { profile: 'production' }),
+    ) as { ok: boolean; results: Array<{ id: string }>; summary: { fail: number } };
+    // The filtered subset has no failures, so ok must be true.
+    expect(parsed.ok).toBe(true);
+    expect(parsed.summary.fail).toBe(0);
+    expect(parsed.results.map((r) => r.id)).not.toContain('config-file');
+  });
+
+  it('aiftp_profile_test resolves the default profile when arg is omitted', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runDoctor: async () => ({
+        ok: true,
+        results: [{ id: 'keychain', title: 'Keychain', status: 'pass', message: 'ok' }],
+        summary: { pass: 1, warn: 0, fail: 0, skip: 0 },
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_profile_test', {})) as {
+      ok: boolean;
+      profile: string;
+    };
+    expect(parsed.profile).toBe('production');
+    expect(parsed.ok).toBe(true);
   });
 
   it('MCP tools that take a profile arg fall back to resolveDefaultProfile (not hard-coded "production")', async () => {
@@ -377,6 +434,136 @@ describe('mcp', () => {
     expect(result.isError).not.toBe(true);
     const parsed = parseText(result) as { profile: string };
     expect(parsed.profile).toBe('staging');
+  });
+
+  it('aiftp_push_confirm requires `profile` (closes prepare→confirm race)', async () => {
+    // Without this guard, AIFTP_PROFILE flipping between prepare and
+    // confirm would resolve to a different default and trigger the wrong
+    // error message (profile mismatch instead of intentional skip). The
+    // confirm schema must surface profile as required so the prepare
+    // response can be echoed back verbatim.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      plan_id: 'whatever',
+      diff_hash: 'whatever',
+      confirm_token: 'whatever',
+      // intentionally omitting `profile`
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/profile/i);
+  });
+
+  it('aiftp_backup_restore_confirm requires `profile` (closes prepare→confirm race)', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+      plan_id: 'whatever',
+      diff_hash: 'whatever',
+      confirm_token: 'whatever',
+      // intentionally omitting `profile`
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/profile/i);
+  });
+
+  it('resolveProfileArg surfaces a helpful error when default cannot be resolved', async () => {
+    // Two profiles, no AIFTP_PROFILE env, no state file pin -> ambiguous.
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.staging]',
+        'host = "stg.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "stg"',
+        'remote_root = "/stg"',
+        'local_root = "."',
+        'keychain_service = "aiftp:staging"',
+        'server_kind = "generic"',
+        '',
+        '[profile.production]',
+        'host = "prod.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "prod"',
+        'remote_root = "/prod"',
+        'local_root = "."',
+        'keychain_service = "aiftp:production"',
+        'server_kind = "generic"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const savedEnv = process.env.AIFTP_PROFILE;
+    // biome-ignore lint/performance/noDelete: `= undefined` leaks an enumerable key into process.env and breaks downstream consumers; delete is required.
+    delete (process.env as Record<string, string | undefined>).AIFTP_PROFILE;
+    try {
+      const app = createAiftpMcp({ cwd });
+      const result = await callAiftpTool(app, 'aiftp_status', {}); // no profile arg
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result.content);
+      // The error must hint the operator at the resolution mechanism, not
+      // just say "Profile not found".
+      expect(text).toMatch(/AIFTP_PROFILE|profile use|default profile/i);
+    } finally {
+      if (savedEnv !== undefined) process.env.AIFTP_PROFILE = savedEnv;
+    }
+  });
+
+  it('aiftp_profile_current returns null when ambiguous (multi-profile, unpinned)', async () => {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.a]',
+        'host = "a.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "a"',
+        'remote_root = "/"',
+        'local_root = "."',
+        'keychain_service = "aiftp:a"',
+        'server_kind = "generic"',
+        '',
+        '[profile.b]',
+        'host = "b.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "b"',
+        'remote_root = "/"',
+        'local_root = "."',
+        'keychain_service = "aiftp:b"',
+        'server_kind = "generic"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const savedEnv = process.env.AIFTP_PROFILE;
+    // biome-ignore lint/performance/noDelete: `= undefined` leaks an enumerable key into process.env and breaks downstream consumers; delete is required.
+    delete (process.env as Record<string, string | undefined>).AIFTP_PROFILE;
+    try {
+      const app = createAiftpMcp({ cwd });
+      const parsed = parseText(await callAiftpTool(app, 'aiftp_profile_current', {})) as {
+        profile: string | null;
+      };
+      expect(parsed.profile).toBeNull();
+    } finally {
+      if (savedEnv !== undefined) process.env.AIFTP_PROFILE = savedEnv;
+    }
+  });
+
+  it('aiftp_status wraps loadConfig failure with an MCP-contextual message when .aiftp.toml is missing', async () => {
+    // No writeConfig() — the file does not exist at all.
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_status', {});
+    expect(result.isError).toBe(true);
+    // Must not leak the raw fs ENOENT message alone; must mention .aiftp.toml
+    // or the resolution context for the operator.
+    expect(JSON.stringify(result.content)).toMatch(/\.aiftp\.toml/);
   });
 
   it('aiftp://config resource returns a redacted JSON summary (no host / user / keychain_service)', async () => {
@@ -455,11 +642,13 @@ describe('mcp', () => {
       }),
     ) as { plan_id: string; diff_hash: string; confirm_token: string };
     await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+      profile: 'production',
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
     });
     const replay = await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+      profile: 'production',
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
@@ -530,6 +719,7 @@ describe('mcp', () => {
     ) as { plan_id: string; diff_hash: string; confirm_token: string };
     const confirmed = parseText(
       await callAiftpTool(app, 'aiftp_backup_restore_confirm', {
+        profile: 'production',
         plan_id: prepared.plan_id,
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
