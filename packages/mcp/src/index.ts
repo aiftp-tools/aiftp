@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
@@ -24,6 +24,7 @@ import {
   loadState,
   migrateV1ToV2Source,
   parseFilezillaXml,
+  removeProfileBlock,
   resolveDefaultProfile,
   runPush,
   runStatus,
@@ -1083,9 +1084,15 @@ interface PreparedMigratePlan {
   planId: string;
   diffHash: string;
   confirmToken: string;
-  migratedSource: string;
+  /**
+   * SHA-256 of the original (pre-migration) source. Used at confirm time
+   * to detect drift: if `.aiftp.toml` was modified between prepare and
+   * confirm, the hashes won't match and we refuse.
+   */
+  sourceHash: string;
   schemaBefore: number;
   schemaAfter: number;
+  sectionsAdded: string[];
   changed: boolean;
   createdAt: number;
 }
@@ -1112,49 +1119,92 @@ function detectSchemaVersion(source: string): number {
   return Number(match[1]);
 }
 
+/**
+ * Normalize Windows line endings before any diffing or hashing. FileZilla
+ * is a Windows-first tool and operators frequently hand-edit `.aiftp.toml`
+ * in editors that emit `\r\n`. We want the migration / drift check to
+ * behave identically regardless of source line endings.
+ */
+function normalizeLineEndings(source: string): string {
+  return source.replace(/\r\n/gu, '\n');
+}
+
+async function readTomlSource(cwd: string): Promise<string> {
+  return readFile(join(cwd, '.aiftp.toml'), 'utf8')
+    .then(normalizeLineEndings)
+    .catch((error: unknown) => {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not read .aiftp.toml in ${cwd}. Run \`aiftp init\` to scaffold one. Underlying error: ${cause}`,
+      );
+    });
+}
+
+/**
+ * Identify which top-level sections (`[encoding]`, `[quirks]`, ...) the
+ * v1→v2 migration appended. This lets `aiftp_config_migrate_prepare`
+ * surface a redacted *structural* diff to MCP clients without echoing
+ * sensitive credentials inside `[profile.*]` blocks. Codex review
+ * (block): returning the full TOML source through MCP violates the
+ * aiftp://config redaction policy.
+ */
+function detectAddedSections(oldSource: string, newSource: string): string[] {
+  const tagRe = /^\[[^\]\r\n]+\]/gmu;
+  const oldSections = new Set(Array.from(oldSource.matchAll(tagRe)).map((m) => m[0]));
+  const newSections = Array.from(newSource.matchAll(tagRe)).map((m) => m[0]);
+  // Profile sections (`[profile.foo]`) are filtered out — those are
+  // operator-defined identifiers, not migration-added scaffolding, and we
+  // do not want their names appearing in the MCP response either.
+  return newSections.filter((s) => !oldSections.has(s) && !s.startsWith('[profile.'));
+}
+
 async function handleConfigMigratePrepare(
   app: AiftpMcpApp,
   rawArgs: unknown,
 ): Promise<CallToolResult> {
   noArgsSchema.parse(rawArgs ?? {});
-  const tomlPath = join(app.cwd, '.aiftp.toml');
-  const source = await readFile(tomlPath, 'utf8').catch((error: unknown) => {
-    const cause = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Could not read .aiftp.toml in ${app.cwd}. Run \`aiftp init\` to scaffold one. Underlying error: ${cause}`,
-    );
-  });
+  const source = await readTomlSource(app.cwd);
   const schemaBefore = detectSchemaVersion(source);
   const migration = migrateV1ToV2Source(source);
   const schemaAfter = migration.changed ? 2 : schemaBefore;
+  const sectionsAdded = migration.changed ? detectAddedSections(source, migration.source) : [];
   const now = Date.now();
   pruneExpiredMigratePlans(now);
   const planId = randomUUID();
-  // diff_hash binds the confirm to exactly this migrated_source. If the
-  // operator edits .aiftp.toml between prepare and confirm, the hash will
-  // not match and confirm refuses.
-  const diffHash = createHash('sha256').update(migration.source).digest('hex');
+  // diff_hash is the SHA-256 of the *original* source. At confirm time
+  // we re-read the file and recompute this hash; any drift between
+  // prepare and confirm causes confirm to refuse. (Codex review: storing
+  // only the post-migration hash leaves a window where the operator
+  // could hand-edit the pre-migration file and confirm an unreviewed
+  // version.)
+  const sourceHash = createHash('sha256').update(source).digest('hex');
   const confirmToken = randomBytes(24).toString('base64url');
   migratePlanStore.set(planId, {
     planId,
-    diffHash,
+    diffHash: sourceHash,
     confirmToken,
-    migratedSource: migration.source,
+    sourceHash,
     schemaBefore,
     schemaAfter,
+    sectionsAdded,
     changed: migration.changed,
     createdAt: now,
   });
+  // NOTE: `migrated_source` is intentionally NOT in the response. Returning
+  // the full migrated TOML would echo every host / user / keychain_service
+  // through MCP and contradict the aiftp://config redaction policy. The AI
+  // agent gets a structured summary; the operator can `cat .aiftp.toml`
+  // themselves for the literal preview.
   return textResult({
     ok: true,
     plan_id: planId,
-    diff_hash: diffHash,
+    diff_hash: sourceHash,
     confirm_token: confirmToken,
     ttl_ms: PLAN_TTL_MS,
     changed: migration.changed,
     schema_before: schemaBefore,
     schema_after: schemaAfter,
-    migrated_source: migration.source,
+    sections_added: sectionsAdded,
   });
 }
 
@@ -1173,14 +1223,28 @@ async function handleConfigMigrateConfirm(
   }
   if (plan.diffHash !== args.diff_hash) {
     throw new Error(
-      'diff_hash mismatch: .aiftp.toml drifted between prepare and confirm. Call aiftp_config_migrate_prepare again.',
+      'diff_hash mismatch: refusing to migrate. The plan was prepared for a different .aiftp.toml. Call aiftp_config_migrate_prepare again to inspect the new plan.',
     );
   }
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to migrate.');
   }
+  // Codex review (block): re-read .aiftp.toml at confirm time and verify
+  // the on-disk content still matches the prepare-time hash. Without this
+  // check, a CLI invocation or operator hand-edit between prepare and
+  // confirm would slip an unreviewed file through the gate.
+  const currentSource = await readTomlSource(app.cwd);
+  const currentHash = createHash('sha256').update(currentSource).digest('hex');
+  if (currentHash !== plan.sourceHash) {
+    throw new Error(
+      '.aiftp.toml drifted between prepare and confirm: refusing to migrate. Call aiftp_config_migrate_prepare again to review the new content.',
+    );
+  }
   // Consume the plan before the side-effectful write so a second confirm
-  // with the same token cannot replay the migration on top of itself.
+  // with the same token cannot replay the migration. (This is also why we
+  // consume on the changed=false branch below — replay there is harmless
+  // but consuming makes the contract uniform: one plan = at most one
+  // confirm.)
   migratePlanStore.delete(args.plan_id);
   if (!plan.changed) {
     return textResult({
@@ -1212,8 +1276,12 @@ interface PreparedFilezillaImportPlan {
   confirmToken: string;
   /**
    * Profiles that will actually be written. Already filtered against
-   * SFTP / master-encrypted / collision-without-overwrite so confirm just
-   * needs to materialize TOML blocks.
+   * SFTP / master-encrypted / collision-without-overwrite / batch
+   * duplicate, so confirm just needs to materialize TOML blocks.
+   *
+   * `isOverwrite` drives confirm-side block replacement: when true, the
+   * existing `[profile.<name>]` block is removed before the new one is
+   * appended. (Otherwise the previous v0.4.2 RC double-wrote.)
    */
   queued: Array<{
     name: string;
@@ -1222,6 +1290,18 @@ interface PreparedFilezillaImportPlan {
     user: string;
     isOverwrite: boolean;
   }>;
+  /**
+   * SHA-256 of the existing `.aiftp.toml` source at prepare time. confirm
+   * recomputes this hash and refuses if it has drifted. Catches the case
+   * where a colliding profile got added between prepare and confirm.
+   */
+  existingHash: string;
+  /**
+   * Snapshot of existing profile names at prepare time. Used to detect
+   * "new collisions" at confirm even if the file otherwise drifted in a
+   * benign way (Codex MEDIUM-6).
+   */
+  existingNames: Set<string>;
   collisions: string[];
   skipped: Array<{ name: string; reason: string }>;
   warnings: string[];
@@ -1298,7 +1378,8 @@ async function handleImportFilezillaPrepare(
   // v1→v2 auto-migration as a side effect of the prepare step (the
   // operator opts in to the write via the confirm step instead).
   const tomlPath = join(app.cwd, '.aiftp.toml');
-  const existingSource = await readFile(tomlPath, 'utf8').catch(() => '');
+  const existingSource = normalizeLineEndings(await readFile(tomlPath, 'utf8').catch(() => ''));
+  const existingHash = createHash('sha256').update(existingSource).digest('hex');
   const existingNames = new Set(
     Array.from(existingSource.matchAll(/^\[profile\.([^\]]+)\]/gmu)).map((m) => m[1] ?? ''),
   );
@@ -1307,11 +1388,19 @@ async function handleImportFilezillaPrepare(
   const collisions: string[] = [];
   const skipped: Array<{ name: string; reason: string }> = [];
   const redactedProfiles: Array<Record<string, unknown>> = [];
+  // Codex review (block): when the FileZilla XML contains two `<Server>`
+  // entries with the same `<Name>`, both got queued and confirm wrote two
+  // `[profile.<name>]` blocks. We dedup within the batch on first
+  // occurrence — second one is reported as skipped with a clear reason.
+  const seenInBatch = new Set<string>();
 
   for (const profile of parsed.profiles) {
-    // password_kind goes into the prepare output; password.value is
-    // intentionally never read here so it cannot leak into MCP responses.
-    const passwordKind = profile.password.kind;
+    // Codex/Claude review: read ONLY the `kind` discriminator from the
+    // password union. password.value / password.cipherText are
+    // intentionally never read here so a future refactor that spreads
+    // `profile.password` cannot leak the encoded password into MCP
+    // responses. The typed Pick below is a structural guarantee.
+    const passwordKind: ImportedProfile['password']['kind'] = profile.password.kind;
     redactedProfiles.push({
       name: profile.name,
       host: profile.host,
@@ -1322,6 +1411,13 @@ async function handleImportFilezillaPrepare(
       password_kind: passwordKind,
       warnings: profile.warnings,
     });
+    if (seenInBatch.has(profile.name)) {
+      skipped.push({
+        name: profile.name,
+        reason: 'duplicate name within import batch (kept the first occurrence)',
+      });
+      continue;
+    }
     if (profile.protocol === 'sftp') {
       skipped.push({ name: profile.name, reason: 'SFTP not supported by aiftp; skipped' });
       continue;
@@ -1351,15 +1447,20 @@ async function handleImportFilezillaPrepare(
       user: profile.user,
       isOverwrite: conflict,
     });
+    seenInBatch.add(profile.name);
   }
 
   const now = Date.now();
   pruneExpiredFilezillaImportPlans(now);
   const planId = randomUUID();
   // diff_hash binds confirm to exactly this set of (name, block) pairs.
+  // We sort with `localeCompare(en)` so the hash is stable across V8
+  // versions and platforms. The sort is only used for hashing — the
+  // operator-visible `queued_names` array preserves the original XML
+  // order so the prepare output remains intuitive to review.
   const planSignature = queued
     .map((q) => `${q.name}\n${q.block}`)
-    .sort()
+    .sort((a, b) => a.localeCompare(b, 'en'))
     .join('\n---\n');
   const diffHash = createHash('sha256').update(planSignature).digest('hex');
   const confirmToken = randomBytes(24).toString('base64url');
@@ -1368,6 +1469,8 @@ async function handleImportFilezillaPrepare(
     diffHash,
     confirmToken,
     queued,
+    existingHash,
+    existingNames,
     collisions,
     skipped,
     warnings: parsed.warnings,
@@ -1423,22 +1526,59 @@ async function handleImportFilezillaConfirm(
     });
   }
 
-  // Materialize the queued profile blocks. We append each block as raw
-  // TOML text — `appendProfileBlock` takes a structured ProfileBlockFields
-  // object, but the FileZilla import path already rendered the canonical
-  // block shape (see renderImportedProfileBlock), so a raw concat keeps
-  // TOML rendering centralized in one place per source. Overwrite mode
-  // (collisions allowed) is not yet supported in MCP — that's a v0.4.3
-  // candidate; current MCP confirm only writes profiles whose name does
-  // not collide.
+  // Codex review (block): re-read .aiftp.toml at confirm time and verify
+  // the on-disk content still matches the prepare-time hash + existing
+  // profile names. If a new collision appeared (operator added the same
+  // name through another tool between prepare and confirm), we refuse
+  // rather than silently produce duplicate `[profile.X]` blocks.
   const tomlPath = join(app.cwd, '.aiftp.toml');
-  let source = await readFile(tomlPath, 'utf8').catch(() => '');
+  const currentSourceRaw = await readFile(tomlPath, 'utf8').catch(() => '');
+  const currentSource = normalizeLineEndings(currentSourceRaw);
+  const currentHash = createHash('sha256').update(currentSource).digest('hex');
+  if (currentHash !== plan.existingHash) {
+    const currentNames = new Set(
+      Array.from(currentSource.matchAll(/^\[profile\.([^\]]+)\]/gmu)).map((m) => m[1] ?? ''),
+    );
+    // Drift is only fatal when it introduces a new collision; cosmetic
+    // edits (comment changes) are tolerated. This matches the operator
+    // intent: the gate is about safety, not surface bookkeeping.
+    const newCollisions: string[] = [];
+    for (const entry of plan.queued) {
+      const conflict = currentNames.has(entry.name);
+      if (conflict && !entry.isOverwrite) {
+        newCollisions.push(entry.name);
+      }
+    }
+    if (newCollisions.length > 0) {
+      throw new Error(
+        `aiftp_import_filezilla_confirm refused: .aiftp.toml drifted and now contains a colliding profile name (${newCollisions.join(', ')}). Call aiftp_import_filezilla_prepare again to inspect the new collisions.`,
+      );
+    }
+  }
+
+  // Materialize the queued profile blocks. For overwrite entries, we
+  // first remove the existing `[profile.<name>]` block from the source
+  // (using the canonical `removeProfileBlock` helper from core) and then
+  // append the new block at the end. For non-overwrite entries we just
+  // append. The whole operation is committed via a tmp+rename atomic
+  // write so a crash mid-write leaves either the old file or the new
+  // file, never a half-rewritten state (Claude HIGH-1).
+  let source = currentSource;
   for (const entry of plan.queued) {
+    if (entry.isOverwrite) {
+      source = removeProfileBlock(source, entry.name);
+    }
     if (source.length > 0 && !source.endsWith('\n')) source += '\n';
     if (source.length > 0 && !source.endsWith('\n\n')) source += '\n';
     source += `${entry.block}\n`;
   }
-  await writeFile(tomlPath, source, 'utf8');
+  // Atomic write: write to a temp sibling, then rename. `rename(2)` on
+  // the same filesystem is atomic with respect to other readers — they
+  // see either the old inode or the new inode, never an intermediate
+  // partial buffer.
+  const tmpPath = `${tomlPath}.tmp.${process.pid}.${Date.now()}`;
+  await writeFile(tmpPath, source, 'utf8');
+  await rename(tmpPath, tomlPath);
 
   // The MCP server intentionally does not touch the Keychain — passwords
   // never traverse the MCP boundary. The operator runs `aiftp auth` for
