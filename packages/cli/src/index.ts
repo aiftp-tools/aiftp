@@ -28,6 +28,7 @@ import {
   generateKey,
   getPassword,
   hasPassword,
+  isProdProfile,
   isValidProfileName,
   isValidSnapshotId,
   loadConfig,
@@ -990,83 +991,136 @@ export function createCli(options: CliOptions = {}): Command {
     .option('--dry-run', 'plan without uploading')
     .option('--json', 'print JSON output')
     .option('--only <paths...>', 'limit push to specific path(s)')
-    .action(async (cmd: { profile: string; dryRun?: boolean; json?: boolean; only?: string[] }) => {
-      const config = await loadConfig(join(cwd, '.aiftp.toml'));
-      const profile = config.profile[cmd.profile];
-      if (!profile) {
-        throw new Error(`Profile not found: ${cmd.profile}`);
-      }
-      const context = await loadStatusContext(cwd, cmd.profile);
-      const runtimeBackupStore = await runtime.createBackupStore?.({
-        cwd,
-        profileName: cmd.profile,
-      });
-      const runtimeUploader = await runtime.createUploader?.({
-        cwd,
-        profileName: cmd.profile,
-      });
-      const needsDefaultFtp =
-        !runtime.runPush &&
-        !cmd.dryRun &&
-        (runtimeBackupStore === undefined || runtimeUploader === undefined);
-      let sharedFtpClient: FtpClient | undefined;
-      try {
-        sharedFtpClient = needsDefaultFtp
-          ? await createDefaultFtpClient(cwd, cmd.profile, keychain)
-          : undefined;
-        const backupStore =
-          runtimeBackupStore ??
-          (await createDefaultBackupStore({
-            cwd,
-            profileName: cmd.profile,
-            keychain,
-            ftpClient: sharedFtpClient,
-          }));
-        const managedUploader = await resolveManagedUploader(
-          cwd,
-          cmd.profile,
-          cmd.dryRun,
-          keychain,
-          runtime,
-          sharedFtpClient,
-          runtimeUploader,
+    .option('--yes', 'skip the interactive production-profile confirmation (use with care)')
+    .action(
+      async (cmd: {
+        profile: string;
+        dryRun?: boolean;
+        json?: boolean;
+        only?: string[];
+        yes?: boolean;
+      }) => {
+        const config = await loadConfig(join(cwd, '.aiftp.toml'));
+        const profile = config.profile[cmd.profile];
+        if (!profile) {
+          throw new Error(`Profile not found: ${cmd.profile}`);
+        }
+        // v0.6.0 #7: Always surface the deploy target before any FTP
+        // activity. The point is that the operator (or AI agent) reading
+        // the terminal can spot a typo'd profile or wrong host before
+        // bytes leave the machine. Doctor-output style so it's grep-able.
+        stderr(
+          `push target: profile=${cmd.profile}  host=${profile.host}  remote_root=${profile.remote_root}`,
         );
-        const result = await (runtime.runPush ?? runPush)({
-          ...context,
-          backupStore: backupStore as PushOptions['backupStore'],
-          uploader: managedUploader.uploader,
-          remoteRoot: profile.remote_root,
-          files: cmd.only,
-          dryRun: cmd.dryRun,
-          safety: {
-            maxFilesPerPush: config.safety.max_files_per_push,
-            maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
-            verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
-          },
-          preflight: (paths) => checkAll(paths),
-        }).finally(() => managedUploader.close());
 
-        if (!result.dryRun) {
-          await saveState(stateDir(cwd, cmd.profile), result.nextState);
-          await appendLogEntry(cwd, {
-            at: new Date().toISOString(),
-            event: 'push',
-            profile: cmd.profile,
-            uploaded: result.uploaded.length,
+        // Production profile confirmation gate. The check fires when:
+        //   1. The profile name matches `safety.prod_profile_patterns`
+        //      (glob, see core/src/safety.ts)
+        //   2. Production warning is enabled (`safety.warn_on_prod_profile`)
+        //   3. The push is NOT a dry-run (dry-run never mutates the
+        //      server, so the prompt would just be noise)
+        //   4. `--yes` is not present (operator opt-out)
+        //
+        // The prompt asks the operator to TYPE the profile name back.
+        // A typed match is the contract — not just a y/N — so that
+        // muscle memory ("y, enter, y, enter...") cannot accidentally
+        // ship to production.
+        const prodMatch = isProdProfile({
+          profileName: cmd.profile,
+          patterns: config.safety.prod_profile_patterns,
+          warnEnabled: config.safety.warn_on_prod_profile,
+        });
+        if (prodMatch && !cmd.dryRun && !cmd.yes) {
+          stderr(
+            `⚠️  '${cmd.profile}' matches a production-profile pattern. Type the profile name to confirm (or rerun with --dry-run / --yes):`,
+          );
+          const typed = await prompt({
+            type: 'text',
+            name: 'confirmation',
+            message: `Type "${cmd.profile}" to push:`,
           });
+          if (typed.confirmation !== cmd.profile) {
+            throw new Error(
+              `Production push aborted: typed value did not match profile name "${cmd.profile}".`,
+            );
+          }
         }
 
-        if (cmd.json) {
-          stdout(JSON.stringify(result));
-        } else if (result.dryRun) {
-          stdout(`Planned ${result.planned.length} file(s)`);
-        } else {
-          stdout(`Uploaded ${result.uploaded.length} file(s)`);
+        const context = await loadStatusContext(cwd, cmd.profile);
+        const runtimeBackupStore = await runtime.createBackupStore?.({
+          cwd,
+          profileName: cmd.profile,
+        });
+        const runtimeUploader = await runtime.createUploader?.({
+          cwd,
+          profileName: cmd.profile,
+        });
+        const needsDefaultFtp =
+          !runtime.runPush &&
+          !cmd.dryRun &&
+          (runtimeBackupStore === undefined || runtimeUploader === undefined);
+        let sharedFtpClient: FtpClient | undefined;
+        try {
+          sharedFtpClient = needsDefaultFtp
+            ? await createDefaultFtpClient(cwd, cmd.profile, keychain)
+            : undefined;
+          const backupStore =
+            runtimeBackupStore ??
+            (await createDefaultBackupStore({
+              cwd,
+              profileName: cmd.profile,
+              keychain,
+              ftpClient: sharedFtpClient,
+            }));
+          const managedUploader = await resolveManagedUploader(
+            cwd,
+            cmd.profile,
+            cmd.dryRun,
+            keychain,
+            runtime,
+            sharedFtpClient,
+            runtimeUploader,
+          );
+          const result = await (runtime.runPush ?? runPush)({
+            ...context,
+            backupStore: backupStore as PushOptions['backupStore'],
+            uploader: managedUploader.uploader,
+            remoteRoot: profile.remote_root,
+            files: cmd.only,
+            dryRun: cmd.dryRun,
+            safety: {
+              maxFilesPerPush: config.safety.max_files_per_push,
+              maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
+              verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+            },
+            preflight: (paths) => checkAll(paths),
+          }).finally(() => managedUploader.close());
+
+          if (!result.dryRun) {
+            await saveState(stateDir(cwd, cmd.profile), result.nextState);
+            await appendLogEntry(cwd, {
+              at: new Date().toISOString(),
+              event: 'push',
+              profile: cmd.profile,
+              uploaded: result.uploaded.length,
+            });
+          }
+
+          if (cmd.json) {
+            stdout(JSON.stringify(result));
+          } else if (result.dryRun) {
+            stdout(`Planned ${result.planned.length} file(s)`);
+          } else {
+            stdout(`Uploaded ${result.uploaded.length} file(s)`);
+          }
+        } finally {
+          await sharedFtpClient?.disconnect();
         }
-      } finally {
-        await sharedFtpClient?.disconnect();
-      }
-    });
+      },
+    );
+
+  // Note: `isProdProfile` import lands above; keeping it adjacent to where
+  // it is consumed keeps the file scannable.
 
   program
     .command('log')

@@ -229,12 +229,15 @@ describe('mcp', () => {
     expect(wrongHash.isError).toBe(true);
     expect(JSON.stringify(wrongHash.content)).toMatch(/diff_hash|drift/i);
 
-    // Correct values: real push runs.
+    // Correct values: real push runs. `acknowledge_production: true`
+    // because the test config uses `production` which matches the
+    // default prod_profile_patterns (v0.6.0 #7).
     const confirmRaw = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
     });
     if (confirmRaw.isError) {
       throw new Error(`confirm failed unexpectedly: ${JSON.stringify(confirmRaw.content)}`);
@@ -273,6 +276,7 @@ describe('mcp', () => {
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
     });
     // Second confirm with the same plan_id must fail.
     const replay = await callAiftpTool(app, 'aiftp_push_confirm', {
@@ -280,9 +284,67 @@ describe('mcp', () => {
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
     });
     expect(replay.isError).toBe(true);
     expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+  });
+
+  // -----------------------------------------------------------------
+  // v0.6.0: production-profile gate (#7)
+  //   - prepare surfaces prod_profile_warning when the profile name
+  //     matches safety.prod_profile_patterns
+  //   - confirm requires acknowledge_production: true to apply
+  // -----------------------------------------------------------------
+
+  it('aiftp_push_prepare surfaces prod_profile_warning when the profile matches a prod pattern', async () => {
+    await writeConfig();
+    const pushResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const app = createAiftpMcp({ cwd, runtime: { runPush: async () => pushResult } });
+    const parsed = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { prod_profile_warning: boolean; prod_profile_message?: string };
+    expect(parsed.prod_profile_warning).toBe(true);
+    expect(parsed.prod_profile_message).toMatch(/acknowledge_production|prod_profile_patterns/);
+  });
+
+  it('aiftp_push_confirm refuses a prod-profile plan without acknowledge_production: true', async () => {
+    await writeConfig();
+    const dryRunResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async () => dryRunResult,
+      },
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      // intentionally omitting acknowledge_production
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(
+      /acknowledge_production|production push refused/i,
+    );
   });
 
   // -----------------------------------------------------------------

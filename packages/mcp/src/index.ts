@@ -21,6 +21,7 @@ import {
   createExcluder,
   getPassword,
   hasPassword,
+  isProdProfile,
   isValidSnapshotId,
   loadConfig,
   loadState,
@@ -181,6 +182,19 @@ const pushConfirmSchema = requiredProfileSchema
     plan_id: z.string().min(1),
     diff_hash: z.string().min(1),
     confirm_token: z.string().min(1),
+    /**
+     * v0.6.0 #7: when the prepare step set `prod_profile_warning: true`
+     * (profile matched `safety.prod_profile_patterns`), the confirm step
+     * MUST set this to `true` as well. The point is to make the
+     * production push impossible to apply by reflex — the agent has to
+     * read the warning and decide.
+     */
+    acknowledge_production: z
+      .boolean()
+      .optional()
+      .describe(
+        'Required when the prepare step returned prod_profile_warning=true. Must be `true` to apply a push to a profile that matches safety.prod_profile_patterns.',
+      ),
   })
   .strict();
 
@@ -663,6 +677,13 @@ interface PreparedPushPlan {
   files?: readonly string[];
   expectedFileCount: number;
   expectedRemoteRoot: string;
+  /**
+   * v0.6.0 #7: true when the profile matched `safety.prod_profile_patterns`
+   * at prepare time. When set, `aiftp_push_confirm` requires
+   * `acknowledge_production: true` in the arguments — preventing an AI
+   * agent from echoing the plan back blindly to a production target.
+   */
+  prodProfileWarning: boolean;
   createdAt: number;
 }
 
@@ -751,6 +772,16 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     files: args.files,
     dry_run: true,
   });
+  // v0.6.0 #7: surface a prod-profile warning when the profile name
+  // matches the user-configured patterns. AI agents see this in the
+  // prepare response and must echo `acknowledge_production: true`
+  // back to confirm — preventing reflexive end-to-end automation
+  // from blowing up production.
+  const prodProfileWarning = isProdProfile({
+    profileName,
+    patterns: config.safety.prod_profile_patterns,
+    warnEnabled: config.safety.warn_on_prod_profile,
+  });
   const now = Date.now();
   pruneExpiredPlans(now);
   const planId = randomUUID();
@@ -764,6 +795,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     files: args.files,
     expectedFileCount: previewResult.planned.length,
     expectedRemoteRoot: profile.remote_root,
+    prodProfileWarning,
     createdAt: now,
   });
   return textResult({
@@ -777,6 +809,12 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     diff: previewResult.diff,
     planned: previewResult.planned,
     ttl_ms: PLAN_TTL_MS,
+    prod_profile_warning: prodProfileWarning,
+    ...(prodProfileWarning
+      ? {
+          prod_profile_message: `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
+        }
+      : {}),
   });
 }
 
@@ -807,6 +845,15 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   }
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to push.');
+  }
+  // v0.6.0 #7: production profile gate. When prepare flagged the
+  // profile as prod, confirm requires explicit `acknowledge_production
+  // = true`. This makes echo-the-plan-verbatim insufficient — the
+  // agent has to make a separate decision.
+  if (plan.prodProfileWarning && args.acknowledge_production !== true) {
+    throw new Error(
+      `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
+    );
   }
   // Consume the plan before performing the side-effectful push so a second
   // confirm with the same token cannot replay the upload.

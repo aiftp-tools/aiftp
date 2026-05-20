@@ -381,7 +381,7 @@ describe('cli', () => {
       },
     };
 
-    await parse(['push', '--profile', 'production'], {
+    await parse(['push', '--profile', 'production', '--yes'], {
       runtime: {
         runPush: async () => pushResult,
       },
@@ -434,6 +434,77 @@ describe('cli', () => {
       dryRun: true,
       planned: ['index.html'],
     });
+  });
+
+  it('push prints the target banner to stderr before any FTP activity (v0.6.0 #7)', async () => {
+    await writeConfig();
+    await writeLocal('index.html', '<h1>new</h1>\n');
+    // dry-run sidesteps the prod confirmation prompt — we just want to
+    // observe the banner.
+    await parse(['push', '--profile', 'production', '--dry-run']);
+    const banner = stderr.join('\n');
+    expect(banner).toMatch(/push target.*profile=production/);
+    expect(banner).toMatch(/host=ftp\.example\.com/);
+    expect(banner).toMatch(/remote_root=\/public_html/);
+  });
+
+  it('push refuses on a production-pattern profile when the typed confirmation is wrong', async () => {
+    // Real push (no --dry-run) on `production` → confirmation prompt
+    // fires. Prompt returns the WRONG string → abort.
+    await writeConfig();
+    await writeLocal('index.html', '<h1>new</h1>\n');
+    const runtime: CliRuntime = {
+      runPush: async () => {
+        throw new Error('runPush should not be reached when confirmation fails');
+      },
+    };
+    await expect(
+      parse(['push', '--profile', 'production'], {
+        runtime,
+        prompt: prompt({ confirmation: 'productio' }), // typo
+      }),
+    ).rejects.toThrow(/Production push aborted|did not match/i);
+  });
+
+  it('push --yes bypasses the production confirmation prompt', async () => {
+    await writeConfig();
+    await writeLocal('index.html', '<h1>new</h1>\n');
+    const realResult: PushResult = {
+      dryRun: false,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [
+        {
+          path: 'index.html',
+          localPath: 'x',
+          remotePath: '/public_html/index.html',
+          size: 12,
+          hash: 'h',
+        },
+      ],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    await parse(['push', '--profile', 'production', '--yes'], {
+      runtime: { runPush: async () => realResult },
+    });
+    expect(stdout.join('\n')).toContain('Uploaded 1 file(s)');
+  });
+
+  it('push --dry-run never triggers the production confirmation gate', async () => {
+    // Pre-deploy dry-runs are routine and should be friction-less. The
+    // confirmation gate is only a guard for actual uploads.
+    await writeConfig();
+    await writeLocal('index.html', '<h1>new</h1>\n');
+    const calledPrompt: string[] = [];
+    await parse(['push', '--profile', 'production', '--dry-run'], {
+      prompt: (q) => {
+        calledPrompt.push(String(q.name));
+        return Promise.resolve({});
+      },
+    });
+    // No prompt should have been issued.
+    expect(calledPrompt).toEqual([]);
   });
 
   it('log prints recent log entries newest last from the log file tail', async () => {

@@ -61,6 +61,8 @@ export {
 
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
+export { isProdProfile } from './safety.js';
+
 export {
   type ResolveRollbackTargetOptions,
   type RollbackBackupStore,
