@@ -1293,7 +1293,14 @@ async function handleConfigMigrateConfirm(
     );
   }
   const migration = migrateV1ToV2Source(currentSource);
-  const tmpPath = `${tomlPath}.tmp.${process.pid}.${Date.now()}`;
+  // tmp filename uses randomUUID for cross-process collision safety —
+  // matches core/config.ts writeMigratedConfig. `migration.source` is
+  // whatever migrateV1ToV2Source returns (LF-terminated as of v0.2);
+  // if the original .aiftp.toml was CRLF, the bak preserves CRLF (we
+  // rename it as-is) and the new file is LF. Documented limitation:
+  // Windows operators who care can re-save in their editor with CRLF
+  // after migration.
+  const tmpPath = `${tomlPath}.tmp.${process.pid}.${randomUUID()}`;
   let originalRenamed = false;
   try {
     await writeFile(tmpPath, migration.source, { encoding: 'utf8', mode: 0o600 });
@@ -1301,16 +1308,22 @@ async function handleConfigMigrateConfirm(
     originalRenamed = true;
     await rename(tmpPath, tomlPath);
   } catch (error: unknown) {
-    // Best-effort rollback. We mirror core's recovery so MCP failures
-    // leave the same surface as CLI failures.
+    // Best-effort rollback. The second rename can still fail (filesystem
+    // full, removed, etc.) and we cannot guarantee the original state is
+    // perfectly restored — but we DO guarantee no half-written file ever
+    // lives at `tomlPath` itself (because rename(2) is atomic per inode).
+    // The worst case here is: tmp removed, original may live at
+    // `backupPath` instead of `tomlPath`. The operator can `mv .aiftp
+    // .toml.v1.bak .aiftp.toml` to recover. Mirroring CLI semantics.
     await unlink(tmpPath).catch(() => undefined);
     if (originalRenamed) {
       await rename(backupPath, tomlPath).catch(() => undefined);
     }
     throw error;
   }
-  // Append a migration log entry so MCP-initiated migrations show up in
-  // `.aiftp/logs/migrations.jsonl` the same way CLI-initiated ones do.
+  // Migration log format matches core/config.ts:appendMigrationLog so a
+  // single parser (or `aiftp config history` in a future release) can
+  // consume entries regardless of who triggered the migration.
   await mkdir(join(app.cwd, '.aiftp', 'logs'), { recursive: true });
   await appendFile(
     join(app.cwd, '.aiftp', 'logs', 'migrations.jsonl'),
@@ -1318,6 +1331,7 @@ async function handleConfigMigrateConfirm(
       fromSchema: 1,
       toSchema: 2,
       migratedAt: new Date().toISOString(),
+      toolVersion: VERSION,
       source: 'mcp',
     })}\n`,
     'utf8',
