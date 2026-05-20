@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
+  type DoctorReport,
   FtpClient,
   type PushOptions,
   type PushResult,
@@ -16,9 +17,11 @@ import {
   createDefaultBackupStore,
   createExcluder,
   getPassword,
+  hasPassword,
   isValidSnapshotId,
   loadConfig,
   loadState,
+  resolveDefaultProfile,
   runPush,
   runStatus,
   saveState,
@@ -30,7 +33,14 @@ import { z } from 'zod';
 
 export { VERSION };
 
-const DEFAULT_PROFILE = 'production';
+/**
+ * Fallback used only by URI templates like `aiftp://state/{profile}` when no
+ * `{profile}` segment is supplied. Tool calls *never* use this constant —
+ * they go through `resolveProfileArg()` which consults
+ * `resolveDefaultProfile()` so AI agents and the operator share the same
+ * default-profile resolution rules.
+ */
+const FALLBACK_PROFILE_FOR_RESOURCE_URIS = 'production';
 
 export interface AiftpBackupStore {
   listSnapshots(): Promise<SnapshotMeta[]>;
@@ -50,6 +60,13 @@ export interface AiftpMcpRuntime {
   createUploader?(context: AiftpMcpContext): Promise<DeployUploader>;
   createBackupStore?(context: AiftpMcpContext): Promise<AiftpBackupStore>;
   listRemote?(context: AiftpMcpContext, path: string): Promise<string[]>;
+  /**
+   * Optional hook used by `aiftp_profile_test`. When omitted the MCP server
+   * refuses the tool call (the default doctor runner needs network access and
+   * a keychain probe that we don't want to wire in implicitly). Tests inject
+   * a mock; the CLI wires a real runner.
+   */
+  runDoctor?(context: AiftpMcpContext): Promise<DoctorReport>;
 }
 
 export interface AiftpMcpOptions {
@@ -69,7 +86,10 @@ export type AiftpToolName =
   | 'aiftp_backup_verify'
   | 'aiftp_backup_prune'
   | 'aiftp_log'
-  | 'aiftp_list_remote';
+  | 'aiftp_list_remote'
+  | 'aiftp_profile_list'
+  | 'aiftp_profile_current'
+  | 'aiftp_profile_test';
 
 export interface AiftpMcpApp {
   cwd: string;
@@ -79,11 +99,19 @@ export interface AiftpMcpApp {
   resources: readonly string[];
 }
 
+/**
+ * `profile` is intentionally optional. When the caller omits it, the server
+ * resolves the default via `resolveDefaultProfile()` (env > `.aiftp/state`
+ * file > single-profile fallback). Hard-coding "production" here would
+ * regress single-profile configs whose only profile is named "staging" etc.
+ */
 const profileSchema = z
   .object({
-    profile: z.string().min(1).default(DEFAULT_PROFILE),
+    profile: z.string().min(1).optional(),
   })
   .strict();
+
+const noArgsSchema = z.object({}).strict();
 
 const pushSchema = profileSchema
   .extend({
@@ -167,6 +195,9 @@ const toolSchemas = {
   aiftp_backup_prune: backupPruneSchema,
   aiftp_log: logSchema,
   aiftp_list_remote: listRemoteSchema,
+  aiftp_profile_list: noArgsSchema,
+  aiftp_profile_current: noArgsSchema,
+  aiftp_profile_test: profileSchema,
 } satisfies Record<AiftpToolName, z.ZodType>;
 
 const toolDescriptions = {
@@ -187,10 +218,44 @@ const toolDescriptions = {
   aiftp_backup_prune: 'Prune old backup snapshots.',
   aiftp_log: 'Read recent local aiftp operation log entries.',
   aiftp_list_remote: 'List a remote directory through the configured runtime.',
+  aiftp_profile_list:
+    'List profiles from .aiftp.toml with host (non-credential), credentialsPresent (keychain probe), and isDefault flags. Read-only.',
+  aiftp_profile_current:
+    'Return the resolved default profile name (AIFTP_PROFILE env > .aiftp/state file > single-profile fallback), or null when ambiguous. Read-only.',
+  aiftp_profile_test:
+    'Run a connection-subset of doctor against the chosen profile via runtime.runDoctor (excludes config/file checks). Read-only.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
   return isAbsolute(path) ? path : join(cwd, path);
+}
+
+/**
+ * Resolve which profile a tool call should act on.
+ *
+ * 1. If the caller passed an explicit profile, honor it.
+ * 2. Otherwise consult `resolveDefaultProfile(cwd, { availableProfiles })`
+ *    which checks: AIFTP_PROFILE env > `.aiftp/state/_default-profile.json`
+ *    > sole-profile fallback.
+ *
+ * Returning the same name an operator would see from `aiftp profile current`
+ * is the whole point of v0.4.1 — AI agents and humans share one resolution.
+ *
+ * Throws when no profile can be determined (multi-profile config with
+ * nothing pinned) so the caller surfaces a clear error instead of operating
+ * on the wrong target.
+ */
+async function resolveProfileArg(cwd: string, requested: string | undefined): Promise<string> {
+  if (requested && requested.length > 0) return requested;
+  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+  const available = Object.keys(config.profile);
+  const resolved = await resolveDefaultProfile(cwd, { availableProfiles: available });
+  if (!resolved) {
+    throw new Error(
+      'Could not resolve a default profile. Set AIFTP_PROFILE, run `aiftp profile use <name>`, or pass `profile` explicitly.',
+    );
+  }
+  return resolved;
 }
 
 function stateDir(cwd: string, profileName: string): string {
@@ -321,10 +386,11 @@ function toolError(error: unknown): CallToolResult {
 
 async function handleStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = profileSchema.parse(rawArgs ?? {});
+  const profile = await resolveProfileArg(app.cwd, args.profile);
   const status = await (app.runtime.runStatus ?? runStatus)(
-    await loadStatusContext(app.cwd, args.profile),
+    await loadStatusContext(app.cwd, profile),
   );
-  return textResult({ ok: true, profile: args.profile, status });
+  return textResult({ ok: true, profile, status });
 }
 
 async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -334,31 +400,32 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       'aiftp_push refuses dry_run=false. Use the two-step flow: aiftp_push_prepare to get a plan_id/diff_hash/confirm_token, then aiftp_push_confirm to actually upload.',
     );
   }
+  const profileName = await resolveProfileArg(app.cwd, args.profile);
   const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
-  const profile = config.profile[args.profile];
+  const profile = config.profile[profileName];
   if (!profile) {
-    throw new Error(`Profile not found: ${args.profile}`);
+    throw new Error(`Profile not found: ${profileName}`);
   }
   const runtimeStore = await app.runtime.createBackupStore?.({
     cwd: app.cwd,
-    profileName: args.profile,
+    profileName,
   });
   const runtimeUploader = await app.runtime.createUploader?.({
     cwd: app.cwd,
-    profileName: args.profile,
+    profileName,
   });
   const needsDefaultFtp =
     !app.runtime.runPush &&
     !args.dry_run &&
     (runtimeStore === undefined || runtimeUploader === undefined);
   const sharedFtpClient = needsDefaultFtp
-    ? await createDefaultFtpClient(app.cwd, args.profile)
+    ? await createDefaultFtpClient(app.cwd, profileName)
     : undefined;
 
   const result = await (async () => {
     const backupStore = await pushBackupStoreFor(
       app,
-      args.profile,
+      profileName,
       args.dry_run,
       sharedFtpClient,
       runtimeStore,
@@ -367,7 +434,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       runtimeUploader ??
       (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
     return (app.runtime.runPush ?? runPush)({
-      ...(await loadStatusContext(app.cwd, args.profile)),
+      ...(await loadStatusContext(app.cwd, profileName)),
       backupStore: backupStore as unknown as PushOptions['backupStore'],
       uploader,
       remoteRoot: profile.remote_root,
@@ -383,16 +450,16 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
   })().finally(() => sharedFtpClient?.disconnect());
 
   if (!result.dryRun) {
-    await saveState(stateDir(app.cwd, args.profile), result.nextState);
+    await saveState(stateDir(app.cwd, profileName), result.nextState);
     await appendLogEntry(app.cwd, {
       at: new Date().toISOString(),
       event: 'push',
-      profile: args.profile,
+      profile: profileName,
       uploaded: result.uploaded.length,
     });
   }
 
-  return textResult({ ok: true, profile: args.profile, result });
+  return textResult({ ok: true, profile: profileName, result });
 }
 
 // ---------------------------------------------------------------------------
@@ -480,17 +547,18 @@ async function executePush(
 
 async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushPrepareSchema.parse(rawArgs ?? {});
+  const profileName = await resolveProfileArg(app.cwd, args.profile);
   const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
-  const profile = config.profile[args.profile];
+  const profile = config.profile[profileName];
   if (!profile) {
-    throw new Error(`Profile not found: ${args.profile}`);
+    throw new Error(`Profile not found: ${profileName}`);
   }
   // Run a dry-run to compute the plan + diff that the operator will later
   // be confirming. The diff_hash binds the confirm to *this* set of files;
   // if anything changes between prepare and confirm (e.g. the user edits
   // another file), the hash will not match and confirm refuses.
   const previewResult = await executePush(app, {
-    profile: args.profile,
+    profile: profileName,
     files: args.files,
     dry_run: true,
   });
@@ -503,7 +571,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     planId,
     diffHash,
     confirmToken,
-    profile: args.profile,
+    profile: profileName,
     files: args.files,
     expectedFileCount: previewResult.planned.length,
     expectedRemoteRoot: profile.remote_root,
@@ -511,7 +579,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   });
   return textResult({
     ok: true,
-    profile: args.profile,
+    profile: profileName,
     plan_id: planId,
     diff_hash: diffHash,
     confirm_token: confirmToken,
@@ -525,6 +593,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
 
 async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushConfirmSchema.parse(rawArgs ?? {});
+  const profileName = await resolveProfileArg(app.cwd, args.profile);
   const now = Date.now();
   pruneExpiredPlans(now);
   const plan = planStore.get(args.plan_id);
@@ -533,9 +602,9 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
       `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_push_prepare again to obtain a fresh plan.`,
     );
   }
-  if (plan.profile !== args.profile) {
+  if (plan.profile !== profileName) {
     throw new Error(
-      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${args.profile}".`,
+      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${profileName}".`,
     );
   }
   if (plan.diffHash !== args.diff_hash) {
@@ -573,8 +642,9 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
 
 async function handleBackupList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = profileSchema.parse(rawArgs ?? {});
-  const snapshots = await (await backupStoreFor(app, args.profile)).listSnapshots();
-  return textResult({ ok: true, profile: args.profile, snapshots });
+  const profile = await resolveProfileArg(app.cwd, args.profile);
+  const snapshots = await (await backupStoreFor(app, profile)).listSnapshots();
+  return textResult({ ok: true, profile, snapshots });
 }
 
 async function handleBackupRestore(_app: AiftpMcpApp, _rawArgs: unknown): Promise<CallToolResult> {
@@ -627,6 +697,7 @@ async function handleBackupRestorePrepare(
   rawArgs: unknown,
 ): Promise<CallToolResult> {
   const args = backupRestorePrepareSchema.parse(rawArgs ?? {});
+  const profileName = await resolveProfileArg(app.cwd, args.profile);
   if (!isValidSnapshotId(args.id)) {
     throw new Error(
       `Invalid snapshot id: ${JSON.stringify(args.id)}. Expected format: "<iso-timestamp>-<auto|full>-<uuid>" (see aiftp_backup_list).`,
@@ -640,14 +711,14 @@ async function handleBackupRestorePrepare(
   // the user issues a second prepare for a different file, the prior token
   // becomes useless.
   const diffHash = createHash('sha256')
-    .update(`${args.profile}\n${args.id}\n${args.path}\n${outputAbsolute}`)
+    .update(`${profileName}\n${args.id}\n${args.path}\n${outputAbsolute}`)
     .digest('hex');
   const confirmToken = randomBytes(24).toString('base64url');
   restorePlanStore.set(planId, {
     planId,
     diffHash,
     confirmToken,
-    profile: args.profile,
+    profile: profileName,
     snapshotId: args.id,
     path: args.path,
     outputAbsolute,
@@ -656,7 +727,7 @@ async function handleBackupRestorePrepare(
   });
   return textResult({
     ok: true,
-    profile: args.profile,
+    profile: profileName,
     plan_id: planId,
     diff_hash: diffHash,
     confirm_token: confirmToken,
@@ -672,6 +743,7 @@ async function handleBackupRestoreConfirm(
   rawArgs: unknown,
 ): Promise<CallToolResult> {
   const args = backupRestoreConfirmSchema.parse(rawArgs ?? {});
+  const profileName = await resolveProfileArg(app.cwd, args.profile);
   const now = Date.now();
   pruneExpiredRestorePlans(now);
   const plan = restorePlanStore.get(args.plan_id);
@@ -680,9 +752,9 @@ async function handleBackupRestoreConfirm(
       `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_backup_restore_prepare again to obtain a fresh plan.`,
     );
   }
-  if (plan.profile !== args.profile) {
+  if (plan.profile !== profileName) {
     throw new Error(
-      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${args.profile}".`,
+      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${profileName}".`,
     );
   }
   if (plan.diffHash !== args.diff_hash) {
@@ -713,14 +785,16 @@ async function handleBackupRestoreConfirm(
 
 async function handleBackupVerify(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = backupVerifySchema.parse(rawArgs ?? {});
-  const report = await (await backupStoreFor(app, args.profile)).verify(args.id);
-  return textResult({ ok: true, profile: args.profile, report });
+  const profile = await resolveProfileArg(app.cwd, args.profile);
+  const report = await (await backupStoreFor(app, profile)).verify(args.id);
+  return textResult({ ok: true, profile, report });
 }
 
 async function handleBackupPrune(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = backupPruneSchema.parse(rawArgs ?? {});
-  const deleted = await (await backupStoreFor(app, args.profile)).prune(args.keep_count);
-  return textResult({ ok: true, profile: args.profile, deleted });
+  const profile = await resolveProfileArg(app.cwd, args.profile);
+  const deleted = await (await backupStoreFor(app, profile)).prune(args.keep_count);
+  return textResult({ ok: true, profile, deleted });
 }
 
 async function handleLog(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -731,14 +805,108 @@ async function handleLog(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolRe
 
 async function handleListRemote(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = listRemoteSchema.parse(rawArgs ?? {});
-  const entries = await app.runtime.listRemote?.(
-    { cwd: app.cwd, profileName: args.profile },
-    args.path,
-  );
+  const profile = await resolveProfileArg(app.cwd, args.profile);
+  const entries = await app.runtime.listRemote?.({ cwd: app.cwd, profileName: profile }, args.path);
   if (!entries) {
     throw new Error('MCP remote listing is not configured.');
   }
-  return textResult({ ok: true, profile: args.profile, path: args.path, entries });
+  return textResult({ ok: true, profile, path: args.path, entries });
+}
+
+// ---------------------------------------------------------------------------
+// v0.4.1: profile read-only tools. All three are read-only (no plan/confirm
+// gate). The default-profile resolution mirrors `resolveProfileArg()` so
+// `/mcp` users see the same name as `aiftp profile current`.
+// ---------------------------------------------------------------------------
+
+interface ProfileSummary {
+  name: string;
+  host: string;
+  port: number;
+  protocol: string;
+  user: string;
+  remote_root: string;
+  server_kind: string;
+  credentialsPresent: boolean;
+  isDefault: boolean;
+}
+
+async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const names = Object.keys(config.profile);
+  const defaultName = await resolveDefaultProfile(app.cwd, { availableProfiles: names });
+  const profiles: ProfileSummary[] = [];
+  for (const name of names) {
+    const profile = config.profile[name];
+    if (!profile) continue;
+    // Keychain probe — never reads the secret value itself, only checks
+    // whether an entry exists. Safe to surface to AI agents.
+    const credentialsPresent = await hasPassword(profile.keychain_service, profile.user).catch(
+      () => false,
+    );
+    profiles.push({
+      name,
+      host: profile.host,
+      port: profile.port,
+      protocol: profile.protocol,
+      user: profile.user,
+      remote_root: profile.remote_root,
+      server_kind: profile.server_kind,
+      credentialsPresent,
+      isDefault: defaultName === name,
+    });
+  }
+  return textResult({ ok: true, profiles, default: defaultName });
+}
+
+async function handleProfileCurrent(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const config = await loadConfig(join(app.cwd, '.aiftp.toml'));
+  const available = Object.keys(config.profile);
+  const resolved = await resolveDefaultProfile(app.cwd, { availableProfiles: available });
+  return textResult({ ok: true, profile: resolved });
+}
+
+/**
+ * IDs from the doctor checks that depend on remote / credential state. We
+ * keep this subset explicit (rather than blacklisting config/file checks)
+ * so a future doctor check that adds a new local-only id doesn't silently
+ * leak into the connection-test view.
+ */
+const CONNECTION_TEST_CHECK_IDS: ReadonlySet<string> = new Set([
+  'keychain',
+  'dns',
+  'tcp',
+  'ftps-handshake',
+  'ftps-cert',
+  'pasv',
+  'mlsd',
+  'size',
+  'remote-root',
+]);
+
+async function handleProfileTest(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  const args = profileSchema.parse(rawArgs ?? {});
+  const profile = await resolveProfileArg(app.cwd, args.profile);
+  if (!app.runtime.runDoctor) {
+    throw new Error(
+      'aiftp_profile_test requires a runtime.runDoctor hook. The MCP server does not run network probes by default.',
+    );
+  }
+  const report = await app.runtime.runDoctor({ cwd: app.cwd, profileName: profile });
+  const filtered = report.results.filter((r) => CONNECTION_TEST_CHECK_IDS.has(r.id));
+  return textResult({
+    ok: report.ok,
+    profile,
+    results: filtered,
+    summary: {
+      pass: filtered.filter((r) => r.status === 'pass').length,
+      warn: filtered.filter((r) => r.status === 'warn').length,
+      fail: filtered.filter((r) => r.status === 'fail').length,
+      skip: filtered.filter((r) => r.status === 'skip').length,
+    },
+  });
 }
 
 const handlers = {
@@ -754,6 +922,9 @@ const handlers = {
   aiftp_backup_prune: handleBackupPrune,
   aiftp_log: handleLog,
   aiftp_list_remote: handleListRemote,
+  aiftp_profile_list: handleProfileList,
+  aiftp_profile_current: handleProfileCurrent,
+  aiftp_profile_test: handleProfileTest,
 } satisfies Record<AiftpToolName, (app: AiftpMcpApp, args: unknown) => Promise<CallToolResult>>;
 
 export async function callAiftpTool(
@@ -822,12 +993,12 @@ export async function readAiftpResource(app: AiftpMcpApp, uri: string): Promise<
   }
   const statePrefix = 'aiftp://state/';
   if (uri.startsWith(statePrefix)) {
-    const profileName = uri.slice(statePrefix.length) || DEFAULT_PROFILE;
+    const profileName = uri.slice(statePrefix.length) || FALLBACK_PROFILE_FOR_RESOURCE_URIS;
     return readFile(join(stateDir(app.cwd, profileName), 'state.json'), 'utf8');
   }
   const backupPrefix = 'aiftp://backups/';
   if (uri.startsWith(backupPrefix)) {
-    const profileName = uri.slice(backupPrefix.length) || DEFAULT_PROFILE;
+    const profileName = uri.slice(backupPrefix.length) || FALLBACK_PROFILE_FOR_RESOURCE_URIS;
     const snapshots = await (await backupStoreFor(app, profileName)).listSnapshots();
     return JSON.stringify(snapshots);
   }

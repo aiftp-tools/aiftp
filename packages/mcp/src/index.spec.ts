@@ -285,6 +285,100 @@ describe('mcp', () => {
     expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
   });
 
+  // -----------------------------------------------------------------
+  // v0.4.1: profile read-only MCP tools + default resolver unification
+  // -----------------------------------------------------------------
+
+  it('aiftp_profile_list returns the structured profile array with credentialsPresent + isDefault', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_profile_list', {});
+    const parsed = parseText(result) as {
+      profiles: Array<{
+        name: string;
+        host: string;
+        credentialsPresent: boolean;
+        isDefault: boolean;
+      }>;
+    };
+    expect(parsed.profiles).toHaveLength(1);
+    expect(parsed.profiles[0]).toMatchObject({
+      name: 'production',
+      host: 'ftp.example.com',
+    });
+  });
+
+  it('aiftp_profile_current resolves the default and reports its name (or null when ambiguous)', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_profile_current', {});
+    const parsed = parseText(result) as { profile: string | null };
+    // Single profile in config -> auto-resolved fallback
+    expect(parsed.profile).toBe('production');
+  });
+
+  it('aiftp_profile_test runs the connection-subset of doctor through the runtime hook', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runDoctor: async () => ({
+        ok: true,
+        results: [
+          { id: 'keychain', title: 'Keychain', status: 'pass', message: 'ok' },
+          { id: 'dns', title: 'DNS', status: 'pass', message: 'resolved' },
+          { id: 'config-file', title: '.aiftp.toml', status: 'pass', message: 'ignored by filter' },
+        ],
+        summary: { pass: 3, warn: 0, fail: 0, skip: 0 },
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(
+      await callAiftpTool(app, 'aiftp_profile_test', { profile: 'production' }),
+    ) as { results: Array<{ id: string }> };
+    // Only connection-relevant checks survive the filter.
+    const ids = parsed.results.map((r) => r.id);
+    expect(ids).toContain('keychain');
+    expect(ids).toContain('dns');
+    expect(ids).not.toContain('config-file');
+  });
+
+  it('MCP tools that take a profile arg fall back to resolveDefaultProfile (not hard-coded "production")', async () => {
+    // Single-profile config but the profile is named "staging" (not "production").
+    // Before v0.4.1 this would have failed with `Profile not found: production`
+    // because the schema defaulted the arg to "production". v0.4.1 makes the
+    // server resolve the default via resolveDefaultProfile().
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.staging]',
+        'host = "stg.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "stage-user"',
+        'remote_root = "/stage"',
+        'local_root = "."',
+        'keychain_service = "aiftp:staging"',
+        'server_kind = "generic"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const runtime: AiftpMcpRuntime = {
+      runStatus: async (options) => ({
+        diff: { added: [], modified: [], removed: [], unchanged: [] },
+        counts: { added: 0, modified: 0, removed: 0, unchanged: 0 },
+        context: options,
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    // No `profile` argument -> server must resolve "staging" (the only profile).
+    const result = await callAiftpTool(app, 'aiftp_status', {});
+    expect(result.isError).not.toBe(true);
+    const parsed = parseText(result) as { profile: string };
+    expect(parsed.profile).toBe('staging');
+  });
+
   it('aiftp://config resource returns a redacted JSON summary (no host / user / keychain_service)', async () => {
     await writeConfig();
     const resource = await readAiftpResource(createAiftpMcp({ cwd }), 'aiftp://config');
