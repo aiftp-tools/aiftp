@@ -26,6 +26,7 @@ import {
   createExcluder,
   createWatchDebouncer,
   deletePassword,
+  extractHookPaths,
   generateKey,
   getPassword,
   hasPassword,
@@ -38,6 +39,7 @@ import {
   parseFfftpIni,
   parseFilezillaXml,
   probeFtps,
+  relativizeIntoProject,
   removeProfileBlock,
   renameProfileBlock,
   renderFilezillaXml,
@@ -1971,6 +1973,54 @@ export function createCli(options: CliOptions = {}): Command {
         }
       },
     );
+
+  program
+    .command('hook')
+    .description(
+      'Claude Code PostToolUse hook handler — reads JSON from stdin, runs dry-run status notification. v0.9.0 #5.',
+    )
+    .option('-p, --profile <name>', 'profile name (default: resolved via env/state/sole)')
+    .action(async (cmd: { profile?: string }) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) {
+        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      }
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (raw.length === 0) {
+        stderr('aiftp hook: expected Claude Code PostToolUse JSON on stdin.');
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        stderr(`aiftp hook: malformed JSON payload (${msg}). Ignoring.`);
+        return;
+      }
+      const extracted = extractHookPaths(parsed);
+      if (extracted.reason !== 'extracted') return; // silent for Bash/Read/etc.
+      const projectRelative = relativizeIntoProject(cwd, extracted.paths);
+      if (projectRelative.length === 0) return;
+      try {
+        const config = await loadConfig(join(cwd, '.aiftp.toml'));
+        const available = Object.keys(config.profile);
+        const profileName =
+          cmd.profile ?? (await resolveDefaultProfile(cwd, { availableProfiles: available }));
+        if (!profileName || !config.profile[profileName]) return;
+        const context = await loadStatusContext(cwd, profileName);
+        const status = await (runtime.runStatus ?? runStatus)(context);
+        if (status.counts.added + status.counts.modified + status.counts.removed === 0) {
+          return;
+        }
+        stderr(
+          `[aiftp:${profileName}] status: +${status.counts.added} ~${status.counts.modified} -${status.counts.removed} (dry-run — run \`aiftp push\` to apply)`,
+        );
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        stderr(`aiftp hook: status failed (${msg}). Ignoring.`);
+      }
+    });
 
   program
     .command('watch')

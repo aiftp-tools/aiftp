@@ -74,6 +74,13 @@ export {
 } from './watch.js';
 
 export {
+  type ClaudeCodeHookPayload,
+  extractHookPaths,
+  type ExtractedHookPaths,
+  relativizeIntoProject,
+} from './hook.js';
+
+export {
   type ResolveRollbackTargetOptions,
   type RollbackBackupStore,
   type RollbackFileResult,
