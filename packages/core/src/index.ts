@@ -66,6 +66,14 @@ export { isProdProfile } from './safety.js';
 export { type ParseFfftpIniOptions, parseFfftpIni } from './importers/ffftp.js';
 
 export {
+  createWatchDebouncer,
+  type WatchDebouncer,
+  type WatchDebouncerOptions,
+  type WatchEvent,
+  type WatchEventKind,
+} from './watch.js';
+
+export {
   type ResolveRollbackTargetOptions,
   type RollbackBackupStore,
   type RollbackFileResult,

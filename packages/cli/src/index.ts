@@ -24,6 +24,7 @@ import {
   checkAll,
   createDefaultBackupStore,
   createExcluder,
+  createWatchDebouncer,
   deletePassword,
   generateKey,
   getPassword,
@@ -1970,6 +1971,92 @@ export function createCli(options: CliOptions = {}): Command {
         }
       },
     );
+
+  program
+    .command('watch')
+    .description(
+      'Watch localRoot and notify (dry-run) on file changes — NEVER auto-pushes (spec §17.6 #4)',
+    )
+    .option(
+      '-p, --profile <name>',
+      'profile name (default: resolved via AIFTP_PROFILE / state / sole)',
+    )
+    .option('--debounce-ms <n>', 'debounce window in ms (default 500)', (v: string) =>
+      Number.parseInt(v, 10),
+    )
+    .option('--max-wait-ms <n>', 'max wait for a burst in ms (default 5000)', (v: string) =>
+      Number.parseInt(v, 10),
+    )
+    .action(async (cmd: { profile?: string; debounceMs?: number; maxWaitMs?: number }) => {
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      const available = Object.keys(config.profile);
+      const profileName =
+        cmd.profile ?? (await resolveDefaultProfile(cwd, { availableProfiles: available }));
+      if (!profileName) {
+        throw new Error(
+          'Could not resolve a default profile. Pass --profile, set AIFTP_PROFILE, or run `aiftp profile use <name>`.',
+        );
+      }
+      const profile = config.profile[profileName];
+      if (!profile) {
+        throw new Error(`Profile not found: ${profileName}`);
+      }
+      const localRoot = isAbsolute(profile.local_root)
+        ? profile.local_root
+        : join(cwd, profile.local_root);
+      stdout(
+        `Watching ${localRoot} for ${profileName} (dry-run notifications only — aiftp watch never auto-pushes).`,
+      );
+
+      // v0.8.0 #4: chokidar would be more reliable across platforms,
+      // but Node 22+'s recursive fs.watch is good enough for the MVP
+      // and keeps deps minimal. Excludes `.aiftp/` so backup-snapshot
+      // writes don't trigger themselves.
+      const { watch: fsWatch } = await import('node:fs');
+      const debouncer = createWatchDebouncer(
+        async (events) => {
+          const paths = events.map((e) => e.path).slice(0, 10);
+          const more =
+            events.length > paths.length ? ` (+${events.length - paths.length} more)` : '';
+          stderr(
+            `[${new Date().toISOString()}] watch: ${events.length} change(s): ${paths.join(', ')}${more}`,
+          );
+          try {
+            const context = await loadStatusContext(cwd, profileName);
+            const status = await (runtime.runStatus ?? runStatus)(context);
+            stdout(
+              `  → status: +${status.counts.added} ~${status.counts.modified} -${status.counts.removed}`,
+            );
+          } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error);
+            stderr(`  → status failed: ${msg}`);
+          }
+        },
+        { debounceMs: cmd.debounceMs ?? 500, maxWaitMs: cmd.maxWaitMs ?? 5000 },
+      );
+
+      const watcher = fsWatch(localRoot, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        const rel = filename.toString();
+        // Skip aiftp's own metadata writes to avoid feedback loops.
+        if (rel.startsWith('.aiftp/') || rel === '.aiftp' || rel.startsWith('.aiftp\\')) return;
+        debouncer.push({
+          path: rel,
+          at: Date.now(),
+          kind: eventType === 'rename' ? 'add' : 'change',
+        });
+      });
+
+      // Keep the process alive until SIGINT.
+      await new Promise<void>((resolveWatch) => {
+        process.once('SIGINT', () => {
+          watcher.close();
+          debouncer.flush();
+          debouncer.dispose();
+          resolveWatch();
+        });
+      });
+    });
 
   program
     .command('mcp')
