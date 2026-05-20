@@ -60,6 +60,9 @@ importers:
       fast-xml-parser:
         specifier: ^5.8.0
         version: 5.8.0
+      iconv-lite:
+        specifier: 0.7.2
+        version: 0.7.2
       picomatch:
         specifier: ^4.0.4
         version: 4.0.4
