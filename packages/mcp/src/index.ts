@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   DEFAULT_EXCLUDE_PATTERNS,
@@ -1082,12 +1082,13 @@ async function handleProfileTest(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
 
 interface PreparedMigratePlan {
   planId: string;
-  diffHash: string;
   confirmToken: string;
   /**
-   * SHA-256 of the original (pre-migration) source. Used at confirm time
-   * to detect drift: if `.aiftp.toml` was modified between prepare and
-   * confirm, the hashes won't match and we refuse.
+   * SHA-256 of the original (pre-migration) source. Used as BOTH the
+   * `diff_hash` returned to the caller and the drift check at confirm
+   * time. Claude review (medium): keeping a separate `diffHash` field
+   * that always equaled `sourceHash` invited confusion — collapsed to
+   * one field.
    */
   sourceHash: string;
   schemaBefore: number;
@@ -1181,7 +1182,6 @@ async function handleConfigMigratePrepare(
   const confirmToken = randomBytes(24).toString('base64url');
   migratePlanStore.set(planId, {
     planId,
-    diffHash: sourceHash,
     confirmToken,
     sourceHash,
     schemaBefore,
@@ -1221,7 +1221,7 @@ async function handleConfigMigrateConfirm(
       `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_config_migrate_prepare again to obtain a fresh plan.`,
     );
   }
-  if (plan.diffHash !== args.diff_hash) {
+  if (plan.sourceHash !== args.diff_hash) {
     throw new Error(
       'diff_hash mismatch: refusing to migrate. The plan was prepared for a different .aiftp.toml. Call aiftp_config_migrate_prepare again to inspect the new plan.',
     );
@@ -1229,10 +1229,11 @@ async function handleConfigMigrateConfirm(
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to migrate.');
   }
-  // Codex review (block): re-read .aiftp.toml at confirm time and verify
-  // the on-disk content still matches the prepare-time hash. Without this
-  // check, a CLI invocation or operator hand-edit between prepare and
-  // confirm would slip an unreviewed file through the gate.
+  // Drift policy: SHA-256 of the file CONTENT. Inode / mode / permission
+  // changes are intentionally ignored — we care about whether the bytes
+  // we previewed at prepare time are still the bytes we are about to
+  // migrate, not about ownership or timestamps. This matches `aiftp
+  // config migrate` CLI semantics.
   const currentSource = await readTomlSource(app.cwd);
   const currentHash = createHash('sha256').update(currentSource).digest('hex');
   if (currentHash !== plan.sourceHash) {
@@ -1240,11 +1241,11 @@ async function handleConfigMigrateConfirm(
       '.aiftp.toml drifted between prepare and confirm: refusing to migrate. Call aiftp_config_migrate_prepare again to review the new content.',
     );
   }
-  // Consume the plan before the side-effectful write so a second confirm
-  // with the same token cannot replay the migration. (This is also why we
-  // consume on the changed=false branch below — replay there is harmless
-  // but consuming makes the contract uniform: one plan = at most one
-  // confirm.)
+  // Consume the plan before any side-effectful work so a second confirm
+  // with the same token cannot replay the migration. (Uniform contract:
+  // one plan = at most one confirm. Replay on the changed=false branch
+  // would be harmless, but consuming makes the rule trivial to reason
+  // about — and matches aiftp_push_confirm / aiftp_backup_restore_confirm.)
   migratePlanStore.delete(args.plan_id);
   if (!plan.changed) {
     return textResult({
@@ -1256,10 +1257,71 @@ async function handleConfigMigrateConfirm(
       message: 'Config is already at the latest schema; no write performed.',
     });
   }
-  // loadConfig() observes a v1 source and performs the atomic write +
-  // .v1.bak rotation. This is the same path the CLI uses, so the migration
-  // semantics are identical regardless of who triggers it.
-  await loadConfig(join(app.cwd, '.aiftp.toml'));
+  // Codex 2nd-round review (block): inline the migration write at the MCP
+  // layer instead of delegating to loadConfig(). loadConfig re-reads the
+  // file from disk, which opens a TOCTOU window between our hash check
+  // above and core's read — a parallel CLI invocation could slip a
+  // different file through. By computing the migration from the same
+  // `currentSource` we just hash-verified, we close that window.
+  //
+  // The write itself mirrors core's `writeMigratedConfig`:
+  //   1. multi-run guard (refuse if .v1.bak already exists)
+  //   2. write new content to a tmp sibling
+  //   3. rename original -> .v1.bak
+  //   4. rename tmp -> original
+  //   5. append a migration log entry
+  // Each rename is atomic on a single filesystem. Steps 1+3 still have a
+  // small TOCTOU window for the .v1.bak guard against truly concurrent
+  // confirms; closing that completely would need flock(2) which is
+  // overkill for the MCP single-operator MVP.
+  const tomlPath = join(app.cwd, '.aiftp.toml');
+  const backupPath = `${tomlPath}.v1.bak`;
+  // Multi-run guard. Only ENOENT means "no existing backup, safe to
+  // proceed". Permission errors and other I/O failures must surface
+  // unchanged so we don't silently overwrite a backup we couldn't probe.
+  let backupExists = false;
+  try {
+    await access(backupPath);
+    backupExists = true;
+  } catch (error: unknown) {
+    const errno = error as NodeJS.ErrnoException;
+    if (errno.code !== 'ENOENT') throw error;
+  }
+  if (backupExists) {
+    throw new Error(
+      `Refusing to migrate because ${backupPath} already exists. Move or delete it before running migrate again.`,
+    );
+  }
+  const migration = migrateV1ToV2Source(currentSource);
+  const tmpPath = `${tomlPath}.tmp.${process.pid}.${Date.now()}`;
+  let originalRenamed = false;
+  try {
+    await writeFile(tmpPath, migration.source, { encoding: 'utf8', mode: 0o600 });
+    await rename(tomlPath, backupPath);
+    originalRenamed = true;
+    await rename(tmpPath, tomlPath);
+  } catch (error: unknown) {
+    // Best-effort rollback. We mirror core's recovery so MCP failures
+    // leave the same surface as CLI failures.
+    await unlink(tmpPath).catch(() => undefined);
+    if (originalRenamed) {
+      await rename(backupPath, tomlPath).catch(() => undefined);
+    }
+    throw error;
+  }
+  // Append a migration log entry so MCP-initiated migrations show up in
+  // `.aiftp/logs/migrations.jsonl` the same way CLI-initiated ones do.
+  await mkdir(join(app.cwd, '.aiftp', 'logs'), { recursive: true });
+  await appendFile(
+    join(app.cwd, '.aiftp', 'logs', 'migrations.jsonl'),
+    `${JSON.stringify({
+      fromSchema: 1,
+      toSchema: 2,
+      migratedAt: new Date().toISOString(),
+      source: 'mcp',
+    })}\n`,
+    'utf8',
+  );
   return textResult({
     ok: true,
     plan_id: args.plan_id,
@@ -1292,16 +1354,11 @@ interface PreparedFilezillaImportPlan {
   }>;
   /**
    * SHA-256 of the existing `.aiftp.toml` source at prepare time. confirm
-   * recomputes this hash and refuses if it has drifted. Catches the case
-   * where a colliding profile got added between prepare and confirm.
+   * recomputes this hash; on drift we re-scan the live file for new
+   * collisions rather than blindly refusing. Cosmetic edits (added
+   * comments etc.) are tolerated.
    */
   existingHash: string;
-  /**
-   * Snapshot of existing profile names at prepare time. Used to detect
-   * "new collisions" at confirm even if the file otherwise drifted in a
-   * benign way (Codex MEDIUM-6).
-   */
-  existingNames: Set<string>;
   collisions: string[];
   skipped: Array<{ name: string; reason: string }>;
   warnings: string[];
@@ -1401,6 +1458,16 @@ async function handleImportFilezillaPrepare(
     // `profile.password` cannot leak the encoded password into MCP
     // responses. The typed Pick below is a structural guarantee.
     const passwordKind: ImportedProfile['password']['kind'] = profile.password.kind;
+    if (seenInBatch.has(profile.name)) {
+      // Skip duplicates BEFORE pushing to redactedProfiles — otherwise an
+      // operator who reads `profiles.length` as "number of profiles to
+      // import" gets a misleading count. (Codex MEDIUM/LOW.)
+      skipped.push({
+        name: profile.name,
+        reason: 'duplicate name within import batch (kept the first occurrence)',
+      });
+      continue;
+    }
     redactedProfiles.push({
       name: profile.name,
       host: profile.host,
@@ -1411,13 +1478,6 @@ async function handleImportFilezillaPrepare(
       password_kind: passwordKind,
       warnings: profile.warnings,
     });
-    if (seenInBatch.has(profile.name)) {
-      skipped.push({
-        name: profile.name,
-        reason: 'duplicate name within import batch (kept the first occurrence)',
-      });
-      continue;
-    }
     if (profile.protocol === 'sftp') {
       skipped.push({ name: profile.name, reason: 'SFTP not supported by aiftp; skipped' });
       continue;
@@ -1470,7 +1530,6 @@ async function handleImportFilezillaPrepare(
     confirmToken,
     queued,
     existingHash,
-    existingNames,
     collisions,
     skipped,
     warnings: parsed.warnings,

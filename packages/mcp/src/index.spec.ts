@@ -993,6 +993,31 @@ describe('mcp', () => {
   //   MEDIUM-10 CRLF normalization for Windows-edited .aiftp.toml
   // -----------------------------------------------------------------
 
+  it('aiftp_config_migrate_confirm refuses when .v1.bak already exists (multi-run guard)', async () => {
+    // Codex 2nd-round review (block): the TOCTOU between MCP's hash check
+    // and loadConfig() lets a parallel CLI invocation slip a stale write
+    // through. The fix inlines the migrate write at the MCP layer and
+    // checks for an existing .v1.bak before the rename. This test asserts
+    // that the multi-run guard fires from MCP, not just from core.
+    await writeConfig();
+    await writeFile(join(cwd, '.aiftp.toml.v1.bak'), 'pre-existing backup', 'utf8');
+    const app = createAiftpMcp({ cwd });
+    const prepared = parseText(await callAiftpTool(app, 'aiftp_config_migrate_prepare', {})) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+    };
+    const result = await callAiftpTool(app, 'aiftp_config_migrate_confirm', {
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/already.*migrated|\.v1\.bak/i);
+    // The pre-existing backup must NOT have been overwritten.
+    expect(await readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).toBe('pre-existing backup');
+  });
+
   it('aiftp_config_migrate_confirm refuses when .aiftp.toml drifted after prepare', async () => {
     await writeConfig();
     const app = createAiftpMcp({ cwd });
