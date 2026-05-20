@@ -95,17 +95,36 @@ function dedupe(paths: readonly string[]): string[] {
 
 /**
  * Convert absolute paths from the hook payload into project-relative
- * paths against `cwd`. Returns null for any path that lives outside the
- * project (those are uninteresting for aiftp status — they cannot
- * possibly affect the FTP upload set). The CLI uses this to filter
- * before invoking `runStatus`.
+ * paths against `cwd`. Drops any path that lives outside the project
+ * (those are uninteresting for aiftp status — they cannot possibly
+ * affect the FTP upload set). The CLI uses this to filter before
+ * invoking `runStatus`.
+ *
+ * v0.9.1 fix (Codex MEDIUM): cross-platform path handling. Windows
+ * Claude Code passes `C:\project\file.html` while POSIX systems pass
+ * `/project/file.html`. We normalize separators to `/` on both sides
+ * AND case-fold on Windows (the platform default), so the matching is
+ * boundary-safe AND OS-correct. The returned project-relative paths
+ * always use `/` separators (matching how `.aiftp/state/files` keys
+ * are stored).
  */
 export function relativizeIntoProject(cwd: string, absolutePaths: readonly string[]): string[] {
-  const cwdNormalized = cwd.endsWith('/') ? cwd : `${cwd}/`;
+  const isWindowsLike = /^[A-Za-z]:[\\/]/u.test(cwd) || cwd.includes('\\');
+  const normalize = (p: string): string => {
+    const slashed = p.replace(/\\/gu, '/');
+    return isWindowsLike ? slashed.toLowerCase() : slashed;
+  };
+  const cwdNorm = normalize(cwd);
+  const cwdWithSlash = cwdNorm.endsWith('/') ? cwdNorm : `${cwdNorm}/`;
   const out: string[] = [];
-  for (const p of absolutePaths) {
-    if (!p.startsWith(cwdNormalized)) continue;
-    out.push(p.slice(cwdNormalized.length));
+  for (const raw of absolutePaths) {
+    const candidate = normalize(raw);
+    if (!candidate.startsWith(cwdWithSlash)) continue;
+    // Preserve the original (non-normalized) casing for the suffix when
+    // possible — only Windows callers care, and they expect their
+    // mixed-case file names to round-trip. We strip the prefix length
+    // from the original string, not the normalized one.
+    out.push(raw.replace(/\\/gu, '/').slice(cwdWithSlash.length));
   }
   return out;
 }

@@ -106,4 +106,27 @@ describe('relativizeIntoProject', () => {
     const out = relativizeIntoProject('/project', ['/projects/other.html']);
     expect(out).toEqual([]);
   });
+
+  it('handles Windows-style C:\\ paths (v0.9.1 fix)', () => {
+    // Codex MEDIUM: Claude Code on Windows passes backslash paths and
+    // the old POSIX-only matcher silently produced no-ops. After the
+    // fix the same payload yields the expected project-relative paths
+    // (with forward-slash separators, matching how state.json stores
+    // file keys).
+    const out = relativizeIntoProject('C:\\project', [
+      'C:\\project\\index.html',
+      'C:\\project\\sub\\about.html',
+      'D:\\elsewhere\\leak.html',
+    ]);
+    expect(out).toEqual(['index.html', 'sub/about.html']);
+  });
+
+  it('case-folds Windows paths (case-insensitive filesystem semantics)', () => {
+    // Windows is case-insensitive by default. An editor handing us
+    // `c:\PROJECT\file.html` must match cwd `C:\project`.
+    const out = relativizeIntoProject('C:\\project', ['c:\\PROJECT\\file.html']);
+    // Suffix preserves the original casing of the file name (the user
+    // expects `file.html`, not `FILE.html`).
+    expect(out).toEqual(['file.html']);
+  });
 });

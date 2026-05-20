@@ -190,10 +190,10 @@ const pushConfirmSchema = requiredProfileSchema
      * read the warning and decide.
      */
     acknowledge_production: z
-      .boolean()
+      .literal(true)
       .optional()
       .describe(
-        'Required when the prepare step returned prod_profile_warning=true. Must be `true` to apply a push to a profile that matches safety.prod_profile_patterns.',
+        'Required when the prepare step returned prod_profile_warning=true. Must be the literal `true` to apply a push to a profile that matches safety.prod_profile_patterns. Schema-rejected if `false` is sent (no silent fallthrough to the runtime guard).',
       ),
   })
   .strict();

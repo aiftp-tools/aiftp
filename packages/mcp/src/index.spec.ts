@@ -315,6 +315,27 @@ describe('mcp', () => {
     expect(parsed.prod_profile_message).toMatch(/acknowledge_production|prod_profile_patterns/);
   });
 
+  it('aiftp_push_confirm schema rejects acknowledge_production: false outright (v0.9.1 fix)', async () => {
+    // Claude HIGH: previously the schema was z.boolean().optional(),
+    // meaning `false` parsed as a valid value and then tripped the
+    // runtime guard. Now z.literal(true).optional() — `false` is a
+    // schema-level type error, which is the correct shape for a
+    // "must opt in explicitly" flag.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: 'whatever',
+      diff_hash: 'whatever',
+      confirm_token: 'whatever',
+      acknowledge_production: false,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(
+      /invalid_(literal|value)|expected.*true|literal/i,
+    );
+  });
+
   it('aiftp_push_confirm refuses a prod-profile plan without acknowledge_production: true', async () => {
     await writeConfig();
     const dryRunResult: PushResult = {

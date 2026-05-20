@@ -60,10 +60,34 @@ export function parseFfftpIni(
   const profiles: ImportedProfile[] = [];
   const warnings: string[] = [];
 
+  // v0.9.1 fix (Codex MEDIUM from v0.7.0 review): FFFTP tracks the
+  // ACTIVE host count in `[Hosts] SetNumber` (or `Count` in some
+  // versions). Stale `[hostN]` sections often linger past that count
+  // when the user deletes a saved host — without this guard we'd
+  // import phantom servers the user thought they'd removed.
+  const hostsSection = sections.find((s) => /^hosts$/iu.test(s.name));
+  const activeCount = (() => {
+    if (!hostsSection) return Number.POSITIVE_INFINITY;
+    const raw = hostsSection.fields.SetNumber ?? hostsSection.fields.Count;
+    if (!raw) return Number.POSITIVE_INFINITY;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : Number.POSITIVE_INFINITY;
+  })();
+
   for (const section of sections) {
     // We only care about host sections; FFFTP also stores `[Options]`,
     // `[Hosts]`, `[Multi]` etc. which we ignore.
     if (!/^host\d+$/iu.test(section.name)) continue;
+    // Respect `[Hosts] SetNumber` if present — only `host0..host(N-1)`
+    // are considered active.
+    const indexMatch = section.name.match(/^host(\d+)$/iu);
+    const index = indexMatch ? Number.parseInt(indexMatch[1] ?? '', 10) : -1;
+    if (Number.isFinite(activeCount) && index >= activeCount) {
+      warnings.push(
+        `Skipped stale [${section.name}] (beyond [Hosts] active count ${activeCount}).`,
+      );
+      continue;
+    }
 
     const fields = section.fields;
     const name = fields.HostName ?? fields.HostAddress ?? fields.HostName1 ?? section.name;
@@ -74,10 +98,23 @@ export function parseFfftpIni(
     }
     const port = parseIntSafe(fields.Port, fields.UseSecure ? 990 : 21);
     const protocol: FilezillaProtocol = mapProtocol(fields.UseSecure);
-    const passwordKind: FilezillaPasswordStatus =
-      fields.Password && fields.Password.length > 0
-        ? { kind: 'master-encrypted', cipherText: fields.Password }
-        : { kind: 'absent' };
+    // v0.9.1 fix (Codex BLOCK from v0.7.0 review): we must NOT emit
+    // `master-encrypted` here. FileZilla's apply pipeline skips
+    // master-encrypted entries entirely (the assumption being that
+    // FileZilla's *user-set* master password is rare). FFFTP's `Password`
+    // field is ALWAYS Mask-encrypted, so emitting master-encrypted would
+    // skip every saved-password profile — i.e. essentially every real
+    // FFFTP user. Emit `absent` instead and surface the situation as a
+    // per-profile warning so the import succeeds and the operator just
+    // runs `aiftp auth <profile>` afterwards (the CLI command already
+    // surfaces this hint).
+    const profileWarnings: string[] = [];
+    if (fields.Password && fields.Password.length > 0) {
+      profileWarnings.push(
+        'FFFTP-encrypted password not imported (Mask scheme is non-standard). Run `aiftp auth <profile>` to set it.',
+      );
+    }
+    const passwordKind: FilezillaPasswordStatus = { kind: 'absent' };
 
     profiles.push({
       name: sanitizeName(name),
@@ -92,7 +129,7 @@ export function parseFfftpIni(
       encoding: mapKanjiCode(fields.KanjiCode),
       remote_root: fields.RemoteDir ?? '/',
       password: passwordKind,
-      warnings: [],
+      warnings: profileWarnings,
     });
   }
 
@@ -166,13 +203,23 @@ function mapKanjiCode(kanji: string | undefined): FilezillaEncoding {
   // FFFTP KanjiCode integer mapping:
   //   0 = no conversion / "auto"
   //   1 = Shift_JIS
-  //   2 = JIS
+  //   2 = JIS                  ← intentionally mapped to 'auto', see below
   //   3 = EUC-JP
   //   4 = UTF-8 (HFS)
   //   5 = UTF-8 (NFC)
   switch (kanji?.trim()) {
     case '1':
       return 'shift_jis';
+    case '2':
+      // v0.9.1 fix (Claude HIGH from v0.7.0 review): explicit case for
+      // JIS. FilezillaEncoding does not (and should not) carry a JIS
+      // variant — the JIS encodings (ISO-2022-JP etc.) are obsolete for
+      // FTP filename transfer and basic-ftp does not support them. We
+      // intentionally fall through to 'auto' so basic-ftp's defaults
+      // kick in; a warning would be added at import time but ASCII-only
+      // filenames work fine either way. (Previously this case was a
+      // silent default; the explicit case makes the intent reviewable.)
+      return 'auto';
     case '3':
       return 'euc-jp';
     case '4':

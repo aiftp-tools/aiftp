@@ -55,7 +55,13 @@ describe('parseFfftpIni', () => {
     expect(result.profiles[0]?.host).toBe('ftp.example.jp');
   });
 
-  it('marks the password as master-encrypted when Password field is non-empty (never decrypts)', () => {
+  it('emits password.kind=absent + a per-profile warning when Password field is present (v0.9.1 BLOCK fix)', () => {
+    // Codex BLOCK from v0.7.0 review: emitting master-encrypted here
+    // made every Password-bearing FFFTP profile get skipped by the apply
+    // pipeline — i.e. virtually every real FFFTP user lost their entire
+    // import. We now emit `absent` so the profile lands in TOML, and
+    // surface the password situation as a per-profile warning that the
+    // CLI relays to the operator.
     const buf = sjisIni([
       '[host0]',
       'HostAddress=ftp.example.com',
@@ -63,13 +69,13 @@ describe('parseFfftpIni', () => {
       'Password=ZF6GBQHPYWXY',
     ]);
     const result = parseFfftpIni(buf);
-    const pw = result.profiles[0]?.password;
-    expect(pw?.kind).toBe('master-encrypted');
-    // The cipherText is preserved verbatim so debug tooling can inspect
-    // it, but it must NEVER be auto-decoded.
-    if (pw?.kind === 'master-encrypted') {
-      expect(pw.cipherText).toBe('ZF6GBQHPYWXY');
-    }
+    expect(result.profiles).toHaveLength(1);
+    const profile = result.profiles[0];
+    expect(profile?.password.kind).toBe('absent');
+    expect(profile?.warnings.join(' ')).toMatch(/FFFTP|password|aiftp auth/i);
+    // The Mask cipherText must NEVER appear in the imported result —
+    // we never decode it, and we never carry it forward.
+    expect(JSON.stringify(profile)).not.toContain('ZF6GBQHPYWXY');
   });
 
   it('reports absent password when the Password field is missing or empty', () => {
@@ -135,6 +141,47 @@ describe('parseFfftpIni', () => {
       ]);
       expect(parseFfftpIni(buf).profiles[0]?.encoding).toBe(expected);
     }
+  });
+
+  it('respects [Hosts] SetNumber to skip stale host sections (v0.9.1 fix)', async () => {
+    // FFFTP keeps `[hostN]` sections around after deletion; only the
+    // first SetNumber of them are "active". Without this guard we'd
+    // import phantom servers.
+    const buf = sjisIni([
+      '[Hosts]',
+      'SetNumber=2',
+      '',
+      '[host0]',
+      'HostAddress=active-1.example.com',
+      'UserName=u',
+      '',
+      '[host1]',
+      'HostAddress=active-2.example.com',
+      'UserName=u',
+      '',
+      '[host2]',
+      'HostAddress=stale-deleted.example.com',
+      'UserName=u',
+    ]);
+    const result = parseFfftpIni(buf);
+    expect(result.profiles.map((p) => p.host)).toEqual([
+      'active-1.example.com',
+      'active-2.example.com',
+    ]);
+    expect(result.warnings.join(' ')).toMatch(/stale/i);
+  });
+
+  it('imports all host sections when [Hosts] SetNumber is absent (backwards compat)', () => {
+    const buf = sjisIni([
+      '[host0]',
+      'HostAddress=a.example.com',
+      'UserName=u',
+      '[host1]',
+      'HostAddress=b.example.com',
+      'UserName=u',
+    ]);
+    const result = parseFfftpIni(buf);
+    expect(result.profiles).toHaveLength(2);
   });
 
   it('accepts an already-decoded string as input (round-trip safety)', () => {

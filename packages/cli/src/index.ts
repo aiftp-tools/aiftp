@@ -1981,9 +1981,47 @@ export function createCli(options: CliOptions = {}): Command {
     )
     .option('-p, --profile <name>', 'profile name (default: resolved via env/state/sole)')
     .action(async (cmd: { profile?: string }) => {
+      // v0.9.1 fix (Codex MEDIUM): bound stdin reads in BOTH size and
+      // time. The previous loop would hang forever if the hook invoker
+      // forgot to close the pipe, and would happily OOM on a runaway
+      // producer. 10 MB / 10 s are well beyond any realistic Claude
+      // Code PostToolUse payload (a few KB at most) but small enough
+      // that pathological input cannot wedge the agent's tool-use
+      // feedback loop.
+      const MAX_STDIN_BYTES = 10 * 1024 * 1024;
+      const STDIN_TIMEOUT_MS = 10_000;
       const chunks: Buffer[] = [];
-      for await (const chunk of process.stdin) {
-        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      let totalBytes = 0;
+      const readPromise = (async () => {
+        for await (const chunk of process.stdin) {
+          const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+          totalBytes += buf.length;
+          if (totalBytes > MAX_STDIN_BYTES) {
+            throw new Error(
+              `hook stdin exceeded ${MAX_STDIN_BYTES} bytes — ignoring runaway producer.`,
+            );
+          }
+          chunks.push(buf);
+        }
+      })();
+      let timer: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `hook stdin idle for ${STDIN_TIMEOUT_MS}ms — assuming the invoker forgot to close the pipe.`,
+            ),
+          );
+        }, STDIN_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([readPromise, timeoutPromise]);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        stderr(`aiftp hook: ${msg}`);
+        return;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
       const raw = Buffer.concat(chunks).toString('utf8').trim();
       if (raw.length === 0) {
