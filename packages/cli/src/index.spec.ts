@@ -1289,6 +1289,62 @@ describe('cli', () => {
     expect(stdout.join('\n')).toMatch(/dns.*pass/);
   });
 
+  it('rollback --steps 1 --dry-run shows planned files and skipped hard-excludes', async () => {
+    // Test contract: runtime hook returns a rollback runner that the CLI
+    // invokes (mirrors `runtime.runStatus` / `runtime.runPush` pattern).
+    // The hook receives all relevant context and returns a RollbackResult.
+    await writeConfig();
+    const runtime: CliRuntime = {
+      runRollback: async (options) => ({
+        dryRun: options.dryRun,
+        snapshotId: '2026-05-19T01:00:00.000Z-auto-bbb',
+        planned: ['index.html'],
+        rolledBack: [],
+        skipped: [
+          {
+            path: '.env',
+            remotePath: '/public_html/.env',
+            size: 20,
+            status: 'skipped-hard-exclude',
+            reason: 'hard-exclude pattern: .env',
+          },
+        ],
+      }),
+    };
+    await parse(['rollback', '--steps', '1', '--dry-run'], { runtime });
+    const out = stdout.join('\n');
+    expect(out).toMatch(/dry-run/i);
+    expect(out).toMatch(/index\.html/);
+    expect(out).toMatch(/\.env/);
+    expect(out).toMatch(/skipped|hard-exclude/i);
+  });
+
+  it('rollback honors --snapshot-id <id> and refuses without --steps or --snapshot-id', async () => {
+    await writeConfig();
+    let observedOptions: { snapshotId?: string; steps?: number } | null = null;
+    const runtime: CliRuntime = {
+      runRollback: async (options) => {
+        observedOptions = { snapshotId: options.snapshotId, steps: options.steps };
+        return {
+          dryRun: true,
+          snapshotId: options.snapshotId ?? 'unknown',
+          planned: [],
+          rolledBack: [],
+          skipped: [],
+        };
+      },
+    };
+    await parse(['rollback', '--snapshot-id', '2026-05-19T01:00:00.000Z-full-ccc', '--dry-run'], {
+      runtime,
+    });
+    expect(observedOptions).toMatchObject({
+      snapshotId: '2026-05-19T01:00:00.000Z-full-ccc',
+    });
+
+    // Neither --steps nor --snapshot-id: refuse with a clear message.
+    await expect(parse(['rollback', '--dry-run'], { runtime })).rejects.toThrow(/steps|snapshot/i);
+  });
+
   it('mcp starts the stdio MCP server through the configured runtime', async () => {
     const started: string[] = [];
 

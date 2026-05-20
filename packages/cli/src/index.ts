@@ -11,6 +11,9 @@ import {
   type ProfileBlockFields,
   type PushOptions,
   type PushResult,
+  type RollbackBackupStore,
+  type RollbackResult,
+  type RollbackUploader,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -36,8 +39,10 @@ import {
   renameProfileBlock,
   renderFilezillaXml,
   resolveDefaultProfile,
+  resolveRollbackTarget,
   runDoctor as runCoreDoctor,
   runPush,
+  runRollback,
   runStatus,
   saveDefaultProfile,
   saveState,
@@ -88,6 +93,29 @@ export interface CliRuntime {
   createBackupStore?(context: CliContext): Promise<CliBackupStore>;
   runDoctor?(context: CliDoctorContext): Promise<DoctorReport>;
   startMcp?(context: CliMcpContext): Promise<void>;
+  /**
+   * v0.5.0: rollback runner. The test harness injects a mock that returns
+   * a pre-canned RollbackResult without standing up FTP/backup deps; the
+   * production default (`defaultRunRollback`) resolves the target snapshot
+   * and runs core's `runRollback` against the live FTP client + backup
+   * store.
+   *
+   * The hook receives the CLI-shaped options (`steps` / `snapshotId` are
+   * pre-resolution inputs, not the final snapshot id). Resolution happens
+   * inside the runner so the hook can swap in a different selection
+   * strategy if needed.
+   */
+  runRollback?(options: CliRollbackOptions): Promise<RollbackResult>;
+}
+
+export interface CliRollbackOptions {
+  cwd: string;
+  profile: string;
+  /** Undo the N-th most recent push. Ignored when `snapshotId` is set. */
+  steps?: number;
+  /** Explicit snapshot id (mutually exclusive with `steps`). */
+  snapshotId?: string;
+  dryRun: boolean;
 }
 
 interface ManagedUploader {
@@ -455,6 +483,78 @@ async function probeTcp(host: string, port: number): Promise<boolean> {
     socket.once('timeout', () => settle(false));
     socket.once('error', () => settle(false));
   });
+}
+
+/**
+ * v0.5.0: production rollback runner.
+ *
+ * Pipeline:
+ *   1. Load config + resolve the live profile.
+ *   2. Stand up the encrypted backup store (same path push uses).
+ *   3. Build an FTP client and adapt it to the RollbackUploader shape
+ *      (in-memory Buffer → uploadBuffer call, no temp file on disk).
+ *   4. Resolve the rollback target via core's `resolveRollbackTarget`
+ *      (steps or explicit snapshotId).
+ *   5. Run `runRollback` (which applies hard-exclude protection before
+ *      any decryption — auth-bearing files never enter memory).
+ *   6. Disconnect FTP, return the result.
+ */
+async function defaultRunRollback(options: CliRollbackOptions): Promise<RollbackResult> {
+  const config = await loadConfig(join(options.cwd, '.aiftp.toml'));
+  const profile = config.profile[options.profile];
+  if (!profile) {
+    throw new Error(`Profile not found: ${options.profile}`);
+  }
+  const backupStore = await createDefaultBackupStore({
+    cwd: options.cwd,
+    profileName: options.profile,
+  });
+  const rollbackStore: RollbackBackupStore = {
+    listSnapshots: () => backupStore.listSnapshots(),
+    restoreFile: (id, path) => backupStore.restoreFile(id, path),
+  };
+  const target = await resolveRollbackTarget({
+    store: rollbackStore,
+    steps: options.steps,
+    snapshotId: options.snapshotId,
+  });
+  // Build the uploader — dry-run gets a stub so we don't open an FTP
+  // socket needlessly.
+  let ftpClient: FtpClient | undefined;
+  const uploader: RollbackUploader = options.dryRun
+    ? {
+        upload: async () => {
+          throw new Error('dry-run rollback must not call upload');
+        },
+      }
+    : await (async () => {
+        ftpClient = await createDefaultFtpClient(options.cwd, options.profile, defaultKeychain());
+        return {
+          upload: async (_localPath, remotePath, content) => {
+            if (!ftpClient) throw new Error('FTP client unavailable');
+            await ftpClient.uploadBuffer(content, remotePath);
+          },
+          mkdir: async (remoteDir: string) => {
+            if (!ftpClient) throw new Error('FTP client unavailable');
+            await ftpClient.mkdir(remoteDir);
+          },
+        };
+      })();
+  try {
+    return await runRollback({
+      snapshotId: target.id,
+      backupStore: rollbackStore,
+      uploader,
+      remoteRoot: profile.remote_root,
+      excluder: createExcluder({
+        userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+        additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
+      }),
+      dryRun: options.dryRun,
+    });
+  } finally {
+    if (ftpClient) await ftpClient.disconnect().catch(() => undefined);
+  }
 }
 
 async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport> {
@@ -1617,6 +1717,79 @@ export function createCli(options: CliOptions = {}): Command {
         await client.disconnect().catch(() => undefined);
       }
     });
+
+  program
+    .command('rollback')
+    .description('Rollback the last N push(es): uploads a snapshot back to the FTP server')
+    .option(
+      '-p, --profile <name>',
+      'profile name (default: resolved via AIFTP_PROFILE / state file / sole profile)',
+    )
+    .option('--steps <n>', 'undo the N-th most recent push (default 1)', (v: string) =>
+      Number.parseInt(v, 10),
+    )
+    .option('--snapshot-id <id>', 'explicit snapshot id from `aiftp backup list`')
+    .option('--dry-run', 'preview the rollback without uploading')
+    .action(
+      async (cmd: {
+        profile?: string;
+        steps?: number;
+        snapshotId?: string;
+        dryRun?: boolean;
+      }) => {
+        if (cmd.steps === undefined && !cmd.snapshotId) {
+          throw new Error(
+            'aiftp rollback requires either --steps <n> or --snapshot-id <id>. See `aiftp backup list` for snapshot ids.',
+          );
+        }
+        const config = await loadConfig(join(cwd, '.aiftp.toml'));
+        const available = Object.keys(config.profile);
+        const profileName =
+          cmd.profile ?? (await resolveDefaultProfile(cwd, { availableProfiles: available }));
+        if (!profileName) {
+          throw new Error(
+            'Could not resolve a default profile. Pass --profile, set AIFTP_PROFILE, or run `aiftp profile use <name>`.',
+          );
+        }
+        const profile = config.profile[profileName];
+        if (!profile) {
+          throw new Error(`Profile not found: ${profileName}`);
+        }
+        const dryRun = cmd.dryRun === true;
+        const cliOptions: CliRollbackOptions = {
+          cwd,
+          profile: profileName,
+          steps: cmd.steps,
+          snapshotId: cmd.snapshotId,
+          dryRun,
+        };
+        const result = await (runtime.runRollback ?? defaultRunRollback)(cliOptions);
+        // `profile` shadows the local from the parent scope, prevent eslint
+        // unused-var noise: profile is used inside defaultRunRollback only.
+        void profile;
+        if (result.dryRun) {
+          stdout(
+            `Dry-run rollback to snapshot ${result.snapshotId}: ${result.planned.length} file(s) would be uploaded.`,
+          );
+        } else {
+          stdout(
+            `Rollback to snapshot ${result.snapshotId}: ${result.rolledBack.length} file(s) uploaded.`,
+          );
+        }
+        for (const planned of result.planned) {
+          stdout(`  + ${planned}`);
+        }
+        if (result.skipped.length > 0) {
+          stdout('');
+          stdout(
+            `${result.skipped.length} file(s) skipped (hard-exclude protection — auth credentials are never re-uploaded):`,
+          );
+          for (const skip of result.skipped) {
+            stdout(`  - ${skip.path}    ${skip.reason ?? skip.status}`);
+          }
+        }
+      },
+    );
 
   program
     .command('mcp')

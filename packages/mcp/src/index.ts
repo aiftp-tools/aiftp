@@ -9,6 +9,8 @@ import {
   type ImportedProfile,
   type PushOptions,
   type PushResult,
+  type RollbackBackupStore,
+  type RollbackUploader,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -26,7 +28,9 @@ import {
   parseFilezillaXml,
   removeProfileBlock,
   resolveDefaultProfile,
+  resolveRollbackTarget,
   runPush,
+  runRollback,
   runStatus,
   saveState,
 } from '@aiftp-tools/core';
@@ -99,7 +103,10 @@ export type AiftpToolName =
   | 'aiftp_config_migrate_confirm'
   | 'aiftp_import_filezilla'
   | 'aiftp_import_filezilla_prepare'
-  | 'aiftp_import_filezilla_confirm';
+  | 'aiftp_import_filezilla_confirm'
+  | 'aiftp_rollback'
+  | 'aiftp_rollback_prepare'
+  | 'aiftp_rollback_confirm';
 
 export interface AiftpMcpApp {
   cwd: string;
@@ -267,6 +274,34 @@ const importFilezillaConfirmSchema = z
   })
   .strict();
 
+const rollbackTargetFields = {
+  steps: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      'Undo the N-th most recent push. Default 1 (most recent). Counts only auto-snapshots produced at push time — manual `aiftp backup create` snapshots are ignored unless `snapshot_id` is passed.',
+    ),
+  snapshot_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Explicit snapshot id from aiftp_backup_list. When set, `steps` is ignored and any snapshot type (auto / full) can be the rollback target.',
+    ),
+} as const;
+
+const rollbackSchema = profileSchema.extend(rollbackTargetFields).strict();
+const rollbackPrepareSchema = profileSchema.extend(rollbackTargetFields).strict();
+const rollbackConfirmSchema = requiredProfileSchema
+  .extend({
+    plan_id: z.string().min(1),
+    diff_hash: z.string().min(1),
+    confirm_token: z.string().min(1),
+  })
+  .strict();
+
 const toolSchemas = {
   aiftp_status: profileSchema,
   aiftp_push: pushSchema,
@@ -289,6 +324,9 @@ const toolSchemas = {
   aiftp_import_filezilla: importFilezillaSchema,
   aiftp_import_filezilla_prepare: importFilezillaPrepareSchema,
   aiftp_import_filezilla_confirm: importFilezillaConfirmSchema,
+  aiftp_rollback: rollbackSchema,
+  aiftp_rollback_prepare: rollbackPrepareSchema,
+  aiftp_rollback_confirm: rollbackConfirmSchema,
 } satisfies Record<AiftpToolName, z.ZodType>;
 
 const toolDescriptions = {
@@ -327,6 +365,12 @@ const toolDescriptions = {
     'Parse a FileZilla sitemanager.xml and return a REDACTED preview (profile names + non-credential metadata + password_kind only — actual password values are NEVER surfaced through MCP). Reports collisions against existing .aiftp.toml profile names and the list of profiles that will be skipped (SFTP / master-password-encrypted). Does not write.',
   aiftp_import_filezilla_confirm:
     'Apply a prepared FileZilla import to .aiftp.toml. Never writes the Keychain — the confirm result includes a `next_steps` field telling the operator to run `aiftp auth` for each imported profile. The MCP server never has the password value.',
+  aiftp_rollback:
+    'Direct rollback is refused — use aiftp_rollback_prepare + aiftp_rollback_confirm. Uploading a snapshot back to the server changes production state and must echo a plan/token.',
+  aiftp_rollback_prepare:
+    'Resolve the rollback target (by steps or explicit snapshot_id), apply the hard-exclude filter, and return planned files + skipped (auth-bearing) files + plan_id / diff_hash / confirm_token. No upload yet.',
+  aiftp_rollback_confirm:
+    'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials).',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -1678,6 +1722,268 @@ async function handleImportFilezillaConfirm(
   });
 }
 
+// ---------------------------------------------------------------------------
+// v0.5.0: aiftp_rollback{,_prepare,_confirm}
+//
+// Rollback = take a previous push-time snapshot and upload its files back to
+// the FTP server. The gate is plan/confirm/token, exactly like push: the
+// diff_hash is computed from the planned (post-hard-exclude) file set so
+// that any drift between prepare and confirm refuses.
+// ---------------------------------------------------------------------------
+
+interface PreparedRollback {
+  planId: string;
+  confirmToken: string;
+  diffHash: string;
+  profile: string;
+  snapshotId: string;
+  remoteRoot: string;
+  planned: readonly string[];
+  /**
+   * The hard-exclude-skipped list captured at prepare. Returned again at
+   * confirm so the operator can audit which credentials-bearing files
+   * stayed protected.
+   */
+  skipped: ReadonlyArray<{ path: string; reason: string; status: string }>;
+  createdAt: number;
+}
+
+const rollbackPlanStore = new Map<string, PreparedRollback>();
+
+function pruneExpiredRollbackPlans(now: number): void {
+  for (const [id, plan] of rollbackPlanStore) {
+    if (now - plan.createdAt > PLAN_TTL_MS) rollbackPlanStore.delete(id);
+  }
+}
+
+async function handleRollback(_app: AiftpMcpApp, _rawArgs: unknown): Promise<CallToolResult> {
+  throw new Error(
+    'aiftp_rollback refuses direct invocation. Use the two-step flow: aiftp_rollback_prepare to compute the planned file set, then aiftp_rollback_confirm to actually re-upload.',
+  );
+}
+
+/**
+ * Adapter from the AiftpBackupStore interface (which is what the runtime
+ * hook returns) to the structural type runRollback wants. Both expose the
+ * methods we need, but the union of the original BackupStore returns
+ * extra fields that runRollback doesn't care about.
+ */
+function asRollbackStore(store: AiftpBackupStore): RollbackBackupStore {
+  return {
+    listSnapshots: () => store.listSnapshots(),
+    restoreFile: (id, path) => store.restoreFile(id, path),
+  };
+}
+
+async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  const args = rollbackPrepareSchema.parse(rawArgs ?? {});
+  const config = await loadConfigForMcp(app.cwd);
+  const profileName = await resolveProfileArg(app.cwd, args.profile, config);
+  const profile = config.profile[profileName];
+  if (!profile) {
+    throw new Error(`Profile not found: ${profileName}`);
+  }
+  const backupStore = await backupStoreFor(app, profileName);
+  const rollbackStore = asRollbackStore(backupStore);
+  const target = await resolveRollbackTarget({
+    store: rollbackStore,
+    steps: args.steps,
+    snapshotId: args.snapshot_id,
+  });
+  // Compute the planned file set via runRollback dry-run. This is the
+  // same logic the confirm step will use (hard-exclude filtering),
+  // guaranteeing that diff_hash binds to the exact upload set.
+  const excluder = createExcluder({
+    userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+    additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
+  });
+  const preview = await runRollback({
+    snapshotId: target.id,
+    backupStore: rollbackStore,
+    uploader: { upload: async () => undefined },
+    remoteRoot: profile.remote_root,
+    excluder,
+    dryRun: true,
+  });
+  const diffHash = createHash('sha256')
+    .update(`${target.id}\n${profile.remote_root}\n${preview.planned.join('\n')}`)
+    .digest('hex');
+  const confirmToken = randomBytes(24).toString('base64url');
+  const planId = randomUUID();
+  const now = Date.now();
+  pruneExpiredRollbackPlans(now);
+  rollbackPlanStore.set(planId, {
+    planId,
+    confirmToken,
+    diffHash,
+    profile: profileName,
+    snapshotId: target.id,
+    remoteRoot: profile.remote_root,
+    planned: preview.planned,
+    skipped: preview.skipped.map((s) => ({
+      path: s.path,
+      reason: s.reason ?? 'hard-exclude',
+      status: s.status,
+    })),
+    createdAt: now,
+  });
+  return textResult({
+    ok: true,
+    plan_id: planId,
+    diff_hash: diffHash,
+    confirm_token: confirmToken,
+    ttl_ms: PLAN_TTL_MS,
+    profile: profileName,
+    snapshot_id: target.id,
+    snapshot_type: target.type,
+    snapshot_created_at: target.createdAt,
+    remote_root: profile.remote_root,
+    planned: preview.planned,
+    skipped: preview.skipped.map((s) => ({
+      path: s.path,
+      remote_path: s.remotePath,
+      status: s.status,
+      reason: s.reason,
+    })),
+  });
+}
+
+async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  const args = rollbackConfirmSchema.parse(rawArgs ?? {});
+  const profileName = args.profile;
+  const now = Date.now();
+  pruneExpiredRollbackPlans(now);
+  const plan = rollbackPlanStore.get(args.plan_id);
+  if (!plan) {
+    throw new Error(
+      `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_rollback_prepare again to obtain a fresh plan.`,
+    );
+  }
+  if (plan.profile !== profileName) {
+    throw new Error(
+      `Plan ${args.plan_id} was prepared for profile "${plan.profile}", not "${profileName}".`,
+    );
+  }
+  if (plan.diffHash !== args.diff_hash) {
+    throw new Error(
+      'diff_hash mismatch: rollback plan drifted between prepare and confirm. Call aiftp_rollback_prepare again to inspect the new plan.',
+    );
+  }
+  if (plan.confirmToken !== args.confirm_token) {
+    throw new Error('confirm_token mismatch: refusing to roll back.');
+  }
+  // Consume before side effects: a second confirm with the same token
+  // cannot replay the rollback. (Replaying a rollback would re-upload an
+  // already-restored file — usually harmless but pointless. Consistent
+  // contract = uniform reasoning.)
+  rollbackPlanStore.delete(args.plan_id);
+
+  const backupStore = await backupStoreFor(app, profileName);
+  const rollbackStore = asRollbackStore(backupStore);
+  // Build the real uploader. We prefer a runtime-provided one so test
+  // suites can observe upload calls without standing up an FTP server,
+  // otherwise we fall back to constructing a default FTP client. The
+  // path mirrors handlePushConfirm.
+  const runtimeUploader = await app.runtime.createUploader?.({
+    cwd: app.cwd,
+    profileName,
+  });
+  const sharedFtp = runtimeUploader
+    ? undefined
+    : await createDefaultFtpClient(app.cwd, profileName);
+  // Build a Buffer-aware uploader. Two paths:
+  //   - runtime uploader: the test harness or future Pro adapter provides
+  //     a DeployUploader. We adapt its disk-based `upload(localPath,
+  //     remotePath)` to our content-based shape. If the runtime exposes
+  //     an `uploadBuffer` extension we use it (zero-copy); otherwise the
+  //     test mock's `upload` signature is the contract.
+  //   - default FtpClient: use the new `uploadBuffer` method so the
+  //     decrypted bytes go from the snapshot Buffer straight to the FTP
+  //     socket — no temp file on disk.
+  type BufferingUploader = DeployUploader & {
+    uploadBuffer?: (content: Buffer, remotePath: string) => Promise<unknown>;
+  };
+  const baseUploader: RollbackUploader = runtimeUploader
+    ? {
+        upload: async (localPath, remotePath, content) => {
+          const ru = runtimeUploader as BufferingUploader;
+          if (typeof ru.uploadBuffer === 'function') {
+            await ru.uploadBuffer(content, remotePath);
+            return;
+          }
+          await ru.upload(localPath, remotePath);
+        },
+        mkdir: runtimeUploader.mkdir
+          ? async (remoteDir: string) => {
+              await (runtimeUploader.mkdir as (d: string) => Promise<unknown>)(remoteDir);
+            }
+          : undefined,
+      }
+    : {
+        upload: async (_local, remotePath, content) => {
+          if (!sharedFtp) throw new Error('Default FTP client unavailable.');
+          await sharedFtp.uploadBuffer(content, remotePath);
+        },
+        mkdir: sharedFtp
+          ? async (remoteDir: string) => {
+              await sharedFtp.mkdir(remoteDir);
+            }
+          : undefined,
+      };
+
+  const config = await loadConfigForMcp(app.cwd);
+  const excluder = createExcluder({
+    userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+    additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
+  });
+
+  try {
+    const result = await runRollback({
+      snapshotId: plan.snapshotId,
+      backupStore: rollbackStore,
+      uploader: baseUploader,
+      remoteRoot: plan.remoteRoot,
+      excluder,
+      dryRun: false,
+    });
+    // Verify the actual rollback set didn't drift since prepare. If the
+    // hard-exclude config changed (operator added a new additional_pattern
+    // between prepare and confirm) the planned set could shrink — refuse.
+    const actualPlanned = result.rolledBack.map((r) => r.path).sort();
+    const expectedPlanned = [...plan.planned].sort();
+    const sameSet =
+      actualPlanned.length === expectedPlanned.length &&
+      actualPlanned.every((p, i) => p === expectedPlanned[i]);
+    if (!sameSet) {
+      throw new Error(
+        'rollback plan drifted between prepare and confirm (hard-exclude config may have changed). Call aiftp_rollback_prepare again.',
+      );
+    }
+    await appendLogEntry(app.cwd, {
+      at: new Date().toISOString(),
+      event: 'rollback',
+      profile: profileName,
+      snapshot: plan.snapshotId,
+      rolled_back: result.rolledBack.length,
+      skipped: result.skipped.length,
+    });
+    return textResult({
+      ok: true,
+      profile: profileName,
+      plan_id: args.plan_id,
+      snapshot_id: plan.snapshotId,
+      rolled_back: result.rolledBack.map((r) => r.path),
+      skipped: result.skipped.map((s) => ({
+        path: s.path,
+        status: s.status,
+        reason: s.reason,
+      })),
+    });
+  } finally {
+    if (sharedFtp) await sharedFtp.disconnect().catch(() => undefined);
+  }
+}
+
 const handlers = {
   aiftp_status: handleStatus,
   aiftp_push: handlePush,
@@ -1700,6 +2006,9 @@ const handlers = {
   aiftp_import_filezilla: handleImportFilezilla,
   aiftp_import_filezilla_prepare: handleImportFilezillaPrepare,
   aiftp_import_filezilla_confirm: handleImportFilezillaConfirm,
+  aiftp_rollback: handleRollback,
+  aiftp_rollback_prepare: handleRollbackPrepare,
+  aiftp_rollback_confirm: handleRollbackConfirm,
 } satisfies Record<AiftpToolName, (app: AiftpMcpApp, args: unknown) => Promise<CallToolResult>>;
 
 export async function callAiftpTool(

@@ -62,6 +62,18 @@ export {
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 export {
+  type ResolveRollbackTargetOptions,
+  type RollbackBackupStore,
+  type RollbackFileResult,
+  type RollbackFileStatus,
+  type RollbackOptions,
+  type RollbackResult,
+  type RollbackUploader,
+  resolveRollbackTarget,
+  runRollback,
+} from './rollback.js';
+
+export {
   appendProfileBlock,
   extractProfileBlock,
   findProfileBlockRange,

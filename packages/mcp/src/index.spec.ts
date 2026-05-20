@@ -1192,6 +1192,196 @@ describe('mcp', () => {
     expect(await readFile(join(cwd, '.aiftp.toml'), 'utf8')).toMatch(/schema\s*=\s*2/);
   });
 
+  // -----------------------------------------------------------------
+  // v0.5.0: aiftp_rollback{,_prepare,_confirm}
+  //   - rollback = upload a snapshot's files back to the FTP server
+  //   - hard-exclude protected files are NEVER uploaded
+  //   - prepare/confirm gate with plan_id/diff_hash/confirm_token
+  // -----------------------------------------------------------------
+
+  it('aiftp_rollback refuses direct invocation and points at prepare/confirm', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_rollback', { steps: 1 });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(
+      /prepare\/confirm|two-step|aiftp_rollback_prepare/i,
+    );
+  });
+
+  it('aiftp_rollback_prepare returns plan + planned file list + skipped hard-excludes', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [
+          {
+            id: '2026-05-19T01:00:00.000Z-auto-bbb',
+            type: 'auto',
+            createdAt: '2026-05-19T01:00:00.000Z',
+            fileCount: 3,
+            totalBytes: 100,
+            files: [
+              {
+                path: 'index.html',
+                storedName: 'index.html.enc',
+                sizeOriginal: 12,
+                sizeEncrypted: 40,
+                sha256Original: 'a'.repeat(64),
+                sha256Encrypted: 'b'.repeat(64),
+              },
+              {
+                path: 'wp-config.php',
+                storedName: 'wp-config.php.enc',
+                sizeOriginal: 50,
+                sizeEncrypted: 78,
+                sha256Original: 'a'.repeat(64),
+                sha256Encrypted: 'b'.repeat(64),
+              },
+              {
+                path: '.env',
+                storedName: '.env.enc',
+                sizeOriginal: 20,
+                sizeEncrypted: 48,
+                sha256Original: 'a'.repeat(64),
+                sha256Encrypted: 'b'.repeat(64),
+              },
+            ],
+          },
+        ],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.from('<h1>old</h1>'),
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 })) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      snapshot_id: string;
+      planned: string[];
+      skipped: Array<{ path: string; status: string }>;
+    };
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(parsed.diff_hash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(parsed.snapshot_id).toBe('2026-05-19T01:00:00.000Z-auto-bbb');
+    expect(parsed.planned).toEqual(['index.html']);
+    expect(parsed.skipped.map((s) => s.path).sort()).toEqual(['.env', 'wp-config.php']);
+    expect(parsed.skipped.every((s) => s.status === 'skipped-hard-exclude')).toBe(true);
+  });
+
+  it('aiftp_rollback_confirm uploads files matching the plan; bad token refused', async () => {
+    await writeConfig();
+    const uploads: string[] = [];
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [
+          {
+            id: '2026-05-19T01:00:00.000Z-auto-bbb',
+            type: 'auto',
+            createdAt: '2026-05-19T01:00:00.000Z',
+            fileCount: 1,
+            totalBytes: 12,
+            files: [
+              {
+                path: 'index.html',
+                storedName: 'index.html.enc',
+                sizeOriginal: 12,
+                sizeEncrypted: 40,
+                sha256Original: 'a'.repeat(64),
+                sha256Encrypted: 'b'.repeat(64),
+              },
+            ],
+          },
+        ],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.from('<h1>old</h1>'),
+      }),
+      createUploader: async () => ({
+        upload: async (_local, remote) => {
+          uploads.push(remote);
+        },
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    // Wrong token: refused.
+    const wrongToken = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: 'nope',
+    });
+    expect(wrongToken.isError).toBe(true);
+    expect(uploads).toHaveLength(0);
+
+    // Correct values: rollback runs.
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+  });
+
+  it('aiftp_rollback_confirm rejects replay of a consumed plan', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [
+          {
+            id: '2026-05-19T01:00:00.000Z-auto-bbb',
+            type: 'auto',
+            createdAt: '2026-05-19T01:00:00.000Z',
+            fileCount: 1,
+            totalBytes: 12,
+            files: [
+              {
+                path: 'index.html',
+                storedName: 'index.html.enc',
+                sizeOriginal: 12,
+                sizeEncrypted: 40,
+                sha256Original: 'a'.repeat(64),
+                sha256Encrypted: 'b'.repeat(64),
+              },
+            ],
+          },
+        ],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.from('<h1>old</h1>'),
+      }),
+      createUploader: async () => ({ upload: async () => undefined }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    const replay = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(replay.isError).toBe(true);
+    expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+  });
+
   it('reads config and state resources', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });

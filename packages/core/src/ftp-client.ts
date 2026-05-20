@@ -423,6 +423,25 @@ export class FtpClient {
     }
   }
 
+  /**
+   * Upload an in-memory Buffer directly. Used by rollback so decrypted
+   * snapshot bytes never touch the local filesystem — an attacker with
+   * disk-read access cannot recover the rolled-back content from a
+   * leftover temp file. basic-ftp's `uploadFrom` accepts any Readable,
+   * so we wrap the buffer in a `Readable.from(...)`.
+   */
+  async uploadBuffer(content: Buffer, remotePath: string): Promise<UploadResult> {
+    const client = this.requireConnection();
+    const { Readable } = await import('node:stream');
+    try {
+      await client.uploadFrom(Readable.from(content), remotePath);
+      const bytes = await client.size(remotePath).catch(() => content.length);
+      return { remotePath, bytesUploaded: bytes };
+    } catch (error: unknown) {
+      throw mapFtpError(error, `uploadBuffer(${remotePath})`);
+    }
+  }
+
   async download(remotePath: string, localPath: string): Promise<void> {
     const client = this.requireConnection();
     try {
