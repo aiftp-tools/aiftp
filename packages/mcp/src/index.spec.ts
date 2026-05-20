@@ -749,6 +749,228 @@ describe('mcp', () => {
     });
   });
 
+  // -----------------------------------------------------------------
+  // v0.4.2: prepare/confirm gates for aiftp_config_migrate and
+  // aiftp_import_filezilla. Both share the same opaque-token + diff_hash
+  // discipline as aiftp_push so AI agents cannot apply a side-effectful
+  // operation without echoing the plan back verbatim.
+  // -----------------------------------------------------------------
+
+  it('aiftp_config_migrate refuses direct invocation and points to prepare/confirm', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_config_migrate', {});
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(
+      /prepare\/confirm|two-step|aiftp_config_migrate_prepare/i,
+    );
+  });
+
+  it('aiftp_config_migrate_prepare returns the migrated source preview + token', async () => {
+    // schema = 1 → should migrate (writeConfig in this test suite emits v1).
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_config_migrate_prepare', {})) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      changed: boolean;
+      schema_before: number;
+      schema_after: number;
+      migrated_source: string;
+    };
+    expect(parsed.changed).toBe(true);
+    expect(parsed.schema_before).toBe(1);
+    expect(parsed.schema_after).toBe(2);
+    expect(parsed.migrated_source).toMatch(/schema\s*=\s*2/);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(parsed.diff_hash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(parsed.confirm_token).toMatch(/.{16,}/u);
+  });
+
+  it('aiftp_config_migrate_prepare reports changed=false when already at v2', async () => {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.production]',
+        'host = "ftp.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "deploy"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:production"',
+        'server_kind = "starserver"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const app = createAiftpMcp({ cwd });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_config_migrate_prepare', {})) as {
+      changed: boolean;
+      schema_before: number;
+      schema_after: number;
+    };
+    expect(parsed.changed).toBe(false);
+    expect(parsed.schema_before).toBe(2);
+    expect(parsed.schema_after).toBe(2);
+  });
+
+  it('aiftp_config_migrate_confirm applies the migration and writes the backup file', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const prepared = parseText(await callAiftpTool(app, 'aiftp_config_migrate_prepare', {})) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+    };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_config_migrate_confirm', {
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; schema_before: number; schema_after: number; backup_path: string };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.schema_after).toBe(2);
+    // .aiftp.toml.v1.bak must exist (atomic migration guarantee).
+    expect(await readFile(join(cwd, '.aiftp.toml.v1.bak'), 'utf8')).toMatch(/schema\s*=\s*1/);
+    // The on-disk file must now be at schema 2.
+    expect(await readFile(join(cwd, '.aiftp.toml'), 'utf8')).toMatch(/schema\s*=\s*2/);
+  });
+
+  it('aiftp_config_migrate_confirm rejects mismatched diff_hash / token', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const prepared = parseText(await callAiftpTool(app, 'aiftp_config_migrate_prepare', {})) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+    };
+
+    const wrongToken = await callAiftpTool(app, 'aiftp_config_migrate_confirm', {
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: 'nope',
+    });
+    expect(wrongToken.isError).toBe(true);
+    expect(JSON.stringify(wrongToken.content)).toMatch(/token|mismatch/i);
+  });
+
+  it('aiftp_import_filezilla refuses direct invocation', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_import_filezilla', { path: 'sm.xml' });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/prepare\/confirm|two-step/i);
+  });
+
+  it('aiftp_import_filezilla_prepare returns redacted IR and collision report', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<FileZilla3>',
+      '  <Servers>',
+      '    <Server>',
+      '      <Host>imported.example.com</Host>',
+      '      <Port>21</Port>',
+      '      <Protocol>0</Protocol>',
+      '      <Type>0</Type>',
+      '      <User>imported-user</User>',
+      '      <Pass encoding="base64">cGFzc3dvcmQ=</Pass>',
+      '      <Logontype>1</Logontype>',
+      '      <Name>my-imported-site</Name>',
+      '    </Server>',
+      '  </Servers>',
+      '</FileZilla3>',
+    ].join('\n');
+    await writeFile(join(cwd, 'sm.xml'), xml, 'utf8');
+    const app = createAiftpMcp({ cwd });
+    const parsed = parseText(
+      await callAiftpTool(app, 'aiftp_import_filezilla_prepare', { path: 'sm.xml' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      profiles: Array<Record<string, unknown>>;
+      collisions: string[];
+      skipped: Array<{ name: string; reason: string }>;
+    };
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(parsed.profiles).toHaveLength(1);
+    const entry = parsed.profiles[0] as Record<string, unknown>;
+    // Sensitive password values must NEVER appear in the prepare output —
+    // only the kind ("plaintext" / "encoded" / "master-encrypted" / "none").
+    expect(entry.password_kind).toBeTypeOf('string');
+    expect(JSON.stringify(parsed)).not.toContain('password"');
+    expect(JSON.stringify(parsed)).not.toContain('cGFzc3dvcmQ=');
+    expect(parsed.collisions).toEqual([]);
+    expect(parsed.skipped).toEqual([]);
+  });
+
+  it('aiftp_import_filezilla_confirm rejects mismatched plan_id', async () => {
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_import_filezilla_confirm', {
+      plan_id: 'bogus',
+      diff_hash: 'bogus',
+      confirm_token: 'bogus',
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/plan_id|expired|unknown/i);
+  });
+
+  it('aiftp_import_filezilla_confirm writes the profiles but NEVER touches the Keychain', async () => {
+    await writeConfig();
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<FileZilla3>',
+      '  <Servers>',
+      '    <Server>',
+      '      <Host>imported.example.com</Host>',
+      '      <Port>21</Port>',
+      '      <Protocol>0</Protocol>',
+      '      <Type>0</Type>',
+      '      <User>imported-user</User>',
+      '      <Pass encoding="base64">cGFzc3dvcmQ=</Pass>',
+      '      <Logontype>1</Logontype>',
+      '      <Name>my-imported-site</Name>',
+      '    </Server>',
+      '  </Servers>',
+      '</FileZilla3>',
+    ].join('\n');
+    await writeFile(join(cwd, 'sm.xml'), xml, 'utf8');
+    const app = createAiftpMcp({ cwd });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_import_filezilla_prepare', { path: 'sm.xml' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_import_filezilla_confirm', {
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as {
+      ok: boolean;
+      imported: string[];
+      next_steps: string[];
+    };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.imported).toContain('my-imported-site');
+    // The confirm output MUST tell the operator to run `aiftp auth`
+    // separately for credentials — MCP never writes passwords to Keychain
+    // (Codex: security boundary explicit refusal).
+    expect(confirmed.next_steps.join(' ')).toMatch(/aiftp auth|keychain|password/i);
+    // Imported profile must be visible in .aiftp.toml now.
+    expect(await readFile(join(cwd, '.aiftp.toml'), 'utf8')).toMatch(
+      /\[profile\.my-imported-site\]/,
+    );
+  });
+
   it('reads config and state resources', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });

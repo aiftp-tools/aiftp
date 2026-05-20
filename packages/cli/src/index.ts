@@ -416,10 +416,28 @@ function formatLogEntry(entry: Record<string, unknown>): string {
 }
 
 async function defaultStartMcp(context: CliMcpContext): Promise<void> {
+  // v0.4.2: wire the default doctor runner so `aiftp_profile_test` over MCP
+  // actually does something useful. Without this hook, the MCP server has
+  // no runDoctor implementation and the tool refuses every call (v0.4.1
+  // design — see packages/mcp/src/index.ts handleProfileTest).
+  //
+  // The adapter shape converts the MCP runtime's `(context: { cwd, profileName })`
+  // call into the CLI's `(context: { cwd, profile })` shape — they're the
+  // same data, different field names.
   const mod = (await import('@aiftp-tools/mcp')) as unknown as {
-    startStdioServer(options: { cwd?: string }): Promise<void>;
+    startStdioServer(options: {
+      cwd?: string;
+      runtime?: {
+        runDoctor?(context: { cwd: string; profileName: string }): Promise<DoctorReport>;
+      };
+    }): Promise<void>;
   };
-  await mod.startStdioServer({ cwd: context.cwd });
+  await mod.startStdioServer({
+    cwd: context.cwd,
+    runtime: {
+      runDoctor: async ({ cwd, profileName }) => defaultRunDoctor({ cwd, profile: profileName }),
+    },
+  });
 }
 
 async function probeTcp(host: string, port: number): Promise<boolean> {

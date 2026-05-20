@@ -6,6 +6,7 @@ import {
   type DeployUploader,
   type DoctorReport,
   FtpClient,
+  type ImportedProfile,
   type PushOptions,
   type PushResult,
   type SnapshotMeta,
@@ -21,6 +22,8 @@ import {
   isValidSnapshotId,
   loadConfig,
   loadState,
+  migrateV1ToV2Source,
+  parseFilezillaXml,
   resolveDefaultProfile,
   runPush,
   runStatus,
@@ -89,7 +92,13 @@ export type AiftpToolName =
   | 'aiftp_list_remote'
   | 'aiftp_profile_list'
   | 'aiftp_profile_current'
-  | 'aiftp_profile_test';
+  | 'aiftp_profile_test'
+  | 'aiftp_config_migrate'
+  | 'aiftp_config_migrate_prepare'
+  | 'aiftp_config_migrate_confirm'
+  | 'aiftp_import_filezilla'
+  | 'aiftp_import_filezilla_prepare'
+  | 'aiftp_import_filezilla_confirm';
 
 export interface AiftpMcpApp {
   cwd: string;
@@ -206,6 +215,57 @@ const listRemoteSchema = profileSchema
   })
   .strict();
 
+const configMigrateConfirmSchema = z
+  .object({
+    plan_id: z.string().min(1),
+    diff_hash: z.string().min(1),
+    confirm_token: z.string().min(1),
+  })
+  .strict();
+
+const importFilezillaSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .describe(
+        'Filesystem path to a FileZilla sitemanager.xml. Relative paths resolve against the MCP server cwd.',
+      ),
+  })
+  .strict();
+
+const importFilezillaPrepareSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .describe(
+        'Filesystem path to a FileZilla sitemanager.xml. Relative paths resolve against the MCP server cwd.',
+      ),
+    keychain_prefix: z
+      .string()
+      .min(1)
+      .default('aiftp:imported')
+      .describe(
+        'Keychain service prefix recorded on each imported profile. MCP never writes the Keychain — operators must run `aiftp auth` separately.',
+      ),
+    overwrite: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When true, imported profiles replace existing entries with the same name. Default false: collisions are reported in `skipped`.',
+      ),
+  })
+  .strict();
+
+const importFilezillaConfirmSchema = z
+  .object({
+    plan_id: z.string().min(1),
+    diff_hash: z.string().min(1),
+    confirm_token: z.string().min(1),
+  })
+  .strict();
+
 const toolSchemas = {
   aiftp_status: profileSchema,
   aiftp_push: pushSchema,
@@ -222,6 +282,12 @@ const toolSchemas = {
   aiftp_profile_list: noArgsSchema,
   aiftp_profile_current: noArgsSchema,
   aiftp_profile_test: profileSchema,
+  aiftp_config_migrate: noArgsSchema,
+  aiftp_config_migrate_prepare: noArgsSchema,
+  aiftp_config_migrate_confirm: configMigrateConfirmSchema,
+  aiftp_import_filezilla: importFilezillaSchema,
+  aiftp_import_filezilla_prepare: importFilezillaPrepareSchema,
+  aiftp_import_filezilla_confirm: importFilezillaConfirmSchema,
 } satisfies Record<AiftpToolName, z.ZodType>;
 
 const toolDescriptions = {
@@ -248,6 +314,18 @@ const toolDescriptions = {
     'Return the resolved default profile name (AIFTP_PROFILE env > .aiftp/state file > single-profile fallback), or null when ambiguous. Read-only.',
   aiftp_profile_test:
     'Run the connection-subset of doctor against the chosen profile. Requires the server to be constructed with `runtime.runDoctor` (the CLI wires it; bare MCP servers refuse the call). Excludes local-only checks (config-file, gitignore, profile-exists). The `ok` flag is recomputed from the filtered subset. Read-only.',
+  aiftp_config_migrate:
+    'Direct migration is refused — use aiftp_config_migrate_prepare + aiftp_config_migrate_confirm. Schema v1 → v2 is a one-way TOML rewrite and must echo back a plan/token.',
+  aiftp_config_migrate_prepare:
+    'Preview the schema v1 → v2 migration of .aiftp.toml. Returns the migrated source text, schema_before / schema_after, plan_id / diff_hash / confirm_token / ttl_ms. Idempotent: reports changed=false if already at v2. Does not write.',
+  aiftp_config_migrate_confirm:
+    'Apply a prepared schema migration. Triggers loadConfig() which performs the atomic write (.aiftp.toml.v1.bak as the rollback file).',
+  aiftp_import_filezilla:
+    'Direct import is refused — use aiftp_import_filezilla_prepare + aiftp_import_filezilla_confirm. The two-step gate keeps an AI agent from materializing arbitrary FTP profiles without operator review.',
+  aiftp_import_filezilla_prepare:
+    'Parse a FileZilla sitemanager.xml and return a REDACTED preview (profile names + non-credential metadata + password_kind only — actual password values are NEVER surfaced through MCP). Reports collisions against existing .aiftp.toml profile names and the list of profiles that will be skipped (SFTP / master-password-encrypted). Does not write.',
+  aiftp_import_filezilla_confirm:
+    'Apply a prepared FileZilla import to .aiftp.toml. Never writes the Keychain — the confirm result includes a `next_steps` field telling the operator to run `aiftp auth` for each imported profile. The MCP server never has the password value.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -994,6 +1072,399 @@ async function handleProfileTest(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   return textResult({ ok, profile, results: filtered, summary });
 }
 
+// ---------------------------------------------------------------------------
+// v0.4.2: prepare/confirm gates for aiftp_config_migrate and
+// aiftp_import_filezilla. Same plan_id / diff_hash / confirm_token /
+// in-memory-store discipline as aiftp_push to keep AI agents from applying
+// either side-effectful operation without echoing the plan back verbatim.
+// ---------------------------------------------------------------------------
+
+interface PreparedMigratePlan {
+  planId: string;
+  diffHash: string;
+  confirmToken: string;
+  migratedSource: string;
+  schemaBefore: number;
+  schemaAfter: number;
+  changed: boolean;
+  createdAt: number;
+}
+
+const migratePlanStore = new Map<string, PreparedMigratePlan>();
+
+function pruneExpiredMigratePlans(now: number): void {
+  for (const [id, plan] of migratePlanStore) {
+    if (now - plan.createdAt > PLAN_TTL_MS) migratePlanStore.delete(id);
+  }
+}
+
+async function handleConfigMigrate(_app: AiftpMcpApp, _rawArgs: unknown): Promise<CallToolResult> {
+  throw new Error(
+    'aiftp_config_migrate refuses direct invocation. Use the two-step flow: aiftp_config_migrate_prepare to preview the migration, then aiftp_config_migrate_confirm to apply it.',
+  );
+}
+
+function detectSchemaVersion(source: string): number {
+  const match = source.match(/^\s*schema\s*=\s*([0-9]+)/mu);
+  if (!match) {
+    throw new Error('Could not detect schema version in .aiftp.toml (missing `schema =` line).');
+  }
+  return Number(match[1]);
+}
+
+async function handleConfigMigratePrepare(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const tomlPath = join(app.cwd, '.aiftp.toml');
+  const source = await readFile(tomlPath, 'utf8').catch((error: unknown) => {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not read .aiftp.toml in ${app.cwd}. Run \`aiftp init\` to scaffold one. Underlying error: ${cause}`,
+    );
+  });
+  const schemaBefore = detectSchemaVersion(source);
+  const migration = migrateV1ToV2Source(source);
+  const schemaAfter = migration.changed ? 2 : schemaBefore;
+  const now = Date.now();
+  pruneExpiredMigratePlans(now);
+  const planId = randomUUID();
+  // diff_hash binds the confirm to exactly this migrated_source. If the
+  // operator edits .aiftp.toml between prepare and confirm, the hash will
+  // not match and confirm refuses.
+  const diffHash = createHash('sha256').update(migration.source).digest('hex');
+  const confirmToken = randomBytes(24).toString('base64url');
+  migratePlanStore.set(planId, {
+    planId,
+    diffHash,
+    confirmToken,
+    migratedSource: migration.source,
+    schemaBefore,
+    schemaAfter,
+    changed: migration.changed,
+    createdAt: now,
+  });
+  return textResult({
+    ok: true,
+    plan_id: planId,
+    diff_hash: diffHash,
+    confirm_token: confirmToken,
+    ttl_ms: PLAN_TTL_MS,
+    changed: migration.changed,
+    schema_before: schemaBefore,
+    schema_after: schemaAfter,
+    migrated_source: migration.source,
+  });
+}
+
+async function handleConfigMigrateConfirm(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  const args = configMigrateConfirmSchema.parse(rawArgs ?? {});
+  const now = Date.now();
+  pruneExpiredMigratePlans(now);
+  const plan = migratePlanStore.get(args.plan_id);
+  if (!plan) {
+    throw new Error(
+      `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_config_migrate_prepare again to obtain a fresh plan.`,
+    );
+  }
+  if (plan.diffHash !== args.diff_hash) {
+    throw new Error(
+      'diff_hash mismatch: .aiftp.toml drifted between prepare and confirm. Call aiftp_config_migrate_prepare again.',
+    );
+  }
+  if (plan.confirmToken !== args.confirm_token) {
+    throw new Error('confirm_token mismatch: refusing to migrate.');
+  }
+  // Consume the plan before the side-effectful write so a second confirm
+  // with the same token cannot replay the migration on top of itself.
+  migratePlanStore.delete(args.plan_id);
+  if (!plan.changed) {
+    return textResult({
+      ok: true,
+      plan_id: args.plan_id,
+      changed: false,
+      schema_before: plan.schemaBefore,
+      schema_after: plan.schemaAfter,
+      message: 'Config is already at the latest schema; no write performed.',
+    });
+  }
+  // loadConfig() observes a v1 source and performs the atomic write +
+  // .v1.bak rotation. This is the same path the CLI uses, so the migration
+  // semantics are identical regardless of who triggers it.
+  await loadConfig(join(app.cwd, '.aiftp.toml'));
+  return textResult({
+    ok: true,
+    plan_id: args.plan_id,
+    changed: true,
+    schema_before: plan.schemaBefore,
+    schema_after: plan.schemaAfter,
+    backup_path: '.aiftp.toml.v1.bak',
+  });
+}
+
+interface PreparedFilezillaImportPlan {
+  planId: string;
+  diffHash: string;
+  confirmToken: string;
+  /**
+   * Profiles that will actually be written. Already filtered against
+   * SFTP / master-encrypted / collision-without-overwrite so confirm just
+   * needs to materialize TOML blocks.
+   */
+  queued: Array<{
+    name: string;
+    block: string;
+    keychainService: string;
+    user: string;
+    isOverwrite: boolean;
+  }>;
+  collisions: string[];
+  skipped: Array<{ name: string; reason: string }>;
+  warnings: string[];
+  overwrite: boolean;
+  createdAt: number;
+}
+
+const filezillaImportPlanStore = new Map<string, PreparedFilezillaImportPlan>();
+
+function pruneExpiredFilezillaImportPlans(now: number): void {
+  for (const [id, plan] of filezillaImportPlanStore) {
+    if (now - plan.createdAt > PLAN_TTL_MS) filezillaImportPlanStore.delete(id);
+  }
+}
+
+async function handleImportFilezilla(
+  _app: AiftpMcpApp,
+  _rawArgs: unknown,
+): Promise<CallToolResult> {
+  throw new Error(
+    'aiftp_import_filezilla refuses direct invocation. Use the two-step flow: aiftp_import_filezilla_prepare to preview, then aiftp_import_filezilla_confirm to apply.',
+  );
+}
+
+/**
+ * Render a single imported FileZilla profile into the same TOML block
+ * shape the CLI uses (see runImportFilezilla in packages/cli). Kept
+ * narrowly here so the MCP server doesn't depend on the CLI internals.
+ */
+function renderImportedProfileBlock(
+  profile: ImportedProfile,
+  keychainService: string,
+): { name: string; block: string } {
+  const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+  const ftpsMode = profile.protocol.startsWith('ftps_')
+    ? profile.protocol === 'ftps_explicit'
+      ? 'explicit'
+      : 'implicit'
+    : undefined;
+  const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+  const lines: string[] = [
+    `[profile.${profile.name}]`,
+    `host = ${JSON.stringify(profile.host)}`,
+    `port = ${port}`,
+    `protocol = ${JSON.stringify(aiftpProtocol)}`,
+    `user = ${JSON.stringify(profile.user)}`,
+    `remote_root = ${JSON.stringify(profile.remote_root)}`,
+    'local_root = "."',
+    `keychain_service = ${JSON.stringify(keychainService)}`,
+    'server_kind = "generic"',
+  ];
+  if (ftpsMode) lines.push(`ftps_mode = ${JSON.stringify(ftpsMode)}`);
+  if (profile.passive_mode === true) lines.push('passive_mode = true');
+  if (profile.passive_mode === false) lines.push('passive_mode = false');
+  if (profile.account) lines.push(`account = ${JSON.stringify(profile.account)}`);
+  return { name: profile.name, block: lines.join('\n') };
+}
+
+async function handleImportFilezillaPrepare(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  const args = importFilezillaPrepareSchema.parse(rawArgs ?? {});
+  const xmlAbsolute = isAbsolute(args.path) ? args.path : join(app.cwd, args.path);
+  const xml = await readFile(xmlAbsolute, 'utf8').catch((error: unknown) => {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not read FileZilla sitemanager XML at ${args.path}. Underlying error: ${cause}`,
+    );
+  });
+  const parsed = parseFilezillaXml(xml);
+
+  // Read existing profile names from raw TOML to avoid triggering the
+  // v1→v2 auto-migration as a side effect of the prepare step (the
+  // operator opts in to the write via the confirm step instead).
+  const tomlPath = join(app.cwd, '.aiftp.toml');
+  const existingSource = await readFile(tomlPath, 'utf8').catch(() => '');
+  const existingNames = new Set(
+    Array.from(existingSource.matchAll(/^\[profile\.([^\]]+)\]/gmu)).map((m) => m[1] ?? ''),
+  );
+
+  const queued: PreparedFilezillaImportPlan['queued'] = [];
+  const collisions: string[] = [];
+  const skipped: Array<{ name: string; reason: string }> = [];
+  const redactedProfiles: Array<Record<string, unknown>> = [];
+
+  for (const profile of parsed.profiles) {
+    // password_kind goes into the prepare output; password.value is
+    // intentionally never read here so it cannot leak into MCP responses.
+    const passwordKind = profile.password.kind;
+    redactedProfiles.push({
+      name: profile.name,
+      host: profile.host,
+      port: profile.port,
+      protocol: profile.protocol,
+      user: profile.user,
+      remote_root: profile.remote_root,
+      password_kind: passwordKind,
+      warnings: profile.warnings,
+    });
+    if (profile.protocol === 'sftp') {
+      skipped.push({ name: profile.name, reason: 'SFTP not supported by aiftp; skipped' });
+      continue;
+    }
+    if (passwordKind === 'master-encrypted') {
+      skipped.push({
+        name: profile.name,
+        reason: 'master-password-encrypted entry skipped (cannot decrypt without master password)',
+      });
+      continue;
+    }
+    const conflict = existingNames.has(profile.name);
+    if (conflict && !args.overwrite) {
+      collisions.push(profile.name);
+      skipped.push({
+        name: profile.name,
+        reason: 'name conflict with existing profile (pass overwrite=true to replace)',
+      });
+      continue;
+    }
+    const keychainService = `${args.keychain_prefix}:${profile.name}`;
+    const { block } = renderImportedProfileBlock(profile, keychainService);
+    queued.push({
+      name: profile.name,
+      block,
+      keychainService,
+      user: profile.user,
+      isOverwrite: conflict,
+    });
+  }
+
+  const now = Date.now();
+  pruneExpiredFilezillaImportPlans(now);
+  const planId = randomUUID();
+  // diff_hash binds confirm to exactly this set of (name, block) pairs.
+  const planSignature = queued
+    .map((q) => `${q.name}\n${q.block}`)
+    .sort()
+    .join('\n---\n');
+  const diffHash = createHash('sha256').update(planSignature).digest('hex');
+  const confirmToken = randomBytes(24).toString('base64url');
+  filezillaImportPlanStore.set(planId, {
+    planId,
+    diffHash,
+    confirmToken,
+    queued,
+    collisions,
+    skipped,
+    warnings: parsed.warnings,
+    overwrite: args.overwrite,
+    createdAt: now,
+  });
+
+  return textResult({
+    ok: true,
+    plan_id: planId,
+    diff_hash: diffHash,
+    confirm_token: confirmToken,
+    ttl_ms: PLAN_TTL_MS,
+    profiles: redactedProfiles,
+    queued_names: queued.map((q) => q.name),
+    collisions,
+    skipped,
+    warnings: parsed.warnings,
+  });
+}
+
+async function handleImportFilezillaConfirm(
+  app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  const args = importFilezillaConfirmSchema.parse(rawArgs ?? {});
+  const now = Date.now();
+  pruneExpiredFilezillaImportPlans(now);
+  const plan = filezillaImportPlanStore.get(args.plan_id);
+  if (!plan) {
+    throw new Error(
+      `Unknown or expired plan_id: ${args.plan_id}. Call aiftp_import_filezilla_prepare again to obtain a fresh plan.`,
+    );
+  }
+  if (plan.diffHash !== args.diff_hash) {
+    throw new Error(
+      'diff_hash mismatch: the import plan drifted between prepare and confirm. Call aiftp_import_filezilla_prepare again.',
+    );
+  }
+  if (plan.confirmToken !== args.confirm_token) {
+    throw new Error('confirm_token mismatch: refusing to apply the import.');
+  }
+  filezillaImportPlanStore.delete(args.plan_id);
+
+  if (plan.queued.length === 0) {
+    return textResult({
+      ok: true,
+      plan_id: args.plan_id,
+      imported: [],
+      next_steps: ['No profiles to import — every profile was skipped (see prepare output).'],
+      collisions: plan.collisions,
+      skipped: plan.skipped,
+    });
+  }
+
+  // Materialize the queued profile blocks. We append each block as raw
+  // TOML text — `appendProfileBlock` takes a structured ProfileBlockFields
+  // object, but the FileZilla import path already rendered the canonical
+  // block shape (see renderImportedProfileBlock), so a raw concat keeps
+  // TOML rendering centralized in one place per source. Overwrite mode
+  // (collisions allowed) is not yet supported in MCP — that's a v0.4.3
+  // candidate; current MCP confirm only writes profiles whose name does
+  // not collide.
+  const tomlPath = join(app.cwd, '.aiftp.toml');
+  let source = await readFile(tomlPath, 'utf8').catch(() => '');
+  for (const entry of plan.queued) {
+    if (source.length > 0 && !source.endsWith('\n')) source += '\n';
+    if (source.length > 0 && !source.endsWith('\n\n')) source += '\n';
+    source += `${entry.block}\n`;
+  }
+  await writeFile(tomlPath, source, 'utf8');
+
+  // The MCP server intentionally does not touch the Keychain — passwords
+  // never traverse the MCP boundary. The operator runs `aiftp auth` for
+  // each imported profile to populate Keychain entries the import created
+  // placeholders for.
+  const nextSteps = [
+    'Run `aiftp auth <profile-name>` to set the password in Keychain for each imported profile.',
+    'The MCP server never writes the Keychain — passwords are not transmitted through MCP.',
+  ];
+
+  return textResult({
+    ok: true,
+    plan_id: args.plan_id,
+    imported: plan.queued.map((q) => q.name),
+    keychain_services: plan.queued.map((q) => ({
+      name: q.name,
+      service: q.keychainService,
+      user: q.user,
+    })),
+    collisions: plan.collisions,
+    skipped: plan.skipped,
+    warnings: plan.warnings,
+    next_steps: nextSteps,
+  });
+}
+
 const handlers = {
   aiftp_status: handleStatus,
   aiftp_push: handlePush,
@@ -1010,6 +1481,12 @@ const handlers = {
   aiftp_profile_list: handleProfileList,
   aiftp_profile_current: handleProfileCurrent,
   aiftp_profile_test: handleProfileTest,
+  aiftp_config_migrate: handleConfigMigrate,
+  aiftp_config_migrate_prepare: handleConfigMigratePrepare,
+  aiftp_config_migrate_confirm: handleConfigMigrateConfirm,
+  aiftp_import_filezilla: handleImportFilezilla,
+  aiftp_import_filezilla_prepare: handleImportFilezillaPrepare,
+  aiftp_import_filezilla_confirm: handleImportFilezillaConfirm,
 } satisfies Record<AiftpToolName, (app: AiftpMcpApp, args: unknown) => Promise<CallToolResult>>;
 
 export async function callAiftpTool(
