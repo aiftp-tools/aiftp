@@ -250,4 +250,142 @@ describe('runRollback', () => {
     });
     expect(first.planned).toEqual(second.planned);
   });
+
+  // ---------------------------------------------------------------------
+  // v0.5.0 fix-1 (Codex BLOCK + Claude HIGH review):
+  //   - per-file atomic 2-phase upload (tmp + rename)
+  //   - mkdir parent dirs before first upload
+  //   - rolledBack sorted by path
+  //   - upload-failure cleans up the orphan tmp via unlink
+  // ---------------------------------------------------------------------
+
+  it('runRollback does a 2-phase atomic upload when uploader.rename is provided', async () => {
+    const calls: Array<{ op: string; arg1: string; arg2?: string }> = [];
+    const uploader: RollbackUploader = {
+      upload: async (_localPath, remotePath, _content) => {
+        calls.push({ op: 'upload', arg1: remotePath });
+      },
+      rename: async (src, dest) => {
+        calls.push({ op: 'rename', arg1: src, arg2: dest });
+      },
+      mkdir: async (dir) => {
+        calls.push({ op: 'mkdir', arg1: dir });
+      },
+    };
+    const store = makeStore([targetSnap], targetFiles);
+    await runRollback({
+      snapshotId: targetSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+    // Every upload goes to a tmp path containing `.aiftp-rb-`, then is
+    // renamed to the final path.
+    const uploadCalls = calls.filter((c) => c.op === 'upload');
+    const renameCalls = calls.filter((c) => c.op === 'rename');
+    expect(uploadCalls).toHaveLength(2);
+    for (const u of uploadCalls) {
+      expect(u.arg1).toMatch(/\.aiftp-rb-[0-9a-f-]+$/u);
+    }
+    expect(renameCalls).toHaveLength(2);
+    // Rename pairs tmp → final; every final path must end with the
+    // expected file name (no .aiftp-rb suffix on dest).
+    for (const r of renameCalls) {
+      expect(r.arg1).toMatch(/\.aiftp-rb-/u);
+      expect(r.arg2).not.toMatch(/\.aiftp-rb-/u);
+    }
+  });
+
+  it('runRollback pre-creates the parent directory only once per dir', async () => {
+    const mkdirCalls: string[] = [];
+    const uploader: RollbackUploader = {
+      upload: async () => undefined,
+      mkdir: async (dir) => {
+        mkdirCalls.push(dir);
+      },
+    };
+    const store = makeStore([targetSnap], targetFiles);
+    await runRollback({
+      snapshotId: targetSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+    // Both files are under /public_html — mkdir should be called once.
+    expect(mkdirCalls).toEqual(['/public_html']);
+  });
+
+  it('runRollback sorts the rolledBack array by path for deterministic output', async () => {
+    const reverseSnap = snap(
+      '2026-05-19T05:00:00.000Z-auto-rev',
+      '2026-05-19T05:00:00.000Z',
+      'auto',
+      [{ path: 'z-last.html' }, { path: 'a-first.html' }, { path: 'm-middle.html' }],
+    );
+    const reverseFiles = new Map([
+      [
+        reverseSnap.id,
+        new Map<string, Buffer>([
+          ['z-last.html', Buffer.from('z')],
+          ['a-first.html', Buffer.from('a')],
+          ['m-middle.html', Buffer.from('m')],
+        ]),
+      ],
+    ]);
+    const uploader: RollbackUploader = {
+      upload: async () => undefined,
+      mkdir: async () => undefined,
+    };
+    const store = makeStore([reverseSnap], reverseFiles);
+    const result = await runRollback({
+      snapshotId: reverseSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+    expect(result.rolledBack.map((r) => r.path)).toEqual([
+      'a-first.html',
+      'm-middle.html',
+      'z-last.html',
+    ]);
+  });
+
+  it('runRollback cleans up the orphan tmp via unlink when upload fails', async () => {
+    let uploadCalls = 0;
+    const unlinkCalls: string[] = [];
+    const uploader: RollbackUploader = {
+      upload: async (_local, remotePath, _content) => {
+        uploadCalls++;
+        if (uploadCalls === 1) {
+          // First file uploads fine; second one explodes.
+          return;
+        }
+        throw new Error(`simulated failure for ${remotePath}`);
+      },
+      rename: async () => undefined,
+      unlink: async (path) => {
+        unlinkCalls.push(path);
+      },
+    };
+    const store = makeStore([targetSnap], targetFiles);
+    await expect(
+      runRollback({
+        snapshotId: targetSnap.id,
+        backupStore: store,
+        uploader,
+        remoteRoot: '/public_html',
+        excluder: createExcluder(),
+        dryRun: false,
+      }),
+    ).rejects.toThrow(/rollback failed/i);
+    // Orphan tmp from the failed second upload must have been unlinked.
+    expect(unlinkCalls).toHaveLength(1);
+    expect(unlinkCalls[0]).toMatch(/\.aiftp-rb-/u);
+  });
 });

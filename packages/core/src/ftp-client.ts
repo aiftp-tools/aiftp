@@ -496,6 +496,25 @@ export class FtpClient {
     }
   }
 
+  /**
+   * Atomic rename. Used by rollback's two-phase upload (tmp → final) so
+   * an in-flight failure never leaves a half-written destination file
+   * visible to readers. Most FTP servers implement RNFR/RNTO as a single
+   * directory entry update which is atomic with respect to the
+   * destination filename — though atomicity guarantees are
+   * server-dependent (some servers may unlink+copy on cross-directory
+   * renames). For rollback we stay within the same directory so the
+   * standard rename semantics apply.
+   */
+  async rename(srcPath: string, destPath: string): Promise<void> {
+    const client = this.requireConnection();
+    try {
+      await client.rename(srcPath, destPath);
+    } catch (error: unknown) {
+      throw mapFtpError(error, `rename(${srcPath} → ${destPath})`);
+    }
+  }
+
   async mkdir(remotePath: string): Promise<void> {
     const client = this.requireConnection();
     let originalDir: string | undefined;

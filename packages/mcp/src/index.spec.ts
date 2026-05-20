@@ -1298,10 +1298,14 @@ describe('mcp', () => {
         prune: async () => [],
         restoreFile: async () => Buffer.from('<h1>old</h1>'),
       }),
-      createUploader: async () => ({
-        upload: async (_local, remote) => {
+      // v0.5.0 fix: rollback now uses a dedicated Buffer-shaped hook
+      // (createRollbackUploader) rather than duck-typing DeployUploader.
+      createRollbackUploader: async () => ({
+        upload: async (_local, remote, _content) => {
           uploads.push(remote);
         },
+        // No rename → direct upload path (no .aiftp-rb tmp), keeping
+        // the test assertion `uploads === ['/public_html/index.html']`.
       }),
     };
     const app = createAiftpMcp({ cwd, runtime });
@@ -1360,7 +1364,7 @@ describe('mcp', () => {
         prune: async () => [],
         restoreFile: async () => Buffer.from('<h1>old</h1>'),
       }),
-      createUploader: async () => ({ upload: async () => undefined }),
+      createRollbackUploader: async () => ({ upload: async () => undefined }),
     };
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(

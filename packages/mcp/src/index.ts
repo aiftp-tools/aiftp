@@ -75,6 +75,15 @@ export interface AiftpMcpRuntime {
    * a mock; the CLI wires a real runner.
    */
   runDoctor?(context: AiftpMcpContext): Promise<DoctorReport>;
+  /**
+   * v0.5.0: Buffer-shaped uploader for `aiftp_rollback_confirm`. Codex
+   * BLOCK review pointed out that `createUploader` (path-shaped, push
+   * style) cannot supply the in-memory bytes a rollback needs — so we
+   * carry a SEPARATE optional hook. When omitted, the MCP server builds
+   * an FtpClient-backed implementation via `createDefaultFtpClient`.
+   * Test harnesses inject a mock that observes Buffer-level uploads.
+   */
+  createRollbackUploader?(context: AiftpMcpContext): Promise<RollbackUploader>;
 }
 
 export interface AiftpMcpOptions {
@@ -1750,9 +1759,23 @@ interface PreparedRollback {
 
 const rollbackPlanStore = new Map<string, PreparedRollback>();
 
+/**
+ * Upper bound on outstanding rollback plans. Combined with PLAN_TTL_MS
+ * (TTL pruning), this caps memory footprint even if an automated agent
+ * spams `aiftp_rollback_prepare` without ever confirming. When the cap
+ * is exceeded the OLDEST plan is evicted (FIFO via insertion order on
+ * Map). Codex MEDIUM review.
+ */
+const ROLLBACK_PLAN_STORE_LIMIT = 50;
+
 function pruneExpiredRollbackPlans(now: number): void {
   for (const [id, plan] of rollbackPlanStore) {
     if (now - plan.createdAt > PLAN_TTL_MS) rollbackPlanStore.delete(id);
+  }
+  while (rollbackPlanStore.size > ROLLBACK_PLAN_STORE_LIMIT) {
+    const oldest = rollbackPlanStore.keys().next().value;
+    if (oldest === undefined) break;
+    rollbackPlanStore.delete(oldest);
   }
 }
 
@@ -1880,85 +1903,72 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
 
   const backupStore = await backupStoreFor(app, profileName);
   const rollbackStore = asRollbackStore(backupStore);
-  // Build the real uploader. We prefer a runtime-provided one so test
-  // suites can observe upload calls without standing up an FTP server,
-  // otherwise we fall back to constructing a default FTP client. The
-  // path mirrors handlePushConfirm.
-  const runtimeUploader = await app.runtime.createUploader?.({
-    cwd: app.cwd,
-    profileName,
-  });
-  const sharedFtp = runtimeUploader
-    ? undefined
-    : await createDefaultFtpClient(app.cwd, profileName);
-  // Build a Buffer-aware uploader. Two paths:
-  //   - runtime uploader: the test harness or future Pro adapter provides
-  //     a DeployUploader. We adapt its disk-based `upload(localPath,
-  //     remotePath)` to our content-based shape. If the runtime exposes
-  //     an `uploadBuffer` extension we use it (zero-copy); otherwise the
-  //     test mock's `upload` signature is the contract.
-  //   - default FtpClient: use the new `uploadBuffer` method so the
-  //     decrypted bytes go from the snapshot Buffer straight to the FTP
-  //     socket — no temp file on disk.
-  type BufferingUploader = DeployUploader & {
-    uploadBuffer?: (content: Buffer, remotePath: string) => Promise<unknown>;
-  };
-  const baseUploader: RollbackUploader = runtimeUploader
-    ? {
-        upload: async (localPath, remotePath, content) => {
-          const ru = runtimeUploader as BufferingUploader;
-          if (typeof ru.uploadBuffer === 'function') {
-            await ru.uploadBuffer(content, remotePath);
-            return;
-          }
-          await ru.upload(localPath, remotePath);
-        },
-        mkdir: runtimeUploader.mkdir
-          ? async (remoteDir: string) => {
-              await (runtimeUploader.mkdir as (d: string) => Promise<unknown>)(remoteDir);
-            }
-          : undefined,
-      }
-    : {
-        upload: async (_local, remotePath, content) => {
-          if (!sharedFtp) throw new Error('Default FTP client unavailable.');
-          await sharedFtp.uploadBuffer(content, remotePath);
-        },
-        mkdir: sharedFtp
-          ? async (remoteDir: string) => {
-              await sharedFtp.mkdir(remoteDir);
-            }
-          : undefined,
-      };
-
   const config = await loadConfigForMcp(app.cwd);
   const excluder = createExcluder({
     userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
     additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
   });
 
+  // Codex+Claude HIGH review: re-run the dry-run classification BEFORE
+  // any upload. If the planned set changed (e.g. operator added an
+  // additional hard-exclude pattern between prepare and confirm), refuse
+  // immediately — previously this check ran after partial upload.
+  const preview = await runRollback({
+    snapshotId: plan.snapshotId,
+    backupStore: rollbackStore,
+    uploader: { upload: async () => undefined },
+    remoteRoot: plan.remoteRoot,
+    excluder,
+    dryRun: true,
+  });
+  const expectedPlanned = [...plan.planned].sort();
+  const currentPlanned = [...preview.planned].sort();
+  const sameSet =
+    currentPlanned.length === expectedPlanned.length &&
+    currentPlanned.every((p, i) => p === expectedPlanned[i]);
+  if (!sameSet) {
+    throw new Error(
+      'rollback plan drifted between prepare and confirm (hard-exclude config may have changed). Call aiftp_rollback_prepare again to inspect the new plan.',
+    );
+  }
+
+  // Build a real Buffer-shaped uploader. Codex BLOCK review: the old
+  // code tried to duck-type a DeployUploader (path-shaped) into a
+  // RollbackUploader (buffer-shaped) which silently fell back to a fake
+  // localPath when the runtime didn't expose `uploadBuffer`. Now we use
+  // a dedicated `createRollbackUploader` hook. Default to FtpClient
+  // when no hook is wired.
+  let sharedFtp: FtpClient | undefined;
+  const uploader: RollbackUploader =
+    (await app.runtime.createRollbackUploader?.({
+      cwd: app.cwd,
+      profileName,
+    })) ??
+    (await (async () => {
+      sharedFtp = await createDefaultFtpClient(app.cwd, profileName);
+      const client = sharedFtp;
+      return {
+        upload: async (_localPath, remotePath, content) => {
+          await client.uploadBuffer(content, remotePath);
+        },
+        mkdir: async (remoteDir: string) => {
+          await client.mkdir(remoteDir);
+        },
+        rename: async (src, dest) => {
+          await client.rename(src, dest);
+        },
+      } satisfies RollbackUploader;
+    })());
+
   try {
     const result = await runRollback({
       snapshotId: plan.snapshotId,
       backupStore: rollbackStore,
-      uploader: baseUploader,
+      uploader,
       remoteRoot: plan.remoteRoot,
       excluder,
       dryRun: false,
     });
-    // Verify the actual rollback set didn't drift since prepare. If the
-    // hard-exclude config changed (operator added a new additional_pattern
-    // between prepare and confirm) the planned set could shrink — refuse.
-    const actualPlanned = result.rolledBack.map((r) => r.path).sort();
-    const expectedPlanned = [...plan.planned].sort();
-    const sameSet =
-      actualPlanned.length === expectedPlanned.length &&
-      actualPlanned.every((p, i) => p === expectedPlanned[i]);
-    if (!sameSet) {
-      throw new Error(
-        'rollback plan drifted between prepare and confirm (hard-exclude config may have changed). Call aiftp_rollback_prepare again.',
-      );
-    }
     await appendLogEntry(app.cwd, {
       at: new Date().toISOString(),
       event: 'rollback',

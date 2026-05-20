@@ -1319,6 +1319,31 @@ describe('cli', () => {
     expect(out).toMatch(/skipped|hard-exclude/i);
   });
 
+  it('rollback refuses both --steps and --snapshot-id at the same time (mutual exclusion)', async () => {
+    // Review fix: previously snapshotId silently won and steps was
+    // ignored. Now both-specified is a hard refuse so the operator
+    // picks intentionally.
+    await writeConfig();
+    const runtime: CliRuntime = {
+      runRollback: async () => {
+        throw new Error('runner must not be called when args are ambiguous');
+      },
+    };
+    await expect(
+      parse(
+        [
+          'rollback',
+          '--steps',
+          '1',
+          '--snapshot-id',
+          '2026-05-19T01:00:00.000Z-auto-aaa',
+          '--dry-run',
+        ],
+        { runtime },
+      ),
+    ).rejects.toThrow(/mutually exclusive|both.*--steps|pick one/i);
+  });
+
   it('rollback honors --snapshot-id <id> and refuses without --steps or --snapshot-id', async () => {
     await writeConfig();
     let observedOptions: { snapshotId?: string; steps?: number } | null = null;

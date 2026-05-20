@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { SnapshotId, SnapshotMeta } from './backup/store.js';
 import type { Excluder } from './exclude.js';
 
@@ -13,16 +14,45 @@ export interface RollbackBackupStore {
 }
 
 /**
- * The uploader contract for rollback. Compatible with `DeployUploader`
- * but with an in-memory `content` Buffer instead of a `localPath` —
- * rollback never materializes the decrypted file on disk (the bytes go
- * straight from the snapshot to the FTP socket, which means an attacker
+ * The uploader contract for rollback. **Buffer-shaped** (not path-shaped)
+ * because rollback never materializes the decrypted file on disk — bytes
+ * go from the snapshot Buffer straight to the FTP socket, so an attacker
  * with disk-read access can't recover the rolled-back content from a
- * leftover temp file).
+ * leftover temp file.
+ *
+ * Codex v0.5.0 review (HIGH): this is a DIFFERENT contract from
+ * `DeployUploader` (which is path-shaped for push). The MCP / CLI layers
+ * must wire a real `RollbackUploader` — they cannot duck-type a
+ * `DeployUploader` into one because the `upload` signatures differ.
  */
 export interface RollbackUploader {
+  /**
+   * Upload `content` to `remotePath`. `localPath` is informational only
+   * (used for logs / error messages) — the actual bytes come from
+   * `content`, not from disk.
+   */
   upload(localPath: string, remotePath: string, content: Buffer): Promise<void>;
+  /**
+   * Recursively create parent directories for an upload target. Optional
+   * — but rollback against a remote that may have been pruned since
+   * snapshot time needs this to avoid the first file failing the upload.
+   */
   mkdir?(remoteDir: string): Promise<void>;
+  /**
+   * Atomic rename. When provided, `runRollback` writes each file to a
+   * temp name first and renames into place, so a mid-upload failure
+   * never leaves a half-written destination visible. When NOT provided
+   * the uploader uploads directly to the final path (acceptable for
+   * test mocks; FTP-backed uploaders should provide rename).
+   */
+  rename?(srcPath: string, destPath: string): Promise<void>;
+  /**
+   * Best-effort cleanup of a leftover temp file when upload-phase fails
+   * after the bytes are partially written. Optional. Missing
+   * implementations are tolerated — the operator may need to clean up
+   * `*.aiftp-rb-<uuid>` files manually in that case.
+   */
+  unlink?(remotePath: string): Promise<void>;
 }
 
 export interface ResolveRollbackTargetOptions {
@@ -72,20 +102,23 @@ export async function resolveRollbackTarget(
   }
   const target = autoOrdered[options.steps - 1];
   if (!target) {
-    // Defensive: autoOrdered.length check above should have caught this.
     throw new Error(`Could not resolve rollback target at steps=${options.steps}`);
   }
   return target;
 }
 
-export type RollbackFileStatus = 'rolled-back' | 'skipped-hard-exclude' | 'skipped-dry-run';
+export type RollbackFileStatus =
+  | 'rolled-back'
+  | 'skipped-hard-exclude'
+  | 'skipped-dry-run'
+  | 'failed';
 
 export interface RollbackFileResult {
   path: string;
   remotePath: string;
   size: number;
   status: RollbackFileStatus;
-  /** Human-readable reason for skipped entries (hard-exclude pattern, etc.). */
+  /** Human-readable reason for skipped or failed entries. */
   reason?: string;
 }
 
@@ -105,6 +138,12 @@ export interface RollbackOptions {
    * This matches spec §9: auth-bearing files are protected from rollback
    * because pushing an old credentials file would silently downgrade a
    * production password rotation.
+   *
+   * NOTE: soft-exclude (user `[exclude].patterns`) files are NOT skipped
+   * here. The backup store already filters by soft-exclude at snapshot
+   * time, so any soft-excluded file in a snapshot was explicitly opted in
+   * by the user via `additional_patterns` or similar — rollback honors
+   * that opt-in.
    */
   excluder: Excluder;
   /**
@@ -124,7 +163,17 @@ export interface RollbackResult {
    * deterministic diff_hash.
    */
   planned: string[];
+  /**
+   * Files successfully rolled back. Sorted by path so a deterministic
+   * order is always presented to the caller (matches `planned` order on
+   * full success).
+   */
   rolledBack: RollbackFileResult[];
+  /**
+   * Files skipped (hard-exclude or dry-run) AND files that failed to
+   * upload after starting. Failed entries carry `status: 'failed'` and a
+   * `reason` describing the underlying error.
+   */
   skipped: RollbackFileResult[];
 }
 
@@ -132,6 +181,11 @@ function joinRemote(remoteRoot: string, path: string): string {
   const root = remoteRoot.endsWith('/') ? remoteRoot.slice(0, -1) : remoteRoot;
   const clean = path.startsWith('/') ? path.slice(1) : path;
   return `${root}/${clean}`;
+}
+
+function remoteDirname(remotePath: string): string {
+  const idx = remotePath.lastIndexOf('/');
+  return idx <= 0 ? '/' : remotePath.slice(0, idx);
 }
 
 /**
@@ -144,13 +198,30 @@ function joinRemote(remoteRoot: string, path: string): string {
  *      files, even in dry-run.
  *   2. If `dryRun`, no decryption, no upload — entry is reported as
  *      `skipped-dry-run`.
- *   3. Otherwise `restoreFile` decrypts the snapshot entry; the Buffer
- *      is handed directly to the uploader (no temp file on disk).
+ *   3. Otherwise:
+ *      a. Pre-create the parent directory via `uploader.mkdir?` (so the
+ *         first file doesn't fail against a pruned remote dir tree).
+ *      b. If `uploader.rename` is available, **two-phase atomic write**:
+ *         upload to `<remote>.aiftp-rb-<uuid>` then rename to `<remote>`.
+ *         This makes each file's update atomic — readers see either the
+ *         old content or the new content, never a half-written file.
+ *         Per-file atomicity only; the batch as a whole is best-effort
+ *         (if file 5/10 fails, files 1-4 are already renamed). The caller
+ *         can re-run rollback to retry — re-uploading already-rolled-back
+ *         files is idempotent.
+ *      c. Otherwise (test mocks without rename): direct upload to the
+ *         final path.
+ *      d. If the upload-phase fails AFTER any bytes were written to the
+ *         temp path, try `uploader.unlink?` to remove the orphan. If
+ *         unlink is unavailable or itself fails, mention the temp path
+ *         in the error so the operator can clean up manually.
  *
  * Determinism (important for MCP):
  *   - `planned` is the sorted list of paths that would upload. Same
  *     `snapshotId` + same `excluder` → identical `planned` between
  *     prepare and confirm.
+ *   - `rolledBack` is also sorted by path so equality checks across
+ *     runs are stable.
  */
 export async function runRollback(options: RollbackOptions): Promise<RollbackResult> {
   const snapshots = await options.backupStore.listSnapshots();
@@ -159,15 +230,14 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
     throw new Error(`Rollback target snapshot not found: ${options.snapshotId}.`);
   }
 
-  const rolledBack: RollbackFileResult[] = [];
+  type Classified = { meta: { path: string; size: number }; remotePath: string };
+  const allowList: Classified[] = [];
   const skipped: RollbackFileResult[] = [];
 
   // Two-pass design: classify first (hard-exclude check is pure), then
   // upload the surviving set. This guarantees that even if upload fails
   // partway through, the operator's view of which files are protected
   // matches the prepare-time preview exactly.
-  type Classified = { meta: { path: string; size: number }; remotePath: string };
-  const allowList: Classified[] = [];
   for (const file of target.files) {
     const verdict = options.excluder.shouldExclude(file.path);
     const remotePath = joinRemote(options.remoteRoot, file.path);
@@ -199,16 +269,75 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
     };
   }
 
+  const rolledBack: RollbackFileResult[] = [];
+  // mkdir is per-directory cached so we don't redundantly call ensureDir
+  // for every file under the same parent. basic-ftp's ensureDir is
+  // tolerant of "already exists" but the round-trip cost adds up.
+  const mkdirSeen = new Set<string>();
+
   for (const entry of allowList) {
+    const parentDir = remoteDirname(entry.remotePath);
+    if (options.uploader.mkdir && !mkdirSeen.has(parentDir)) {
+      try {
+        await options.uploader.mkdir(parentDir);
+        mkdirSeen.add(parentDir);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Don't abort the whole rollback for mkdir; the upload may still
+        // succeed if the directory already exists with different ACLs.
+        // We record it as a non-fatal warning and continue.
+        skipped.push({
+          path: entry.meta.path,
+          remotePath: entry.remotePath,
+          size: entry.meta.size,
+          status: 'failed',
+          reason: `mkdir(${parentDir}) failed: ${message}`,
+        });
+        continue;
+      }
+    }
+
     const content = await options.backupStore.restoreFile(options.snapshotId, entry.meta.path);
-    await options.uploader.upload(
-      // `localPath` is informational for the uploader implementation;
-      // the actual bytes flow through `content`. We pass the snapshot-
-      // relative path so logs and errors are readable.
-      `<snapshot:${options.snapshotId}>:${entry.meta.path}`,
-      entry.remotePath,
-      content,
-    );
+    const localLabel = `<snapshot:${options.snapshotId}>:${entry.meta.path}`;
+
+    if (typeof options.uploader.rename === 'function') {
+      // Two-phase atomic upload.
+      const tmpRemote = `${entry.remotePath}.aiftp-rb-${randomUUID()}`;
+      try {
+        await options.uploader.upload(localLabel, tmpRemote, content);
+      } catch (uploadError: unknown) {
+        // Try to remove the orphan tmp. Best-effort: if unlink fails or
+        // is unavailable, surface the tmp path so the operator can clean
+        // up manually.
+        if (typeof options.uploader.unlink === 'function') {
+          await options.uploader.unlink(tmpRemote).catch(() => undefined);
+        }
+        const message = uploadError instanceof Error ? uploadError.message : String(uploadError);
+        const cleanupHint =
+          typeof options.uploader.unlink !== 'function'
+            ? `An orphan temp file may remain at ${tmpRemote}; remove it manually before retrying.`
+            : 'Orphan tmp was cleaned up. Re-run rollback to retry.';
+        throw new Error(`rollback failed at ${entry.meta.path}: ${message}. ${cleanupHint}`);
+      }
+      try {
+        await options.uploader.rename(tmpRemote, entry.remotePath);
+      } catch (renameError: unknown) {
+        // Rename failed AFTER successful upload — the tmp file is the
+        // intended content, just not at the final path. We do NOT
+        // automatically remove it (the operator may want to recover it
+        // manually). Surface the tmp path in the error.
+        const message = renameError instanceof Error ? renameError.message : String(renameError);
+        throw new Error(
+          `rollback rename failed at ${entry.meta.path}: ${message}. ` +
+            `The new content is at ${tmpRemote} on the server; remove the original ` +
+            `${entry.remotePath} and rename ${tmpRemote} → ${entry.remotePath} manually.`,
+        );
+      }
+    } else {
+      // Direct upload — no atomicity guarantee. Test mocks land here.
+      await options.uploader.upload(localLabel, entry.remotePath, content);
+    }
+
     rolledBack.push({
       path: entry.meta.path,
       remotePath: entry.remotePath,
@@ -216,6 +345,9 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       status: 'rolled-back',
     });
   }
+
+  // Sort rolledBack by path for deterministic output (matches `planned`).
+  rolledBack.sort((a, b) => a.path.localeCompare(b.path));
 
   return {
     dryRun: false,

@@ -499,7 +499,10 @@ async function probeTcp(host: string, port: number): Promise<boolean> {
  *      any decryption — auth-bearing files never enter memory).
  *   6. Disconnect FTP, return the result.
  */
-async function defaultRunRollback(options: CliRollbackOptions): Promise<RollbackResult> {
+async function defaultRunRollback(
+  options: CliRollbackOptions,
+  keychain: CliKeychain = defaultKeychain(),
+): Promise<RollbackResult> {
   const config = await loadConfig(join(options.cwd, '.aiftp.toml'));
   const profile = config.profile[options.profile];
   if (!profile) {
@@ -519,7 +522,8 @@ async function defaultRunRollback(options: CliRollbackOptions): Promise<Rollback
     snapshotId: options.snapshotId,
   });
   // Build the uploader — dry-run gets a stub so we don't open an FTP
-  // socket needlessly.
+  // socket needlessly. Real rollback uses the FtpClient's buffer +
+  // rename API so each file is written atomically (Codex BLOCK fix).
   let ftpClient: FtpClient | undefined;
   const uploader: RollbackUploader = options.dryRun
     ? {
@@ -528,15 +532,27 @@ async function defaultRunRollback(options: CliRollbackOptions): Promise<Rollback
         },
       }
     : await (async () => {
-        ftpClient = await createDefaultFtpClient(options.cwd, options.profile, defaultKeychain());
+        ftpClient = await createDefaultFtpClient(options.cwd, options.profile, keychain);
+        const client = ftpClient;
         return {
           upload: async (_localPath, remotePath, content) => {
-            if (!ftpClient) throw new Error('FTP client unavailable');
-            await ftpClient.uploadBuffer(content, remotePath);
+            await client.uploadBuffer(content, remotePath);
           },
           mkdir: async (remoteDir: string) => {
-            if (!ftpClient) throw new Error('FTP client unavailable');
-            await ftpClient.mkdir(remoteDir);
+            await client.mkdir(remoteDir);
+          },
+          rename: async (src, dest) => {
+            await client.rename(src, dest);
+          },
+          unlink: async (remote) => {
+            // basic-ftp's `remove` returns FTPResponse but we don't care
+            // about the response — we just need the call.
+            const internal = (
+              client as unknown as { client?: { remove?: (p: string) => Promise<unknown> } }
+            ).client;
+            if (internal?.remove) {
+              await internal.remove(remote).catch(() => undefined);
+            }
           },
         };
       })();
@@ -1742,6 +1758,14 @@ export function createCli(options: CliOptions = {}): Command {
             'aiftp rollback requires either --steps <n> or --snapshot-id <id>. See `aiftp backup list` for snapshot ids.',
           );
         }
+        // Claude+Codex review: both specified is ambiguous (snapshotId
+        // would silently win, steps would be ignored). Hard refuse so
+        // the operator picks intentionally.
+        if (cmd.steps !== undefined && cmd.snapshotId) {
+          throw new Error(
+            'aiftp rollback: --steps and --snapshot-id are mutually exclusive (pick one).',
+          );
+        }
         const config = await loadConfig(join(cwd, '.aiftp.toml'));
         const available = Object.keys(config.profile);
         const profileName =
@@ -1751,8 +1775,7 @@ export function createCli(options: CliOptions = {}): Command {
             'Could not resolve a default profile. Pass --profile, set AIFTP_PROFILE, or run `aiftp profile use <name>`.',
           );
         }
-        const profile = config.profile[profileName];
-        if (!profile) {
+        if (!config.profile[profileName]) {
           throw new Error(`Profile not found: ${profileName}`);
         }
         const dryRun = cmd.dryRun === true;
@@ -1763,21 +1786,29 @@ export function createCli(options: CliOptions = {}): Command {
           snapshotId: cmd.snapshotId,
           dryRun,
         };
-        const result = await (runtime.runRollback ?? defaultRunRollback)(cliOptions);
-        // `profile` shadows the local from the parent scope, prevent eslint
-        // unused-var noise: profile is used inside defaultRunRollback only.
-        void profile;
+        // Codex MEDIUM review: thread the injected keychain into the
+        // default runner so test environments don't fall through to the
+        // OS Keychain. The runtime hook (if injected) takes precedence.
+        const runner =
+          runtime.runRollback ?? ((opts: CliRollbackOptions) => defaultRunRollback(opts, keychain));
+        const result = await runner(cliOptions);
         if (result.dryRun) {
           stdout(
             `Dry-run rollback to snapshot ${result.snapshotId}: ${result.planned.length} file(s) would be uploaded.`,
           );
+          // Dry-run: show what WOULD be uploaded (planned).
+          for (const planned of result.planned) {
+            stdout(`  + ${planned}`);
+          }
         } else {
           stdout(
             `Rollback to snapshot ${result.snapshotId}: ${result.rolledBack.length} file(s) uploaded.`,
           );
-        }
-        for (const planned of result.planned) {
-          stdout(`  + ${planned}`);
+          // Non-dry-run: show what WAS uploaded (rolledBack, sorted by
+          // path so failures don't leave us reporting wrong file names).
+          for (const r of result.rolledBack) {
+            stdout(`  + ${r.path}`);
+          }
         }
         if (result.skipped.length > 0) {
           stdout('');
