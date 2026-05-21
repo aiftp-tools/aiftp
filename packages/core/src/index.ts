@@ -1,4 +1,4 @@
-export const VERSION = '0.0.0';
+export const VERSION = '0.9.2';
 
 export {
   type BackupFtpClient,

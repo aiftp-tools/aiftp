@@ -102,8 +102,8 @@ describe('cli', () => {
     await writeFile(filePath, content, 'utf8');
   }
 
-  it('re-exports VERSION from core', () => {
-    expect(VERSION).toBe('0.0.0');
+  it('re-exports VERSION from core (semver shape)', () => {
+    expect(VERSION).toMatch(/^\d+\.\d+\.\d+(?:-[\w.]+)?$/u);
   });
 
   it('init writes .aiftp.toml, stores secrets, and adds .aiftp/ to .gitignore', async () => {

@@ -49,8 +49,8 @@ describe('mcp', () => {
     return JSON.parse(result.content[0]?.text ?? '{}');
   }
 
-  it('re-exports VERSION from core', () => {
-    expect(VERSION).toBe('0.0.0');
+  it('re-exports VERSION from core (semver shape)', () => {
+    expect(VERSION).toMatch(/^\d+\.\d+\.\d+(?:-[\w.]+)?$/u);
   });
 
   it('creates an MCP server facade', () => {

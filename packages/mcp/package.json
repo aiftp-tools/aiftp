@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/mcp",
-  "version": "0.0.0",
+  "version": "0.9.2",
   "private": true,
   "description": "aiftp MCP server (stdio)",
   "license": "MIT",
