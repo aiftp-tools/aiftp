@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest a new feature, command, or behavior
+title: "[feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Before filing, please consider:
+
+        - Is this already on the [roadmap](../../README.md#status--roadmap)?
+        - Would this be better as a Discussion to gauge interest first?
+        - Does the suggestion conflict with aiftp's safety guarantees
+          (e.g. bypassing the two-step push gate, disabling encryption,
+          auto-pushing without confirmation)? Those are **non-negotiable**
+          by design and won't be loosened.
+
+        🇯🇵 日本語での提案も歓迎します。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Start with the problem, not the solution. What are you trying to do that's currently painful?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like aiftp to behave? CLI / MCP / config? Concrete examples help.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, other tools, manual steps you've tried.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Free-tier (MIT), Pro-tier (proprietary, future), or unsure? aiftp follows an open-core model — the Free tier focuses on safety primitives.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and discussions for similar suggestions.
+          required: true
+        - label: I understand that aiftp will not add features that compromise its non-negotiable safety guarantees (encryption-by-default, hard exclude, no auto-push, two-step MCP gate).
+          required: true

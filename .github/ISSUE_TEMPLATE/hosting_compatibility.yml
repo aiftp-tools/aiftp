@@ -1,0 +1,86 @@
+name: Hosting compatibility report
+description: Report whether aiftp works (or doesn't) on your shared hosting / VPS / FTP server
+title: "[compat] <provider> "
+labels: ["compatibility", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility reports — both **success** and **failure** — are
+        valuable. Use this template if aiftp connected (or didn't)
+        against a hosting provider not already listed in
+        [`docs/compatibility-matrix.md`](../../docs/compatibility-matrix.md),
+        or if you encountered server-specific quirks worth recording.
+
+        🇯🇵 日本語での報告大歓迎です。
+
+  - type: input
+    id: provider-name
+    attributes:
+      label: Provider / server software
+      description: Hosting provider, plan name, or FTP server software + version.
+      placeholder: "Sakura Rental Server (Standard) / vsftpd 3.0.5 / FileZilla Server 1.8.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - "Works ✅"
+        - "Works with workaround ⚠️ (please describe)"
+        - "Fails ❌"
+    validations:
+      required: true
+
+  - type: input
+    id: aiftp-version
+    attributes:
+      label: aiftp version tested
+      placeholder: "v0.9.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol used
+      options:
+        - "FTPS Explicit (FTPES)"
+        - "FTPS Implicit"
+        - "Plain FTP"
+        - "SFTP (not currently supported by aiftp)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: "`aiftp doctor` output (redacted)"
+      description: Output of `aiftp doctor --json --profile <name>`. Please redact host, user, and any path containing usernames.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: quirks-used
+    attributes:
+      label: Quirks / encoding settings that were necessary
+      description: What `[quirks]` / `[encoding]` config values did you need? (e.g. `ignore_pasv_address`, `tls_check_hostname=false`, `file_name="shift_jis"`)
+      render: toml
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything unusual? Connection timeouts? PASV address rewriting? Encoding surprises? Foreign-IP filter behavior?
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have **redacted credentials** (passwords, tokens, full hostnames where sensitive, account usernames in paths) from any doctor output / logs I'm pasting. aiftp masks passwords automatically, but please double-check before submitting.
+          required: true
+        - label: "I'm OK with my findings being added to `docs/compatibility-matrix.md` (provider name only, no credentials)."

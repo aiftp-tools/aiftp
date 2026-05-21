@@ -1,0 +1,118 @@
+name: Bug report
+description: Report a bug in aiftp (CLI / MCP server / core)
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in the details below so we
+        can reproduce the issue quickly.
+
+        **Before submitting**: please confirm with `aiftp doctor` that your
+        configuration is healthy and include the relevant subset of its
+        output if it surfaced the problem.
+
+        🇯🇵 日本語での報告も歓迎します。Please feel free to write in Japanese.
+
+  - type: input
+    id: aiftp-version
+    attributes:
+      label: aiftp version
+      description: Output of `aiftp --version`
+      placeholder: "v0.9.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 11
+        - Windows 10
+        - Linux (please specify distro in description)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`
+      placeholder: "v22.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Hosting provider (if relevant)
+      options:
+        - "(not applicable)"
+        - Star Server / スターサーバー
+        - Sakura / さくらのレンタルサーバ
+        - Lolipop / ロリポップ！
+        - Xserver / エックスサーバー
+        - ConoHa WING
+        - Other shared hosting
+        - vsftpd / pure-ftpd (self-hosted)
+        - FileZilla Server
+        - Other (please describe)
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug.
+      placeholder: |
+        I ran `aiftp push --dry-run` and it reported …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce. If possible, include a redacted `.aiftp.toml` (no host/user/password).
+      placeholder: |
+        1. `aiftp init` …
+        2. `aiftp push --dry-run`
+        3. Error: …
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: "`aiftp doctor` output (redacted)"
+      description: Run `aiftp doctor --json` and paste the relevant subset. **Please redact host, user, and any path that contains usernames.**
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (redacted)
+      description: Logs from `.aiftp/logs/` if relevant. **Please redact credentials.** aiftp masks passwords automatically, but please double-check before pasting.
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have **redacted credentials** (passwords, tokens, full hostnames where sensitive) from any output I'm pasting.
+          required: true
+        - label: I am willing to test a candidate fix on my setup if asked.
