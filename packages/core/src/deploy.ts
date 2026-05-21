@@ -209,11 +209,17 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
 
   await options.lock?.acquire();
   try {
-    const modifiedTargets = planned.filter((path) => status.diff.modified.includes(path));
+    // v0.9.2: Always create a snapshot when `planned.length > 0` so
+    // the operator's "every push is reversible" expectation holds even
+    // for added-only pushes. All `planned` paths (added + modified)
+    // are handed to `createAutoSnapshot`; the backup source is expected
+    // to return `null` for any path it cannot read (e.g. added files
+    // that don't yet exist on the remote). v0.10.0 will redesign the
+    // snapshot to carry per-path added/modified/removed classification
+    // so `rollback` can `delete` an added file as well — until then,
+    // an added-only snapshot is metadata-only (fileCount = 0).
     const backupSnapshot =
-      modifiedTargets.length > 0
-        ? await options.backupStore.createAutoSnapshot(modifiedTargets)
-        : null;
+      planned.length > 0 ? await options.backupStore.createAutoSnapshot(planned) : null;
 
     let nextState = options.state;
     const uploaded: UploadedFileResult[] = [];

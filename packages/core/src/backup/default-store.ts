@@ -91,6 +91,19 @@ export async function createDefaultBackupStore(
           if (error instanceof FtpNotFoundError) {
             return null;
           }
+          // v0.9.2: treat 551/553 (and any other "file unavailable" style
+          // 5xx reply) the same as 550 for backup-source purposes. Real
+          // servers occasionally use 551 for ENOENT (Sakura, some mock
+          // ProFTPD configurations), and v0.9.2 push-on-added relies on
+          // remote-not-found gracefully becoming a metadata-only snapshot
+          // rather than blowing up the whole backup. v0.10.0 will move
+          // this classification into FtpError mapping itself.
+          if (error instanceof FtpError) {
+            const ftpCode = (error.cause as { code?: number } | undefined)?.code;
+            if (ftpCode === 551 || ftpCode === 553) {
+              return null;
+            }
+          }
           if (error instanceof FtpConnectionError) {
             throw new BackupError(
               `Failed to connect while reading remote backup source: ${remotePath}`,

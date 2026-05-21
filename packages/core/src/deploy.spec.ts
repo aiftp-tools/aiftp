@@ -49,10 +49,7 @@ describe('deploy engine', () => {
     const source: BackupSource = {
       readFile: async (path: string) => {
         const data = remoteFiles.get(path);
-        if (!data) {
-          throw new Error(`missing remote file: ${path}`);
-        }
-        return data;
+        return data ?? null;
       },
     };
     return new BackupStore({
@@ -191,6 +188,40 @@ describe('deploy engine', () => {
     expect(result.nextState.files['index.html']?.hash).toBe(
       await computeHash(join(localRoot, 'index.html')),
     );
+  });
+
+  it('creates an auto snapshot for added-only pushes', async () => {
+    await writeLocal('first.html', '<h1>first push</h1>\n');
+    const backupReads: string[] = [];
+    const backupStore = new BackupStore({
+      rootDir: backupRoot,
+      key: generateKey(),
+      source: {
+        readFile: async (path) => {
+          backupReads.push(path);
+          return remoteFiles.get(path) ?? null;
+        },
+      },
+      excluder: createExcluder(),
+      now: () => new Date('2026-05-18T12:30:00.000Z'),
+    });
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: { schema: 1, files: {} },
+      excluder: createExcluder(),
+      backupStore,
+      uploader: createUploader(),
+      now: () => new Date('2026-05-18T12:31:00.000Z'),
+    });
+
+    expect(result.planned).toEqual(['first.html']);
+    expect(result.backupSnapshot).not.toBeNull();
+    expect(result.backupSnapshot?.type).toBe('auto');
+    expect(result.backupSnapshot?.fileCount).toBe(0);
+    expect(backupReads).toEqual(['first.html']);
+    await expect(backupStore.listSnapshots()).resolves.toHaveLength(1);
   });
 
   it('acquires the deployment lock before backup snapshot reads remote content', async () => {

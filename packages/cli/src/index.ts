@@ -627,6 +627,11 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         // so a mismatch is still surfaced as a warning even when the
         // hostname check itself is suppressed.
         const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
+        // v0.9.2 patch: pipe basic-ftp verbose log to stderr so the
+        // operator can see *why* a handshake/login failed instead of
+        // the catch-all "FTPS handshake failed." message that doctor
+        // currently shows. This makes the catch path below diagnostic.
+        const debugFtps = process.env.AIFTP_DEBUG === '1';
         const client = new FtpClient({
           host: profile.host,
           port: profile.port,
@@ -637,6 +642,7 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
           verifyCertificate: probeConfig?.safety.verify_certificate ?? true,
           skipHostnameCheck: probeConfig?.quirks?.tls_check_hostname === false,
           timeoutMs: probeConfig?.connection.timeout_ms,
+          onLog: debugFtps ? (msg: string) => process.stderr.write(`[ftp] ${msg}\n`) : undefined,
         });
         try {
           await client.connect();
@@ -650,9 +656,13 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
             requestedHost: profile.host,
             remoteRoot: profile.remote_root,
           });
-        } catch {
-          // Any connection error is reported as "handshake failed" by the
-          // caller; we return the shape doctor.ts expects.
+        } catch (error: unknown) {
+          // v0.9.2 patch: surface the underlying error to stderr so the
+          // doctor user can tell apart "TLS handshake failed", "login
+          // incorrect", "PASV refused", etc. — they all used to read
+          // identically as "FTPS handshake failed" before this patch.
+          const msg = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`[doctor probeFtps error] ${msg}\n`);
           return {
             handshakeOk: false,
             pasvAddressLeak: null,
