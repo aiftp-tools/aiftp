@@ -32,9 +32,9 @@ v0.10.0.
   `added`) created **no snapshot at all**, leaving the operator
   unable to roll back. The condition is now `planned.length > 0`,
   and the snapshot is built from the union of added + modified
-  targets. This was discovered during A-7 verification on Sakura
-  (oliveferret65.sakura.ne.jp) and confirms the spec's
-  "every push is reversible" promise.
+  targets. This was discovered during A-7 verification against a
+  freshly-contracted Sakura Rental Server test account and confirms
+  the spec's "every push is reversible" promise.
 
 ### Added
 
@@ -100,7 +100,7 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
    (USER/PASS) with distinct status codes.
 
 4. **`certificateMatchesHost` is exact-match, not wildcard-aware.**
-   `*.sakura.ne.jp` does not match `oliveferret65.sakura.ne.jp` in
+   `*.sakura.ne.jp` does not match `<user>.sakura.ne.jp` in
    the current implementation, so `ftps-cert: warn` is raised even
    when the cert is genuinely valid for the host. v0.10.0 will add
    RFC 6125 wildcard matching to `certificateMatchesHost`.
