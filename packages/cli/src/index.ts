@@ -7,7 +7,9 @@ import {
   type DeployUploader,
   type DoctorReport,
   type ExportProfile,
+  FtpAuthError,
   FtpClient,
+  FtpTlsError,
   type ProfileBlockFields,
   type PushOptions,
   type PushResult,
@@ -646,7 +648,11 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         });
         try {
           await client.connect();
-          return await probeFtps({
+          // v0.9.3: connect() includes AUTH TLS handshake AND USER/PASS
+          // login (basic-ftp's access()). If we got here both succeeded
+          // so mark authOk=true. The downstream probeFtps helper sets
+          // handshakeOk: true.
+          const probeResult = await probeFtps({
             client: {
               getPeerCertificate: () => client.getPeerCertificate(),
               getFeatures: () => client.getFeatures(),
@@ -656,15 +662,43 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
             requestedHost: profile.host,
             remoteRoot: profile.remote_root,
           });
+          return { ...probeResult, authOk: true };
         } catch (error: unknown) {
-          // v0.9.2 patch: surface the underlying error to stderr so the
-          // doctor user can tell apart "TLS handshake failed", "login
-          // incorrect", "PASV refused", etc. — they all used to read
-          // identically as "FTPS handshake failed" before this patch.
+          // v0.9.2: surface the underlying error to stderr so the operator
+          // can tell apart "TLS handshake failed", "login incorrect", etc.
           const msg = error instanceof Error ? error.message : String(error);
           process.stderr.write(`[doctor probeFtps error] ${msg}\n`);
+          // v0.9.3: classify the failure into TLS / AUTH / UNKNOWN so the
+          // new `ftp-auth` doctor check can report 530 (login incorrect)
+          // separately from a real TLS-layer failure. If auth was the
+          // problem the TLS handshake actually succeeded — surface that
+          // so doctor doesn't mislabel a typo'd password as a TLS bug.
+          if (error instanceof FtpAuthError) {
+            return {
+              handshakeOk: true,
+              authOk: false,
+              probeErrorKind: 'auth',
+              pasvAddressLeak: null,
+              mlsdSupported: false,
+              sizeSupported: false,
+              remoteRootCwdOk: false,
+            };
+          }
+          if (error instanceof FtpTlsError) {
+            return {
+              handshakeOk: false,
+              authOk: undefined,
+              probeErrorKind: 'tls',
+              pasvAddressLeak: null,
+              mlsdSupported: false,
+              sizeSupported: false,
+              remoteRootCwdOk: false,
+            };
+          }
           return {
             handshakeOk: false,
+            authOk: undefined,
+            probeErrorKind: 'unknown',
             pasvAddressLeak: null,
             mlsdSupported: false,
             sizeSupported: false,

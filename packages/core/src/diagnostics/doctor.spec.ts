@@ -181,6 +181,93 @@ describe('runDoctor: FTPS probe checks', () => {
     expect(tls?.details).toMatchObject({ requestedHost: 'ftp.stars.ne.jp' });
   });
 
+  describe('ftp-auth check (v0.9.3 — split from ftps-handshake)', () => {
+    it('reports ftp-auth: pass when probe.authOk === true', async () => {
+      const deps: DoctorDeps = {
+        ...happyDeps(),
+        probeFtps: async () => ({
+          handshakeOk: true,
+          authOk: true,
+          certCommonName: 'ftp.example.com',
+          certAltNames: ['ftp.example.com'],
+          pasvAddressLeak: null,
+          mlsdSupported: true,
+          sizeSupported: true,
+          remoteRootCwdOk: true,
+        }),
+      };
+      const report = await runDoctor(deps, { profile: 'production' });
+      expect(report.results.find((r) => r.id === 'ftp-auth')?.status).toBe('pass');
+    });
+
+    it('reports ftp-auth: fail with recommendation when handshake succeeded but USER/PASS was rejected (530)', async () => {
+      // This is the A-7 scenario: TLS handshake completes (cert is fetched
+      // and recognized) but the wrong password is configured. Before v0.9.3
+      // doctor lumped this under "ftps-handshake: fail" and the operator
+      // spent an hour suspecting a TLS bug.
+      const deps: DoctorDeps = {
+        ...happyDeps(),
+        probeFtps: async () => ({
+          handshakeOk: true,
+          authOk: false,
+          probeErrorKind: 'auth',
+          certCommonName: 'ftp.example.com',
+          certAltNames: ['ftp.example.com'],
+          pasvAddressLeak: null,
+          mlsdSupported: false,
+          sizeSupported: false,
+          remoteRootCwdOk: false,
+        }),
+      };
+      const report = await runDoctor(deps, { profile: 'production' });
+      const handshake = report.results.find((r) => r.id === 'ftps-handshake');
+      const auth = report.results.find((r) => r.id === 'ftp-auth');
+      expect(handshake?.status).toBe('pass');
+      expect(auth?.status).toBe('fail');
+      expect(auth?.message).toMatch(/530|USER|PASS|credential/i);
+      expect(auth?.recommendation).toMatch(/aiftp auth set/);
+    });
+
+    it('reports ftp-auth: skip when the FTPS handshake itself failed (auth could not be evaluated)', async () => {
+      const deps: DoctorDeps = {
+        ...happyDeps(),
+        probeFtps: async () => ({
+          handshakeOk: false,
+          authOk: undefined,
+          probeErrorKind: 'tls',
+          pasvAddressLeak: null,
+          mlsdSupported: false,
+          sizeSupported: false,
+          remoteRootCwdOk: false,
+        }),
+      };
+      const report = await runDoctor(deps, { profile: 'production' });
+      expect(report.results.find((r) => r.id === 'ftps-handshake')?.status).toBe('fail');
+      expect(report.results.find((r) => r.id === 'ftp-auth')?.status).toBe('skip');
+    });
+
+    it('reports ftp-auth: skip when authOk is undefined (legacy probe stub did not separate phases)', async () => {
+      // Backwards-compat: pre-v0.9.3 probes (and many unit-test stubs)
+      // don't set authOk. Doctor must treat this as "we don't know" rather
+      // than asserting pass/fail.
+      const deps: DoctorDeps = {
+        ...happyDeps(),
+        probeFtps: async () => ({
+          handshakeOk: true,
+          // no authOk, no probeErrorKind
+          certCommonName: 'ftp.example.com',
+          pasvAddressLeak: null,
+          mlsdSupported: true,
+          sizeSupported: true,
+          remoteRootCwdOk: true,
+        }),
+      };
+      const report = await runDoctor(deps, { profile: 'production' });
+      expect(report.results.find((r) => r.id === 'ftps-handshake')?.status).toBe('pass');
+      expect(report.results.find((r) => r.id === 'ftp-auth')?.status).toBe('skip');
+    });
+  });
+
   it('warns when PASV reply leaks a private address (NAT-misconfigured server)', async () => {
     const deps: DoctorDeps = {
       ...happyDeps(),
