@@ -2015,6 +2015,9 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
         rename: async (src, dest) => {
           await client.rename(src, dest);
         },
+        delete: async (remote) => {
+          await client.delete(remote);
+        },
       } satisfies RollbackUploader;
     })());
 

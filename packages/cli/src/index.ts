@@ -576,6 +576,9 @@ async function defaultRunRollback(
               await internal.remove(remote).catch(() => undefined);
             }
           },
+          delete: async (remote) => {
+            await client.delete(remote);
+          },
         };
       })();
   try {

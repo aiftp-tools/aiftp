@@ -206,21 +206,18 @@ function remoteDirname(remotePath: string): string {
   return idx <= 0 ? '/' : remotePath.slice(0, idx);
 }
 
-function isNotFoundError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'FtpNotFoundError';
-}
-
 /**
- * Restore the contents of a single snapshot to the FTP server.
+ * Roll back a snapshot to the FTP server.
  *
  * Pipeline per file:
  *   1. Test against `excluder` — hard-exclude patterns short-circuit to
- *      `skipped-hard-exclude` without ever calling `restoreFile`. This
- *      keeps the decrypted bytes out of memory entirely for auth-bearing
- *      files, even in dry-run.
- *   2. If `dryRun`, no decryption, no upload — entry is reported as
- *      `skipped-dry-run`.
- *   3. Otherwise:
+ *      `skipped-hard-exclude` before operation classification. Auth-bearing
+ *      files are never decrypted, uploaded, or deleted.
+ *   2. Schema 2 operations are split: `added` becomes a remote delete;
+ *      `modified` / `removed` restore snapshot content by upload. Schema 1
+ *      snapshots are migrated in memory by BackupStore as `modified`.
+ *   3. If `dryRun`, no decryption, upload, or delete occurs.
+ *   4. Otherwise:
  *      a. Pre-create the parent directory via `uploader.mkdir?` (so the
  *         first file doesn't fail against a pruned remote dir tree).
  *      b. If `uploader.rename` is available, **two-phase atomic write**:
@@ -239,11 +236,11 @@ function isNotFoundError(error: unknown): boolean {
  *         in the error so the operator can clean up manually.
  *
  * Determinism (important for MCP):
- *   - `planned` is the sorted list of paths that would upload. Same
- *     `snapshotId` + same `excluder` → identical `planned` between
- *     prepare and confirm.
- *   - `rolledBack` is also sorted by path so equality checks across
- *     runs are stable.
+ *   - `planned` is the sorted upload set; `plannedDeletes` is the sorted
+ *     delete set. Same `snapshotId` + same `excluder` → identical sets
+ *     between prepare and confirm.
+ *   - `rolledBack` and `deleted` are also sorted by path so equality checks
+ *     across runs are stable.
  */
 export async function runRollback(options: RollbackOptions): Promise<RollbackResult> {
   const snapshots = await options.backupStore.listSnapshots();
@@ -393,13 +390,7 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       });
       continue;
     }
-    try {
-      await options.uploader.delete(entry.remotePath);
-    } catch (error: unknown) {
-      if (!isNotFoundError(error)) {
-        throw error;
-      }
-    }
+    await options.uploader.delete(entry.remotePath);
     deleted.push({
       path: entry.meta.path,
       remotePath: entry.remotePath,

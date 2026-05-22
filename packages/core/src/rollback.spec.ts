@@ -465,6 +465,37 @@ describe('runRollback', () => {
     ]);
   });
 
+  it('does not treat FTP delete not-found as rollback success', async () => {
+    const addedSnap = snap(
+      '2026-05-19T04:35:00.000Z-auto-delete-fail',
+      '2026-05-19T04:35:00.000Z',
+      'auto',
+      [{ path: 'new-page.html', operation: 'added' }],
+    );
+    const store = makeStore([addedSnap], new Map([[addedSnap.id, new Map()]]));
+    const error = new Error('not found or permission denied (550)');
+    error.name = 'FtpNotFoundError';
+    const uploader: RollbackUploader = {
+      upload: async () => {
+        throw new Error('upload must not be called for added rollback');
+      },
+      delete: async () => {
+        throw error;
+      },
+    };
+
+    await expect(
+      runRollback({
+        snapshotId: addedSnap.id,
+        backupStore: store,
+        uploader,
+        remoteRoot: '/public_html',
+        excluder: createExcluder(),
+        dryRun: false,
+      }),
+    ).rejects.toThrow(/not found or permission denied/);
+  });
+
   it('returns a verifiable diff_hash anchor: same snapshot id + same file set produces same uploads', async () => {
     // Determinism guarantee for MCP plan/confirm gating: the set of files
     // that runRollback would push is fully determined by snapshotId +
