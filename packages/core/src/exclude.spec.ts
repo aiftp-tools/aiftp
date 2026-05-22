@@ -246,11 +246,23 @@ describe('Excluder: path normalization', () => {
 });
 
 describe('Excluder: getEffectivePatterns', () => {
-  it('returns built-in hard patterns alone when no options given', () => {
+  it('returns built-in hard patterns plus DEFAULT_EXCLUDE_PATTERNS as user patterns when no options given (v0.9.4 default-on)', () => {
     const excluder = new Excluder();
     const { hard, user } = excluder.getEffectivePatterns();
     expect(hard).toContain('.env');
     expect(hard).toContain('wp-config.php');
+    // v0.9.4: defaults are auto-prepended into the user-pattern list.
+    // The opt-out is `useDefaults: false`; that case is exercised in
+    // default-exclude.spec.ts.
+    expect(user).toContain('.aiftp.toml');
+    expect(user).toContain('.DS_Store');
+    expect(user).toContain('doctor-*.txt');
+  });
+
+  it('returns hard patterns and an empty user list when useDefaults is false', () => {
+    const excluder = new Excluder({ useDefaults: false });
+    const { hard, user } = excluder.getEffectivePatterns();
+    expect(hard).toContain('.env');
     expect(user).toEqual([]);
   });
 
@@ -261,9 +273,20 @@ describe('Excluder: getEffectivePatterns', () => {
     expect(hard).toContain('custom.config');
   });
 
-  it('preserves user patterns verbatim', () => {
+  it('preserves user patterns verbatim (defaults are prepended in front; v0.9.4)', () => {
     const excluder = new Excluder({
       userPatterns: ['*.log', '!important.log', '.git/'],
+    });
+    const { user } = excluder.getEffectivePatterns();
+    // v0.9.4: defaults come first, then the user patterns verbatim
+    // (gitignore-style "later rule wins" preserved).
+    expect(user.slice(-3)).toEqual(['*.log', '!important.log', '.git/']);
+  });
+
+  it('preserves user patterns verbatim with no defaults when opted out', () => {
+    const excluder = new Excluder({
+      userPatterns: ['*.log', '!important.log', '.git/'],
+      useDefaults: false,
     });
     const { user } = excluder.getEffectivePatterns();
     expect(user).toEqual(['*.log', '!important.log', '.git/']);

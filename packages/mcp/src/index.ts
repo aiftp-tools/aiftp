@@ -2,7 +2,6 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
-  DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
   type DoctorReport,
   FtpClient,
@@ -476,9 +475,13 @@ async function loadStatusContext(
     localRoot: projectPath(cwd, profile.local_root),
     state: await loadState(stateDir(cwd, profileName)),
     excluder: createExcluder({
-      userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+      userPatterns: config.exclude.patterns,
+      useDefaults: config.exclude.use_defaults,
       additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
     }),
+    // v0.9.4+: forward walk policy so MCP push respects the same
+    // symlink rule as the CLI.
+    followSymlinks: config.walk.follow_symlinks,
   };
 }
 
@@ -1864,7 +1867,8 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
   // same logic the confirm step will use (hard-exclude filtering),
   // guaranteeing that diff_hash binds to the exact upload set.
   const excluder = createExcluder({
-    userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+    userPatterns: config.exclude.patterns,
+    useDefaults: config.exclude.use_defaults,
     additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
   });
   const preview = await runRollback({
@@ -1952,7 +1956,8 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   const rollbackStore = asRollbackStore(backupStore);
   const config = await loadConfigForMcp(app.cwd);
   const excluder = createExcluder({
-    userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+    userPatterns: config.exclude.patterns,
+    useDefaults: config.exclude.use_defaults,
     additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
   });
 

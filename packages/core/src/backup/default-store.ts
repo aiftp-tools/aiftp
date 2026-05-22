@@ -3,7 +3,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { loadConfig } from '../config.js';
-import { DEFAULT_EXCLUDE_PATTERNS, createExcluder } from '../exclude.js';
+import { createExcluder } from '../exclude.js';
 import { FtpClient, FtpConnectionError, FtpError, FtpNotFoundError } from '../ftp-client.js';
 import { getPassword } from '../keychain.js';
 import { BackupError, BackupStore, type BackupStoreOptions } from './store.js';
@@ -49,12 +49,25 @@ export async function createDefaultBackupStore(
   }
   const selectedProfile = profile;
 
-  const key = Buffer.from(
-    // The backup key account is the profile name within a service namespace.
-    // This keeps FTP credentials and profile-specific backup keys separated.
-    await keychain.getPassword(backupKeyService(selectedProfile.keychain_service), profileName),
-    'base64',
-  );
+  // v0.9.4: catch the bare KeychainNotFoundError and re-throw with a
+  // hint pointing at the new `aiftp backup init` command. Before this
+  // patch, operators who hand-edited `.aiftp.toml` (skipping `aiftp init`)
+  // got an opaque "Keychain entry not found" with no recovery hint.
+  const backupKeyServiceName = backupKeyService(selectedProfile.keychain_service);
+  let backupKeyBase64: string;
+  try {
+    backupKeyBase64 = await keychain.getPassword(backupKeyServiceName, profileName);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('Keychain entry not found')) {
+      throw new BackupError(
+        `Backup key not found for profile '${profileName}'. Run \`aiftp backup init --profile ${profileName}\` to create one. (Original error: ${msg})`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
+    throw error;
+  }
+  const key = Buffer.from(backupKeyBase64, 'base64');
   let ownedFtpClient: BackupFtpClient | undefined;
   async function getFtpClient(): Promise<BackupFtpClient> {
     if (options.ftpClient) {
@@ -125,7 +138,8 @@ export async function createDefaultBackupStore(
     },
     sourceConcurrency: 1,
     excluder: createExcluder({
-      userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+      userPatterns: config.exclude.patterns,
+      useDefaults: config.exclude.use_defaults,
       additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
     }),
   } satisfies BackupStoreOptions);

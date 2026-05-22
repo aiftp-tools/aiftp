@@ -37,6 +37,11 @@ const profileSchema = z
 const excludeSchema = z
   .object({
     patterns: z.array(z.string()).default([]),
+    // v0.9.4+: auto-apply DEFAULT_EXCLUDE_PATTERNS (`.aiftp.toml`,
+    // `.DS_Store`, `doctor-*.txt`, editor swap files, etc.) on top of
+    // `patterns`. Defaults to `true`; set to `false` only if you have
+    // a legitimate reason to upload those files (rare).
+    use_defaults: z.boolean().default(true),
   })
   .strict();
 
@@ -116,6 +121,15 @@ const quirksSchema = z
   })
   .strict();
 
+// v0.9.4+: file-walker policy. Defaults match the prior implicit
+// behaviour: do NOT follow symbolic links. Operators who legitimately
+// share fixtures via symlink can opt in.
+const walkSchema = z
+  .object({
+    follow_symlinks: z.boolean().default(false),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     schema: z.union([z.literal(SUPPORTED_SCHEMAS[0]), z.literal(SUPPORTED_SCHEMAS[1])]),
@@ -131,6 +145,7 @@ export const configSchema = z
     hooks: hooksSchema.prefault({}),
     encoding: encodingSchema.prefault({}),
     quirks: quirksSchema.prefault({}),
+    walk: walkSchema.prefault({}),
   })
   .strict();
 
@@ -143,6 +158,7 @@ export type ExcludeConfig = z.infer<typeof excludeSchema>;
 export type HooksConfig = z.infer<typeof hooksSchema>;
 export type EncodingConfig = z.infer<typeof encodingSchema>;
 export type QuirksConfig = z.infer<typeof quirksSchema>;
+export type WalkConfig = z.infer<typeof walkSchema>;
 
 export interface LoadConfigOptions {
   autoMigrate?: boolean;

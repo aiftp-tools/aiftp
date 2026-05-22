@@ -3,7 +3,6 @@ import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises
 import { createConnection } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
-  DEFAULT_EXCLUDE_PATTERNS,
   type DeployUploader,
   type DoctorReport,
   type ExportProfile,
@@ -336,9 +335,13 @@ async function loadStatusContext(cwd: string, profileName: string): Promise<Stat
     localRoot: projectPath(cwd, profile.local_root),
     state: await loadState(stateDir(cwd, profileName)),
     excluder: createExcluder({
-      userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+      userPatterns: config.exclude.patterns,
+      useDefaults: config.exclude.use_defaults,
       additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
     }),
+    // v0.9.4+: propagate walk policy so symlinks are followed only
+    // when the operator opts in via [walk] follow_symlinks = true.
+    followSymlinks: config.walk.follow_symlinks,
   };
 }
 
@@ -570,7 +573,8 @@ async function defaultRunRollback(
       uploader,
       remoteRoot: profile.remote_root,
       excluder: createExcluder({
-        userPatterns: [...DEFAULT_EXCLUDE_PATTERNS, ...config.exclude.patterns],
+        userPatterns: config.exclude.patterns,
+        useDefaults: config.exclude.use_defaults,
         additionalHardPatterns: config.backup.hard_exclude.additional_patterns,
       }),
       dryRun: options.dryRun,
@@ -1248,6 +1252,42 @@ export function createCli(options: CliOptions = {}): Command {
       (await createDefaultBackupStore({ cwd, profileName, keychain }))
     );
   }
+
+  backup
+    .command('init')
+    .description(
+      'Initialize the backup environment for a profile (stores a fresh AES-256-GCM key in the OS keychain). Use this after hand-editing `.aiftp.toml` instead of running `aiftp init`. v0.9.4+',
+    )
+    .option('-p, --profile <name>', 'profile name', 'production')
+    .option(
+      '--force',
+      'overwrite an existing backup key (destroys ability to decrypt prior snapshots)',
+      false,
+    )
+    .action(async (cmd: { profile: string; force: boolean }) => {
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      const profile = config.profile[cmd.profile];
+      if (!profile) {
+        throw new Error(`Profile not found: ${cmd.profile}`);
+      }
+      const keychainServiceName = profile.keychain_service;
+      const backupKeyEntryService = backupKeyService(keychainServiceName);
+      const alreadyExists = await keychain.hasPassword(backupKeyEntryService, cmd.profile);
+      if (alreadyExists && !cmd.force) {
+        stdout(
+          `Backup key for profile '${cmd.profile}' already exists in the keychain. Run with --force to overwrite (this will make previously-encrypted snapshots unrecoverable).`,
+        );
+        return;
+      }
+      await keychain.setPassword(
+        backupKeyEntryService,
+        cmd.profile,
+        generateKey().toString('base64'),
+      );
+      stdout(
+        `Initialized backup environment for profile '${cmd.profile}' (keychain service '${backupKeyEntryService}', account '${cmd.profile}').`,
+      );
+    });
 
   backup
     .command('list')

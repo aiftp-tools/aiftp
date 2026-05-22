@@ -45,10 +45,49 @@ export const HARD_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
   '*.bak',
 ]);
 
+/**
+ * Soft-exclude defaults applied automatically by Excluder unless the
+ * operator opts out with `useDefaults: false` (or `[exclude].use_defaults
+ * = false` in `.aiftp.toml`).
+ *
+ * Unlike HARD_EXCLUDE_PATTERNS, these CAN be overridden by user negation
+ * patterns (gitignore-style `!pattern`). Use this for "things you almost
+ * certainly don't want uploaded but might in some legitimate cases."
+ *
+ * v0.9.4 additions (closes A-7 leak vector): doctor-*.txt / doctor-*.json
+ * were uploaded to a Sakura test account during A-7 verification because
+ * the previous version didn't auto-apply this list. Editor swap files
+ * and OS metadata are also covered now.
+ */
 export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
-  '.git/',
+  // --- aiftp's own files (must not deploy our state to the remote) ---
   '.aiftp/',
   '.aiftp.toml',
+  '.aiftp.toml.bak',
+
+  // --- VCS metadata ---
+  '.git/',
+  '.gitignore',
+  '.gitattributes',
+
+  // --- doctor / verification output (the actual A-7 leak vector) ---
+  'doctor.txt',
+  'doctor.json',
+  'doctor-*.txt',
+  'doctor-*.json',
+
+  // --- Editor swap / backup files ---
+  '*.swp',
+  '*.swo',
+  '*~',
+  '#*#',
+  '.#*',
+
+  // --- OS metadata ---
+  '.DS_Store',
+  '._*',
+  'Thumbs.db',
+  'desktop.ini',
 ]);
 
 export type ExcludeReason = 'hard' | 'soft' | null;
@@ -73,6 +112,19 @@ export interface ExcluderOptions {
    * HARD_EXCLUDE_PATTERNS, they cannot remove built-ins.
    */
   additionalHardPatterns?: readonly string[];
+
+  /**
+   * v0.9.4+: automatically apply DEFAULT_EXCLUDE_PATTERNS (soft excludes
+   * such as `.aiftp.toml`, `.DS_Store`, `doctor-*.txt`, etc.) on top of
+   * `userPatterns`. The defaults are prepended so user `!`-negation can
+   * still override them (gitignore semantics). Defaults to `true`; the
+   * rare operator who wants to ship `.DS_Store` etc. can set this to
+   * `false` via `[exclude].use_defaults = false`.
+   *
+   * Note: this flag does NOT control HARD_EXCLUDE_PATTERNS — credentials
+   * are always excluded regardless of `useDefaults`.
+   */
+  useDefaults?: boolean;
 }
 
 interface CompiledPattern {
@@ -180,7 +232,14 @@ export class Excluder {
   constructor(options: ExcluderOptions = {}) {
     const additionalHard = options.additionalHardPatterns ?? [];
     this.hardRaw = Object.freeze([...HARD_EXCLUDE_PATTERNS, ...additionalHard]);
-    this.userRaw = Object.freeze([...(options.userPatterns ?? [])]);
+    // v0.9.4: prepend DEFAULT_EXCLUDE_PATTERNS unless explicitly opted
+    // out. Prepending (not appending) lets user `!`-negations override
+    // a default, matching gitignore's "later rule wins" semantics.
+    const useDefaults = options.useDefaults !== false;
+    const baseUserPatterns = useDefaults
+      ? [...DEFAULT_EXCLUDE_PATTERNS, ...(options.userPatterns ?? [])]
+      : [...(options.userPatterns ?? [])];
+    this.userRaw = Object.freeze(baseUserPatterns);
 
     this.hardPatterns = this.hardRaw.map(compileHardPattern);
     this.userPatterns = this.userRaw
