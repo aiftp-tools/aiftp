@@ -241,18 +241,19 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
   for (const file of target.files) {
     const verdict = options.excluder.shouldExclude(file.path);
     const remotePath = joinRemote(options.remoteRoot, file.path);
+    const size = file.sizeOriginal ?? 0;
     if (verdict.excluded && verdict.reason === 'hard') {
       skipped.push({
         path: file.path,
         remotePath,
-        size: file.sizeOriginal,
+        size,
         status: 'skipped-hard-exclude',
         reason: `hard-exclude pattern: ${verdict.pattern}`,
       });
       continue;
     }
     allowList.push({
-      meta: { path: file.path, size: file.sizeOriginal },
+      meta: { path: file.path, size },
       remotePath,
     });
   }

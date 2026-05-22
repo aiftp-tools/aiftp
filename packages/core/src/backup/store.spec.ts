@@ -189,6 +189,72 @@ describe('BackupStore', () => {
     expect(await readFile(manifestPath)).toEqual(before);
   });
 
+  it('rejects schema 2 manifests with invalid operation metadata', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: ['new-page.html'],
+      modified: ['index.html'],
+      removed: [],
+    });
+    const manifestPath = join(tempDir, 'snapshots', snapshot.id, 'manifest.enc');
+    const manifest = JSON.parse(
+      decryptBuffer(await readFile(manifestPath), store.key).toString('utf8'),
+    ) as Record<string, unknown>;
+    const invalidManifest = {
+      ...manifest,
+      files: (manifest.files as Array<Record<string, unknown>>).map((file) =>
+        file.path === 'new-page.html' ? { ...file, operation: 'created' } : file,
+      ),
+    };
+    await writeFile(
+      manifestPath,
+      encryptBuffer(Buffer.from(JSON.stringify(invalidManifest, null, 2), 'utf8'), store.key),
+      { mode: 0o600 },
+    );
+
+    await expect(store.verify(snapshot.id)).rejects.toThrow(/Invalid snapshot operation/);
+  });
+
+  it('rejects schema 2 added tombstones that carry content metadata', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: ['new-page.html'],
+      modified: ['index.html'],
+      removed: [],
+    });
+    const manifestPath = join(tempDir, 'snapshots', snapshot.id, 'manifest.enc');
+    const manifest = JSON.parse(
+      decryptBuffer(await readFile(manifestPath), store.key).toString('utf8'),
+    ) as Record<string, unknown>;
+    const invalidManifest = {
+      ...manifest,
+      files: (manifest.files as Array<Record<string, unknown>>).map((file) =>
+        file.path === 'new-page.html'
+          ? { ...file, storedName: 'new-page.html.enc', sizeOriginal: 1 }
+          : file,
+      ),
+    };
+    await writeFile(
+      manifestPath,
+      encryptBuffer(Buffer.from(JSON.stringify(invalidManifest, null, 2), 'utf8'), store.key),
+      { mode: 0o600 },
+    );
+
+    await expect(store.verify(snapshot.id)).rejects.toThrow(/Invalid added tombstone/);
+  });
+
+  it('rejects conflicting operations for the same normalized path', async () => {
+    const store = createStore();
+
+    await expect(
+      store.createAutoSnapshot({
+        added: ['./index.html'],
+        modified: ['index.html'],
+        removed: [],
+      }),
+    ).rejects.toThrow(/Conflicting snapshot operation/);
+  });
+
   it('counts added tombstone metadata as checked without content verification', async () => {
     const store = createStore();
     const snapshot = await store.createAutoSnapshot({

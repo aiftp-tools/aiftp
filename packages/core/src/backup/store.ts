@@ -30,8 +30,8 @@ export interface SnapshotFileMeta {
   path: string;
   operation: FileOperation;
   storedName: string | null;
-  sizeOriginal: number;
-  sizeEncrypted: number;
+  sizeOriginal: number | null;
+  sizeEncrypted: number | null;
   sha256Original: string | null;
   sha256Encrypted: string | null;
 }
@@ -115,6 +115,14 @@ function isPathArray(input: AutoSnapshotInput | readonly string[]): input is rea
   return Array.isArray(input);
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isFileOperation(value: unknown): value is FileOperation {
+  return value === 'added' || value === 'modified' || value === 'removed';
+}
+
 function sortSnapshots(snapshots: SnapshotMeta[]): SnapshotMeta[] {
   return [...snapshots].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -147,27 +155,123 @@ function upgradeSchema1Manifest(manifest: Partial<SnapshotManifest>): SnapshotMa
   };
 }
 
+function validateCounts(value: unknown): SnapshotCounts {
+  if (!isObject(value)) {
+    throw new BackupError('Invalid snapshot counts');
+  }
+  const counts = {
+    added: value.added,
+    modified: value.modified,
+    removed: value.removed,
+  };
+  if (
+    typeof counts.added !== 'number' ||
+    typeof counts.modified !== 'number' ||
+    typeof counts.removed !== 'number'
+  ) {
+    throw new BackupError('Invalid snapshot counts');
+  }
+  return counts as SnapshotCounts;
+}
+
+function validateSchema2File(value: unknown): SnapshotFileMeta {
+  if (!isObject(value) || typeof value.path !== 'string') {
+    throw new BackupError('Invalid snapshot file metadata');
+  }
+  if (!isFileOperation(value.operation)) {
+    throw new BackupError(`Invalid snapshot operation: ${String(value.operation)}`);
+  }
+  if (value.operation === 'added') {
+    if (
+      value.storedName !== null ||
+      value.sizeOriginal !== null ||
+      value.sizeEncrypted !== null ||
+      value.sha256Original !== null ||
+      value.sha256Encrypted !== null
+    ) {
+      throw new BackupError(`Invalid added tombstone metadata: ${value.path}`);
+    }
+    return {
+      path: value.path,
+      operation: value.operation,
+      storedName: null,
+      sizeOriginal: null,
+      sizeEncrypted: null,
+      sha256Original: null,
+      sha256Encrypted: null,
+    };
+  }
+  if (
+    typeof value.storedName !== 'string' ||
+    typeof value.sizeOriginal !== 'number' ||
+    typeof value.sizeEncrypted !== 'number' ||
+    typeof value.sha256Original !== 'string' ||
+    typeof value.sha256Encrypted !== 'string'
+  ) {
+    throw new BackupError(`Invalid stored snapshot metadata: ${value.path}`);
+  }
+  return {
+    path: value.path,
+    operation: value.operation,
+    storedName: value.storedName,
+    sizeOriginal: value.sizeOriginal,
+    sizeEncrypted: value.sizeEncrypted,
+    sha256Original: value.sha256Original,
+    sha256Encrypted: value.sha256Encrypted,
+  };
+}
+
 function parseManifest(data: Buffer): SnapshotManifest {
   const parsed = JSON.parse(data.toString('utf8')) as unknown;
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isObject(parsed)) {
     throw new BackupError('Invalid snapshot manifest: expected object');
   }
   const manifest = parsed as Partial<SnapshotManifest>;
   if (manifest.schema !== 1 && manifest.schema !== SNAPSHOT_SCHEMA) {
     throw new BackupError(`Unsupported snapshot schema: ${String(manifest.schema)}`);
   }
+  const { id, type, createdAt, files: filesInput } = parsed;
   if (
-    typeof manifest.id !== 'string' ||
-    (manifest.type !== 'auto' && manifest.type !== 'full') ||
-    typeof manifest.createdAt !== 'string' ||
-    !Array.isArray(manifest.files)
+    typeof id !== 'string' ||
+    (type !== 'auto' && type !== 'full') ||
+    typeof createdAt !== 'string' ||
+    !Array.isArray(filesInput)
   ) {
     throw new BackupError('Invalid snapshot manifest fields');
   }
   if (manifest.schema === 1) {
     return upgradeSchema1Manifest(manifest);
   }
-  return manifest as SnapshotManifest;
+  if (
+    typeof parsed.fileCount !== 'number' ||
+    typeof parsed.totalBytes !== 'number' ||
+    !isObject(parsed.counts)
+  ) {
+    throw new BackupError('Invalid snapshot manifest fields');
+  }
+  const files = filesInput.map(validateSchema2File);
+  const counts = validateCounts(parsed.counts);
+  const actualCounts = countOperations(files);
+  if (
+    counts.added !== actualCounts.added ||
+    counts.modified !== actualCounts.modified ||
+    counts.removed !== actualCounts.removed
+  ) {
+    throw new BackupError('Invalid snapshot counts');
+  }
+  if (parsed.fileCount !== files.length) {
+    throw new BackupError('Invalid snapshot file count');
+  }
+  return {
+    schema: SNAPSHOT_SCHEMA,
+    id,
+    type,
+    createdAt,
+    fileCount: parsed.fileCount,
+    totalBytes: parsed.totalBytes,
+    counts,
+    files,
+  };
 }
 
 async function readDirIfExists(path: string): Promise<string[]> {
@@ -412,6 +516,12 @@ export class BackupStore {
       if (this.excluder.shouldExclude(path).excluded) {
         continue;
       }
+      const existing = normalized.get(path);
+      if (existing && existing.operation !== entry.operation) {
+        throw new BackupError(
+          `Conflicting snapshot operation for ${path}: ${existing.operation} vs ${entry.operation}`,
+        );
+      }
       normalized.set(path, { path, operation: entry.operation });
     }
     return [...normalized.values()].sort((a, b) => a.path.localeCompare(b.path));
@@ -422,8 +532,8 @@ export class BackupStore {
       path,
       operation: 'added',
       storedName: null,
-      sizeOriginal: null as unknown as number,
-      sizeEncrypted: null as unknown as number,
+      sizeOriginal: null,
+      sizeEncrypted: null,
       sha256Original: null,
       sha256Encrypted: null,
     };
