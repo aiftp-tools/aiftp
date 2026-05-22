@@ -327,6 +327,7 @@ const rollbackConfirmSchema = requiredProfileSchema
     plan_id: z.string().min(1),
     diff_hash: z.string().min(1),
     confirm_token: z.string().min(1),
+    acknowledge_deletions: z.literal(true).optional(),
   })
   .strict();
 
@@ -398,7 +399,7 @@ const toolDescriptions = {
   aiftp_rollback_prepare:
     'Resolve the rollback target (by steps or explicit snapshot_id), apply the hard-exclude filter, and return planned files + skipped (auth-bearing) files + plan_id / diff_hash / confirm_token. No upload yet.',
   aiftp_rollback_confirm:
-    'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials).',
+    'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials). Requires acknowledge_deletions: true when the prepare step returned one or more plannedDeletes.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -2065,6 +2066,11 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   }
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to roll back.');
+  }
+  if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
+    throw new Error(
+      `Deletion rollback refused: ${plan.plannedDeletes.length} remote delete(s) were planned. Re-call aiftp_rollback_confirm with acknowledge_deletions: true.`,
+    );
   }
   // Consume before side effects: a second confirm with the same token
   // cannot replay the rollback. (Replaying a rollback would re-upload an

@@ -12,6 +12,10 @@ import {
   readAiftpResource,
 } from './index.js';
 
+type TestSnapshotFile = Awaited<
+  ReturnType<AiftpBackupStore['listSnapshots']>
+>[number]['files'][number];
+
 describe('mcp', () => {
   let cwd: string;
 
@@ -57,6 +61,74 @@ describe('mcp', () => {
 
   function parseText(result: { content: Array<{ type: string; text?: string }> }): unknown {
     return JSON.parse(result.content[0]?.text ?? '{}');
+  }
+
+  function addedSnapshotFile(path: string): TestSnapshotFile {
+    return {
+      path,
+      operation: 'added',
+      storedName: null,
+      sizeOriginal: null,
+      sizeEncrypted: null,
+      sha256Original: null,
+      sha256Encrypted: null,
+    };
+  }
+
+  function modifiedSnapshotFile(path: string): TestSnapshotFile {
+    return {
+      path,
+      operation: 'modified',
+      storedName: `${path}.enc`,
+      sizeOriginal: 12,
+      sizeEncrypted: 32,
+      sha256Original: `sha256:${path}`,
+      sha256Encrypted: `sha256enc:${path}`,
+    };
+  }
+
+  function rollbackRuntimeFor(files: TestSnapshotFile[]): {
+    runtime: AiftpMcpRuntime;
+    uploads: string[];
+    deletes: string[];
+  } {
+    const uploads: string[] = [];
+    const deletes: string[] = [];
+    return {
+      uploads,
+      deletes,
+      runtime: {
+        createBackupStore: async () => ({
+          listSnapshots: async () => [
+            {
+              id: '2026-05-19T01:00:00.000Z-auto-rollback',
+              type: 'auto',
+              createdAt: '2026-05-19T01:00:00.000Z',
+              fileCount: files.length,
+              totalBytes: files.reduce((sum, file) => sum + (file.sizeOriginal ?? 0), 0),
+              files,
+            },
+          ],
+          verify: async () => ({ ok: true, checkedFiles: files.length, errors: [] }),
+          prune: async () => [],
+          restoreFile: async (_id, path) => {
+            const file = files.find((candidate) => candidate.path === path);
+            if (!file || file.operation === 'added') {
+              throw new Error(`no restorable content for ${path}`);
+            }
+            return Buffer.from(`restored:${path}`, 'utf8');
+          },
+        }),
+        createRollbackUploader: async () => ({
+          upload: async (_localPath, remotePath) => {
+            uploads.push(remotePath);
+          },
+          delete: async (remotePath) => {
+            deletes.push(remotePath);
+          },
+        }),
+      },
+    };
   }
 
   it('re-exports VERSION from core (semver shape)', () => {
@@ -1634,6 +1706,7 @@ describe('mcp', () => {
         plan_id: prepared.plan_id,
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
+        acknowledge_deletions: true,
       }),
     ) as { ok: boolean; rolled_back: string[]; deleted: string[] };
 
@@ -1641,6 +1714,89 @@ describe('mcp', () => {
     expect(confirmed.rolled_back).toEqual([]);
     expect(confirmed.deleted).toEqual(['new-page.html']);
     expect(deletes).toEqual(['/public_html/new-page.html']);
+  });
+
+  it('aiftp_rollback_confirm requires acknowledge_deletions when deletes are planned', async () => {
+    await writeConfig();
+    const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/Deletion rollback refused/);
+    expect(JSON.stringify(result.content)).toMatch(/acknowledge_deletions/);
+    expect(deletes).toEqual([]);
+  });
+
+  it('aiftp_rollback_confirm accepts acknowledge_deletions when deletes are planned', async () => {
+    await writeConfig();
+    const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_deletions: true,
+      }),
+    ) as { ok: boolean; deleted: string[] };
+
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.deleted).toEqual(['new-page.html']);
+    expect(deletes).toEqual(['/public_html/new-page.html']);
+  });
+
+  it('aiftp_rollback_confirm does not require acknowledge_deletions when no deletes are planned', async () => {
+    await writeConfig();
+    const { runtime, uploads, deletes } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; rolled_back: string[]; deleted: string[] };
+
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(confirmed.deleted).toEqual([]);
+    expect(uploads).toEqual(['/public_html/index.html']);
+    expect(deletes).toEqual([]);
+  });
+
+  it('aiftp_rollback_confirm schema rejects acknowledge_deletions: false outright', async () => {
+    await writeConfig();
+    const result = await callAiftpTool(createAiftpMcp({ cwd }), 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: 'rollback-plan',
+      diff_hash: 'diff-hash',
+      confirm_token: 'confirm-token',
+      acknowledge_deletions: false,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/acknowledge_deletions/);
+    expect(JSON.stringify(result.content)).toMatch(/expected true/i);
   });
 
   it('aiftp_rollback_confirm rejects replay of a consumed plan', async () => {
