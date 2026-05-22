@@ -363,6 +363,9 @@ function injectedRuntimeUploader(): DeployUploader {
     upload: async () => {
       throw new Error('Injected runPush must not call the placeholder uploader.');
     },
+    delete: async () => {
+      throw new Error('Injected runPush must not call the placeholder uploader.');
+    },
   };
 }
 
@@ -404,6 +407,7 @@ function managedUploaderFromClient(client: FtpClient): ManagedUploader {
   return {
     uploader: {
       upload: (localPath, remotePath) => client.upload(localPath, remotePath),
+      delete: (remotePath) => client.delete(remotePath),
       size: (remotePath) => client.size(remotePath),
       mkdir: (remoteDir) => client.mkdir(remoteDir),
     },

@@ -505,6 +505,11 @@ function unavailableUploader(): DeployUploader {
         'MCP push uploader is not configured yet. Use dry_run or provide a runtime uploader.',
       );
     },
+    delete: async () => {
+      throw new Error(
+        'MCP push uploader is not configured yet. Use dry_run or provide a runtime uploader.',
+      );
+    },
   };
 }
 
@@ -533,6 +538,7 @@ async function createDefaultFtpClient(cwd: string, profileName: string): Promise
 function uploaderFromClient(client: FtpClient): DeployUploader {
   return {
     upload: (localPath, remotePath) => client.upload(localPath, remotePath),
+    delete: (remotePath) => client.delete(remotePath),
     size: (remotePath) => client.size(remotePath),
     mkdir: (remoteDir) => client.mkdir(remoteDir),
   };

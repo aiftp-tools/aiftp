@@ -183,11 +183,12 @@ async function totalSize(localRoot: string, paths: readonly string[]): Promise<n
 async function enforceSafety(
   localRoot: string,
   paths: readonly string[],
+  operationCount: number,
   safety: PushSafetyOptions | undefined,
 ): Promise<void> {
-  if (safety?.maxFilesPerPush !== undefined && paths.length > safety.maxFilesPerPush) {
+  if (safety?.maxFilesPerPush !== undefined && operationCount > safety.maxFilesPerPush) {
     throw new DeployLimitError(
-      `Push file count exceeds safety limit: files=${paths.length} max=${safety.maxFilesPerPush}`,
+      `Push file count exceeds safety limit: files=${operationCount} max=${safety.maxFilesPerPush}`,
     );
   }
 
@@ -199,6 +200,10 @@ async function enforceSafety(
       );
     }
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'FtpNotFoundError';
 }
 
 async function verifyUploadSize(
@@ -233,7 +238,12 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
   const deletionPolicy = options.safety?.deletionPolicy ?? 'never';
   const plannedDeletes =
     deletionPolicy === 'never' ? [] : targetDeletePaths(status.diff, options.files);
-  await enforceSafety(options.localRoot, planned, options.safety);
+  await enforceSafety(
+    options.localRoot,
+    planned,
+    planned.length + plannedDeletes.length,
+    options.safety,
+  );
 
   if (options.preflight) {
     const report = await options.preflight(
@@ -331,7 +341,13 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
 
     for (const path of plannedDeletes) {
       const absoluteRemotePath = remotePath(options.remoteRoot, path);
-      await options.uploader.delete(absoluteRemotePath);
+      try {
+        await options.uploader.delete(absoluteRemotePath);
+      } catch (error: unknown) {
+        if (!isNotFoundError(error)) {
+          throw error;
+        }
+      }
       nextState = removeFileEntry(nextState, path);
       deleted.push({ path, remotePath: absoluteRemotePath });
     }

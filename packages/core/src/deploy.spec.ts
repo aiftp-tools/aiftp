@@ -403,6 +403,76 @@ describe('deploy engine', () => {
     expect(deleted).toEqual([]);
   });
 
+  it('counts planned deletes toward maxFilesPerPush', async () => {
+    remoteFiles.set('old-a.html', Buffer.from('<p>a</p>\n', 'utf8'));
+    remoteFiles.set('old-b.html', Buffer.from('<p>b</p>\n', 'utf8'));
+
+    await expect(
+      runPush({
+        localRoot,
+        remoteRoot: '/public_html',
+        state: {
+          schema: 1,
+          files: {
+            'old-a.html': {
+              hash: 'old-a',
+              size: 9,
+              updatedAt: '2026-05-18T10:00:00.000Z',
+            },
+            'old-b.html': {
+              hash: 'old-b',
+              size: 9,
+              updatedAt: '2026-05-18T10:00:00.000Z',
+            },
+          },
+        },
+        excluder: createExcluder(),
+        backupStore: createBackupStore(),
+        uploader: createUploader(),
+        safety: { deletionPolicy: 'prune-auto', maxFilesPerPush: 1 },
+      }),
+    ).rejects.toThrow(DeployLimitError);
+
+    expect(deleted).toEqual([]);
+  });
+
+  it('treats remote not-found during delete as already pruned and removes state', async () => {
+    const notFound = new Error('not found');
+    notFound.name = 'FtpNotFoundError';
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: {
+        schema: 1,
+        files: {
+          'already-gone.html': {
+            hash: 'gone',
+            size: 9,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+        },
+      },
+      excluder: createExcluder(),
+      backupStore: createBackupStore(),
+      uploader: {
+        upload: async (localPath, remotePath) => {
+          const info = await stat(localPath);
+          return { remotePath, bytesUploaded: info.size };
+        },
+        delete: async () => {
+          throw notFound;
+        },
+      },
+      safety: { deletionPolicy: 'prune-auto' },
+    });
+
+    expect(result.deleted).toEqual([
+      { path: 'already-gone.html', remotePath: '/public_html/already-gone.html' },
+    ]);
+    expect(result.nextState.files['already-gone.html']).toBeUndefined();
+  });
+
   it('acquires the deployment lock before backup snapshot reads remote content', async () => {
     await writeLocal('index.html', '<h1>local changed</h1>\n');
     const events: string[] = [];
