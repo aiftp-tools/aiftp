@@ -14,9 +14,11 @@ export {
 export {
   BackupError,
   BackupLimitError,
+  type AutoSnapshotInput,
   type BackupSource,
   BackupStore,
   type BackupStoreOptions,
+  type FileOperation,
   isValidSnapshotId,
   type SnapshotFileMeta,
   type SnapshotId,

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { generateKey } from '../encryption.js';
+import { decryptBuffer, encryptBuffer, generateKey } from '../encryption.js';
 import { createExcluder } from '../exclude.js';
 import {
   BackupLimitError,
@@ -60,11 +60,17 @@ describe('BackupStore', () => {
   it('creates an encrypted auto snapshot for requested files', async () => {
     const store = createStore();
 
-    const snapshot = await store.createAutoSnapshot(['index.html', '.env']);
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html', '.env'],
+      removed: [],
+    });
 
     expect(snapshot.type).toBe('auto');
     expect(snapshot.fileCount).toBe(1);
     expect(snapshot.totalBytes).toBe(sourceFiles.get('index.html')?.length);
+    expect(snapshot.counts).toEqual({ added: 0, modified: 1, removed: 0 });
+    expect(snapshot.files[0]?.operation).toBe('modified');
 
     const restored = await store.restoreFile(snapshot.id, 'index.html');
     expect(restored).toEqual(sourceFiles.get('index.html'));
@@ -90,10 +96,112 @@ describe('BackupStore', () => {
       totalBytes:
         (sourceFiles.get('index.html')?.length ?? 0) +
         (sourceFiles.get('assets/app.css')?.length ?? 0),
+      counts: { added: 0, modified: 2, removed: 0 },
     });
+    expect(snapshot.files.map((file) => file.operation)).toEqual(['modified', 'modified']);
     await expect(store.restoreFile(snapshot.id, 'assets/app.css')).resolves.toEqual(
       sourceFiles.get('assets/app.css'),
     );
+  });
+
+  it('writes schema 2 auto snapshots with tombstones for added files', async () => {
+    const readPaths: string[] = [];
+    source.readFile = async (path: string) => {
+      readPaths.push(path);
+      const data = sourceFiles.get(path);
+      if (!data) {
+        throw new Error(`missing source file: ${path}`);
+      }
+      return data;
+    };
+    const store = createStore();
+
+    const snapshot = await store.createAutoSnapshot({
+      added: ['new-page.html'],
+      modified: ['index.html'],
+      removed: ['assets/app.css'],
+    });
+
+    expect(readPaths.sort()).toEqual(['assets/app.css', 'index.html']);
+    expect(snapshot.counts).toEqual({ added: 1, modified: 1, removed: 1 });
+    expect(snapshot.fileCount).toBe(3);
+    expect(snapshot.files.map((file) => [file.path, file.operation])).toEqual([
+      ['assets/app.css', 'removed'],
+      ['index.html', 'modified'],
+      ['new-page.html', 'added'],
+    ]);
+    expect(snapshot.files.find((file) => file.path === 'new-page.html')).toMatchObject({
+      operation: 'added',
+      storedName: null,
+      sizeOriginal: null,
+      sizeEncrypted: null,
+      sha256Original: null,
+      sha256Encrypted: null,
+    });
+
+    const manifest = JSON.parse(
+      decryptBuffer(
+        await readFile(join(tempDir, 'snapshots', snapshot.id, 'manifest.enc')),
+        store.key,
+      ).toString('utf8'),
+    ) as { schema: number; counts: unknown };
+    expect(manifest.schema).toBe(2);
+    expect(manifest.counts).toEqual({ added: 1, modified: 1, removed: 1 });
+
+    await expect(store.restoreFile(snapshot.id, 'new-page.html')).rejects.toThrow(
+      /Cannot restore added file tombstone/,
+    );
+    await expect(store.restoreFile(snapshot.id, 'assets/app.css')).resolves.toEqual(
+      sourceFiles.get('assets/app.css'),
+    );
+  });
+
+  it('reads schema 1 manifests as schema 2 metadata without rewriting them', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html', 'assets/app.css'],
+      removed: [],
+    });
+    const manifestPath = join(tempDir, 'snapshots', snapshot.id, 'manifest.enc');
+    const schema2Manifest = JSON.parse(
+      decryptBuffer(await readFile(manifestPath), store.key).toString('utf8'),
+    ) as Record<string, unknown>;
+    const schema1Manifest = {
+      ...schema2Manifest,
+      schema: 1,
+      counts: undefined,
+      files: (schema2Manifest.files as Array<Record<string, unknown>>).map(
+        ({ operation: _operation, ...file }) => file,
+      ),
+    };
+    await writeFile(
+      manifestPath,
+      encryptBuffer(Buffer.from(JSON.stringify(schema1Manifest, null, 2), 'utf8'), store.key),
+      { mode: 0o600 },
+    );
+    const before = await readFile(manifestPath);
+
+    const [readSnapshot] = await store.listSnapshots();
+
+    expect(readSnapshot?.counts).toEqual({ added: 0, modified: 2, removed: 0 });
+    expect(readSnapshot?.files.map((file) => file.operation)).toEqual(['modified', 'modified']);
+    expect(await readFile(manifestPath)).toEqual(before);
+  });
+
+  it('counts added tombstone metadata as checked without content verification', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: ['new-page.html'],
+      modified: ['index.html'],
+      removed: [],
+    });
+
+    await expect(store.verify(snapshot.id)).resolves.toEqual({
+      ok: true,
+      checkedFiles: 2,
+      errors: [],
+    });
   });
 
   it('lists snapshots newest first by createdAt', async () => {
@@ -125,7 +233,11 @@ describe('BackupStore', () => {
 
   it('verifies encrypted snapshot integrity and original hashes', async () => {
     const store = createStore();
-    const snapshot = await store.createAutoSnapshot(['index.html']);
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html'],
+      removed: [],
+    });
 
     await expect(store.verify(snapshot.id)).resolves.toEqual({
       ok: true,
@@ -164,12 +276,18 @@ describe('BackupStore', () => {
   it('halts when max disk usage would be exceeded', async () => {
     const store = createStore({ maxDiskBytes: 10 });
 
-    await expect(store.createAutoSnapshot(['index.html'])).rejects.toThrow(BackupLimitError);
+    await expect(
+      store.createAutoSnapshot({ added: [], modified: ['index.html'], removed: [] }),
+    ).rejects.toThrow(BackupLimitError);
   });
 
   it('reports total disk usage for encrypted snapshots', async () => {
     const store = createStore();
-    const snapshot = await store.createAutoSnapshot(['index.html']);
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html'],
+      removed: [],
+    });
 
     const usage = await store.getTotalDiskUsage();
 
@@ -193,7 +311,11 @@ describe('BackupStore', () => {
     sourceFiles.set(cafeName, cafeContent);
 
     const store = createStore();
-    const snapshot = await store.createAutoSnapshot([jpName, cafeName]);
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: [jpName, cafeName],
+      removed: [],
+    });
 
     expect(snapshot.files.map((f) => f.path).sort()).toEqual([cafeName, jpName].sort());
 
@@ -203,7 +325,11 @@ describe('BackupStore', () => {
 
   it('rejects missing files in restoreFile with a clear BackupError', async () => {
     const store = createStore();
-    const snapshot = await store.createAutoSnapshot(['index.html']);
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html'],
+      removed: [],
+    });
 
     await expect(store.restoreFile(snapshot.id, 'does-not-exist.html')).rejects.toThrow(
       /Snapshot file not found/,

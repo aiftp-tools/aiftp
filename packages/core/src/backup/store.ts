@@ -4,10 +4,22 @@ import { join } from 'node:path';
 import { decryptBuffer, encryptBuffer } from '../encryption.js';
 import type { Excluder } from '../exclude.js';
 
-const SNAPSHOT_SCHEMA = 1;
+const SNAPSHOT_SCHEMA = 2;
 
 export type SnapshotId = string;
 export type SnapshotType = 'auto' | 'full';
+export type FileOperation = 'added' | 'modified' | 'removed';
+
+export interface AutoSnapshotInput {
+  added: readonly string[];
+  modified: readonly string[];
+  removed: readonly string[];
+}
+
+interface SnapshotOperationEntry {
+  path: string;
+  operation: FileOperation;
+}
 
 export interface BackupSource {
   readFile(path: string): Promise<Buffer | null>;
@@ -16,11 +28,18 @@ export interface BackupSource {
 
 export interface SnapshotFileMeta {
   path: string;
-  storedName: string;
+  operation: FileOperation;
+  storedName: string | null;
   sizeOriginal: number;
   sizeEncrypted: number;
-  sha256Original: string;
-  sha256Encrypted: string;
+  sha256Original: string | null;
+  sha256Encrypted: string | null;
+}
+
+export interface SnapshotCounts {
+  added: number;
+  modified: number;
+  removed: number;
 }
 
 export interface SnapshotMeta {
@@ -29,11 +48,12 @@ export interface SnapshotMeta {
   createdAt: string;
   fileCount: number;
   totalBytes: number;
+  counts: SnapshotCounts;
   files: SnapshotFileMeta[];
 }
 
 interface SnapshotManifest extends SnapshotMeta {
-  schema: typeof SNAPSHOT_SCHEMA;
+  schema: 1 | typeof SNAPSHOT_SCHEMA;
 }
 
 export interface BackupStoreOptions {
@@ -91,13 +111,40 @@ function sha256(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+function isPathArray(input: AutoSnapshotInput | readonly string[]): input is readonly string[] {
+  return Array.isArray(input);
+}
+
 function sortSnapshots(snapshots: SnapshotMeta[]): SnapshotMeta[] {
   return [...snapshots].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function snapshotToMeta(snapshot: SnapshotManifest): SnapshotMeta {
-  const { id, type, createdAt, fileCount, totalBytes, files } = snapshot;
-  return { id, type, createdAt, fileCount, totalBytes, files };
+  const { id, type, createdAt, fileCount, totalBytes, counts, files } = snapshot;
+  return { id, type, createdAt, fileCount, totalBytes, counts, files };
+}
+
+function countOperations(files: readonly SnapshotFileMeta[]): SnapshotCounts {
+  return {
+    added: files.filter((file) => file.operation === 'added').length,
+    modified: files.filter((file) => file.operation === 'modified').length,
+    removed: files.filter((file) => file.operation === 'removed').length,
+  };
+}
+
+function upgradeSchema1Manifest(manifest: Partial<SnapshotManifest>): SnapshotManifest {
+  const files = (manifest.files ?? []).map((file) => ({
+    ...(file as SnapshotFileMeta),
+    operation: 'modified' as const,
+  }));
+  const fileCount = typeof manifest.fileCount === 'number' ? manifest.fileCount : files.length;
+  return {
+    ...(manifest as SnapshotManifest),
+    schema: SNAPSHOT_SCHEMA,
+    fileCount,
+    counts: { added: 0, modified: fileCount, removed: 0 },
+    files,
+  };
 }
 
 function parseManifest(data: Buffer): SnapshotManifest {
@@ -106,7 +153,7 @@ function parseManifest(data: Buffer): SnapshotManifest {
     throw new BackupError('Invalid snapshot manifest: expected object');
   }
   const manifest = parsed as Partial<SnapshotManifest>;
-  if (manifest.schema !== SNAPSHOT_SCHEMA) {
+  if (manifest.schema !== 1 && manifest.schema !== SNAPSHOT_SCHEMA) {
     throw new BackupError(`Unsupported snapshot schema: ${String(manifest.schema)}`);
   }
   if (
@@ -116,6 +163,9 @@ function parseManifest(data: Buffer): SnapshotManifest {
     !Array.isArray(manifest.files)
   ) {
     throw new BackupError('Invalid snapshot manifest fields');
+  }
+  if (manifest.schema === 1) {
+    return upgradeSchema1Manifest(manifest);
   }
   return manifest as SnapshotManifest;
 }
@@ -169,15 +219,23 @@ export class BackupStore {
     this.now = options.now ?? (() => new Date());
   }
 
-  async createAutoSnapshot(files: readonly string[]): Promise<SnapshotMeta> {
-    return this.createSnapshot('auto', files);
+  async createAutoSnapshot(input: AutoSnapshotInput): Promise<SnapshotMeta>;
+  async createAutoSnapshot(files: readonly string[]): Promise<SnapshotMeta>;
+  async createAutoSnapshot(input: AutoSnapshotInput | readonly string[]): Promise<SnapshotMeta> {
+    const snapshotInput: AutoSnapshotInput = isPathArray(input)
+      ? { added: [], modified: input, removed: [] }
+      : input;
+    return this.createSnapshot('auto', this.operationEntries(snapshotInput));
   }
 
   async createFullBackup(): Promise<SnapshotMeta> {
     if (!this.source.listFiles) {
       throw new BackupError('Backup source does not support full backup listing');
     }
-    return this.createSnapshot('full', await this.source.listFiles());
+    return this.createSnapshot(
+      'full',
+      (await this.source.listFiles()).map((path) => ({ path, operation: 'modified' as const })),
+    );
   }
 
   async listSnapshots(): Promise<SnapshotMeta[]> {
@@ -199,6 +257,12 @@ export class BackupStore {
     if (!file) {
       throw new BackupError(`Snapshot file not found: ${normalizedPath}`);
     }
+    if (file.operation === 'added') {
+      throw new BackupError(`Cannot restore added file tombstone: ${normalizedPath}`);
+    }
+    if (file.storedName === null) {
+      throw new BackupError(`Snapshot file content missing: ${normalizedPath}`);
+    }
     return decryptBuffer(await readFile(this.filePath(id, file.storedName)), this.key);
   }
 
@@ -216,7 +280,13 @@ export class BackupStore {
     const errors: string[] = [];
 
     for (const file of manifest.files) {
+      if (file.operation === 'added') {
+        continue;
+      }
       try {
+        if (file.storedName === null) {
+          throw new BackupError('Snapshot file content missing');
+        }
         const encrypted = await readFile(this.filePath(id, file.storedName));
         const decrypted = decryptBuffer(encrypted, this.key);
         if (sha256(encrypted) !== file.sha256Encrypted) {
@@ -257,13 +327,18 @@ export class BackupStore {
 
   private async createSnapshot(
     type: SnapshotType,
-    inputPaths: readonly string[],
+    inputEntries: readonly SnapshotOperationEntry[],
   ): Promise<SnapshotMeta> {
-    const paths = [...new Set(inputPaths.map(normalizePath))]
-      .filter((path) => !this.excluder.shouldExclude(path).excluded)
-      .sort((a, b) => a.localeCompare(b));
-
-    const sources = await this.readSources(paths);
+    const entries = this.normalizeEntries(inputEntries);
+    const tombstones = entries
+      .filter((entry) => entry.operation === 'added')
+      .map((entry) => this.createTombstone(entry.path));
+    const sources = await this.readSources(
+      entries.filter(
+        (entry): entry is SnapshotOperationEntry & { operation: Exclude<FileOperation, 'added'> } =>
+          entry.operation !== 'added',
+      ),
+    );
 
     await this.assertWithinDiskLimit(sources.reduce((sum, file) => sum + file.data.length, 0));
 
@@ -279,6 +354,7 @@ export class BackupStore {
       await writeFile(this.filePath(id, storedName), encrypted, { mode: 0o600 });
       files.push({
         path: source.path,
+        operation: source.operation,
         storedName,
         sizeOriginal: source.data.length,
         sizeEncrypted: encrypted.length,
@@ -286,6 +362,8 @@ export class BackupStore {
         sha256Encrypted: sha256(encrypted),
       });
     }
+    files.push(...tombstones);
+    files.sort((a, b) => a.path.localeCompare(b.path));
 
     const manifest: SnapshotManifest = {
       schema: SNAPSHOT_SCHEMA,
@@ -294,6 +372,7 @@ export class BackupStore {
       createdAt: this.now().toISOString(),
       fileCount: files.length,
       totalBytes: sources.reduce((sum, file) => sum + file.data.length, 0),
+      counts: countOperations(files),
       files,
     };
 
@@ -318,30 +397,65 @@ export class BackupStore {
     }
   }
 
+  private operationEntries(input: AutoSnapshotInput): SnapshotOperationEntry[] {
+    return [
+      ...input.added.map((path) => ({ path, operation: 'added' as const })),
+      ...input.modified.map((path) => ({ path, operation: 'modified' as const })),
+      ...input.removed.map((path) => ({ path, operation: 'removed' as const })),
+    ];
+  }
+
+  private normalizeEntries(entries: readonly SnapshotOperationEntry[]): SnapshotOperationEntry[] {
+    const normalized = new Map<string, SnapshotOperationEntry>();
+    for (const entry of entries) {
+      const path = normalizePath(entry.path);
+      if (this.excluder.shouldExclude(path).excluded) {
+        continue;
+      }
+      normalized.set(path, { path, operation: entry.operation });
+    }
+    return [...normalized.values()].sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  private createTombstone(path: string): SnapshotFileMeta {
+    return {
+      path,
+      operation: 'added',
+      storedName: null,
+      sizeOriginal: null as unknown as number,
+      sizeEncrypted: null as unknown as number,
+      sha256Original: null,
+      sha256Encrypted: null,
+    };
+  }
+
   private async readSources(
-    paths: readonly string[],
-  ): Promise<Array<{ path: string; data: Buffer }>> {
+    entries: readonly (SnapshotOperationEntry & { operation: Exclude<FileOperation, 'added'> })[],
+  ): Promise<Array<{ path: string; operation: Exclude<FileOperation, 'added'>; data: Buffer }>> {
     const concurrency =
       this.sourceConcurrency === undefined
-        ? paths.length
-        : Math.max(1, Math.min(this.sourceConcurrency, paths.length));
-    const sources: Array<{ path: string; data: Buffer } | undefined> = new Array(paths.length);
+        ? entries.length
+        : Math.max(1, Math.min(this.sourceConcurrency, entries.length));
+    const sources: Array<
+      { path: string; operation: Exclude<FileOperation, 'added'>; data: Buffer } | undefined
+    > = new Array(entries.length);
     let nextIndex = 0;
 
     async function worker(readFile: BackupSource['readFile']): Promise<void> {
-      while (nextIndex < paths.length) {
+      while (nextIndex < entries.length) {
         const index = nextIndex;
         nextIndex += 1;
-        const path = paths[index];
-        if (path === undefined) {
+        const entry = entries[index];
+        if (entry === undefined) {
           continue;
         }
-        const data = await readFile(path);
+        const data = await readFile(entry.path);
         if (data === null) {
           continue;
         }
         sources[index] = {
-          path,
+          path: entry.path,
+          operation: entry.operation,
           data,
         };
       }
@@ -351,7 +465,10 @@ export class BackupStore {
       Array.from({ length: concurrency }, () => worker((path) => this.source.readFile(path))),
     );
     return sources.filter(
-      (source): source is { path: string; data: Buffer } => source !== undefined,
+      (
+        source,
+      ): source is { path: string; operation: Exclude<FileOperation, 'added'>; data: Buffer } =>
+        source !== undefined,
     );
   }
 
