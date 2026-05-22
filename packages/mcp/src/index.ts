@@ -662,6 +662,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
         maxFilesPerPush: config.safety.max_files_per_push,
         maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
         verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+        deletionPolicy: config.safety.deletion_policy,
       },
       preflight: (paths) => checkAll(paths),
     });

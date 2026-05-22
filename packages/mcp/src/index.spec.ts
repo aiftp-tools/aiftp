@@ -126,6 +126,38 @@ describe('mcp', () => {
     ).rejects.toThrow();
   });
 
+  it('aiftp_push dry-run includes plannedDeletes when deletion_policy is prune-auto', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto' });
+    const stateDir = join(cwd, '.aiftp', 'state', 'production');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, 'state.json'),
+      JSON.stringify({
+        schema: 1,
+        files: {
+          'old.html': {
+            hash: 'old-hash',
+            size: 24,
+            updatedAt: '2026-05-22T00:00:00.000Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd }), 'aiftp_push', {
+      profile: 'production',
+      dry_run: true,
+    });
+
+    expect(parseText(result)).toMatchObject({
+      ok: true,
+      result: {
+        plannedDeletes: ['old.html'],
+      },
+    });
+  });
+
   it('aiftp_push (no dry_run flag) refuses to perform a real upload — use prepare/confirm', async () => {
     await writeConfig();
     const runtime: AiftpMcpRuntime = {
