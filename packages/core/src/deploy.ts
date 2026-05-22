@@ -1,10 +1,10 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
-import type { BackupStore, SnapshotMeta } from './backup/store.js';
+import type { AutoSnapshotInput, BackupStore, SnapshotMeta } from './backup/store.js';
 import { type Diff, computeDiff } from './diff.js';
 import type { Excluder } from './exclude.js';
 import { PreflightError, type PreflightReport } from './preflight.js';
-import { type State, computeHash, updateFileEntry } from './state.js';
+import { type State, computeHash, removeFileEntry, updateFileEntry } from './state.js';
 
 export interface StatusOptions {
   localRoot: string;
@@ -27,6 +27,7 @@ export interface DeployUploader {
     localPath: string,
     remotePath: string,
   ): Promise<{ remotePath: string; bytesUploaded?: number }>;
+  delete(remotePath: string): Promise<void>;
   size?(remotePath: string): Promise<number>;
   mkdir?(remoteDir: string): Promise<void>;
 }
@@ -40,7 +41,10 @@ export interface PushSafetyOptions {
   maxFilesPerPush?: number;
   maxTotalSizeBytes?: number;
   verifyAfterUpload?: 'off' | 'size';
+  deletionPolicy?: DeletionPolicy;
 }
+
+export type DeletionPolicy = 'never' | 'prune-with-confirm' | 'prune-auto';
 
 export interface PushOptions extends StatusOptions {
   backupStore: BackupStore;
@@ -48,6 +52,7 @@ export interface PushOptions extends StatusOptions {
   remoteRoot?: string;
   files?: readonly string[];
   dryRun?: boolean;
+  confirmDeletes?: boolean;
   safety?: PushSafetyOptions;
   lock?: DeployLock;
   preflight?: (localPaths: readonly string[]) => Promise<PreflightReport>;
@@ -62,11 +67,18 @@ export interface UploadedFileResult {
   hash: string;
 }
 
+export interface DeletedFileResult {
+  path: string;
+  remotePath: string;
+}
+
 export interface PushResult {
   dryRun: boolean;
   diff: Diff;
   planned: string[];
+  plannedDeletes: string[];
   uploaded: UploadedFileResult[];
+  deleted: DeletedFileResult[];
   backupSnapshot: SnapshotMeta | null;
   nextState: State;
 }
@@ -134,6 +146,32 @@ function targetPaths(diff: Diff, requested?: readonly string[]): string[] {
   return sortPaths(requested.map(normalizePath).filter((path) => deployable.has(path)));
 }
 
+function targetDeletePaths(diff: Diff, requested?: readonly string[]): string[] {
+  const deletable = new Set(diff.removed);
+  if (!requested) {
+    return sortPaths(deletable);
+  }
+  return sortPaths(requested.map(normalizePath).filter((path) => deletable.has(path)));
+}
+
+function snapshotInput(
+  diff: Diff,
+  planned: readonly string[],
+  plannedDeletes: readonly string[],
+): AutoSnapshotInput {
+  const added = new Set(diff.added);
+  const modified = new Set(diff.modified);
+  return {
+    added: planned.filter((path) => added.has(path)),
+    modified: planned.filter((path) => modified.has(path)),
+    removed: plannedDeletes,
+  };
+}
+
+function snapshotPathCount(input: AutoSnapshotInput): number {
+  return input.added.length + input.modified.length + input.removed.length;
+}
+
 async function totalSize(localRoot: string, paths: readonly string[]): Promise<number> {
   let total = 0;
   for (const path of paths) {
@@ -192,6 +230,9 @@ export async function runStatus(options: StatusOptions): Promise<StatusResult> {
 export async function runPush(options: PushOptions): Promise<PushResult> {
   const status = await runStatus(options);
   const planned = targetPaths(status.diff, options.files);
+  const deletionPolicy = options.safety?.deletionPolicy ?? 'never';
+  const plannedDeletes =
+    deletionPolicy === 'never' ? [] : targetDeletePaths(status.diff, options.files);
   await enforceSafety(options.localRoot, planned, options.safety);
 
   if (options.preflight) {
@@ -208,28 +249,35 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
       dryRun: true,
       diff: status.diff,
       planned,
+      plannedDeletes,
       uploaded: [],
+      deleted: [],
       backupSnapshot: null,
       nextState: options.state,
     };
   }
 
+  if (
+    deletionPolicy === 'prune-with-confirm' &&
+    plannedDeletes.length > 0 &&
+    options.confirmDeletes !== true
+  ) {
+    throw new DeployLimitError(
+      `Delete confirmation required for ${plannedDeletes.length} planned remote delete(s)`,
+    );
+  }
+
   await options.lock?.acquire();
   try {
-    // v0.9.2: Always create a snapshot when `planned.length > 0` so
-    // the operator's "every push is reversible" expectation holds even
-    // for added-only pushes. All `planned` paths (added + modified)
-    // are handed to `createAutoSnapshot`; the backup source is expected
-    // to return `null` for any path it cannot read (e.g. added files
-    // that don't yet exist on the remote). v0.10.0 will redesign the
-    // snapshot to carry per-path added/modified/removed classification
-    // so `rollback` can `delete` an added file as well — until then,
-    // an added-only snapshot is metadata-only (fileCount = 0).
+    // Snapshot before any remote mutation. Schema 2 records added files
+    // as tombstones and stores removed/modified remote content when present.
+    const input = snapshotInput(status.diff, planned, plannedDeletes);
     const backupSnapshot =
-      planned.length > 0 ? await options.backupStore.createAutoSnapshot(planned) : null;
+      snapshotPathCount(input) > 0 ? await options.backupStore.createAutoSnapshot(input) : null;
 
     let nextState = options.state;
     const uploaded: UploadedFileResult[] = [];
+    const deleted: DeletedFileResult[] = [];
     const verifyAfterUpload = options.safety?.verifyAfterUpload ?? 'size';
     const createdDirs = new Set<string>();
     for (const path of planned) {
@@ -281,11 +329,20 @@ export async function runPush(options: PushOptions): Promise<PushResult> {
       });
     }
 
+    for (const path of plannedDeletes) {
+      const absoluteRemotePath = remotePath(options.remoteRoot, path);
+      await options.uploader.delete(absoluteRemotePath);
+      nextState = removeFileEntry(nextState, path);
+      deleted.push({ path, remotePath: absoluteRemotePath });
+    }
+
     return {
       dryRun: false,
       diff: status.diff,
       planned,
+      plannedDeletes,
       uploaded,
+      deleted,
       backupSnapshot,
       nextState,
     };

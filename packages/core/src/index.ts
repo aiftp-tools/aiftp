@@ -132,11 +132,13 @@ export {
 export { computeDiff, type Diff } from './diff.js';
 
 export {
+  type DeletedFileResult,
   DeployError,
   DeployLimitError,
   type DeployLock,
   type DeployUploader,
   DeployVerificationError,
+  type DeletionPolicy,
   type PushOptions,
   type PushResult,
   type PushSafetyOptions,
@@ -183,6 +185,7 @@ export { RetryExhaustedError, type RetryOptions, withRetry } from './retry.js';
 export {
   computeHash,
   loadState,
+  removeFileEntry,
   saveState,
   type State,
   StateError,

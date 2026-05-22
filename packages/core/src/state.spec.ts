@@ -8,6 +8,7 @@ import {
   StateError,
   computeHash,
   loadState,
+  removeFileEntry,
   saveState,
   updateFileEntry,
 } from './state.js';
@@ -130,6 +131,42 @@ describe('state management', () => {
       expect(next).not.toBe(state);
       expect(next.files).not.toBe(state.files);
       expect(state.files['index.html']).toBeUndefined();
+    });
+  });
+
+  describe('removeFileEntry', () => {
+    it('returns a new state without the normalized file entry', () => {
+      const state: State = {
+        schema: 1,
+        files: {
+          'old.html': {
+            hash: 'old-hash',
+            size: 10,
+            updatedAt: '2026-05-18T08:00:00.000Z',
+          },
+          'nested/index.html': {
+            hash: 'nested-hash',
+            size: 20,
+            updatedAt: '2026-05-18T09:00:00.000Z',
+          },
+        },
+      };
+
+      const next = removeFileEntry(state, './nested/index.html');
+
+      expect(next).toEqual({
+        schema: 1,
+        files: {
+          'old.html': {
+            hash: 'old-hash',
+            size: 10,
+            updatedAt: '2026-05-18T08:00:00.000Z',
+          },
+        },
+      });
+      expect(next).not.toBe(state);
+      expect(next.files).not.toBe(state.files);
+      expect(state.files['nested/index.html']).toBeDefined();
     });
   });
 });

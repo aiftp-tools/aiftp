@@ -22,6 +22,7 @@ describe('deploy engine', () => {
   let backupRoot: string;
   let remoteFiles: Map<string, Buffer>;
   let uploaded: Array<{ localPath: string; remotePath: string }>;
+  let deleted: string[];
 
   beforeEach(async () => {
     localRoot = join(tmpdir(), `aiftp-deploy-local-${randomUUID()}`);
@@ -32,6 +33,7 @@ describe('deploy engine', () => {
       ['index.html', Buffer.from('<h1>remote old</h1>\n', 'utf8')],
     ]);
     uploaded = [];
+    deleted = [];
   });
 
   afterEach(async () => {
@@ -70,6 +72,10 @@ describe('deploy engine', () => {
         uploaded.push({ localPath, remotePath });
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: options.wrongSize ? info.size + 1 : info.size };
+      },
+      delete: async (remotePath: string) => {
+        deleted.push(remotePath);
+        remoteFiles.delete(remotePath.replace(/^\/public_html\//u, ''));
       },
       size: async (remotePath: string) => {
         const record = uploaded.find((entry) => entry.remotePath === remotePath);
@@ -175,7 +181,10 @@ describe('deploy engine', () => {
     });
 
     expect(result.uploaded.map((entry) => entry.path)).toEqual(['about.html', 'index.html']);
-    expect(result.backupSnapshot?.files.map((file) => file.path)).toEqual(['index.html']);
+    expect(result.backupSnapshot?.files.map((file) => [file.path, file.operation])).toEqual([
+      ['about.html', 'added'],
+      ['index.html', 'modified'],
+    ]);
     await expect(
       backupStore.restoreFile(result.backupSnapshot?.id ?? '', 'index.html'),
     ).resolves.toEqual(remoteFiles.get('index.html'));
@@ -190,7 +199,7 @@ describe('deploy engine', () => {
     );
   });
 
-  it('creates an auto snapshot for added-only pushes', async () => {
+  it('creates an added tombstone snapshot and uploads added-only pushes', async () => {
     await writeLocal('first.html', '<h1>first push</h1>\n');
     const backupReads: string[] = [];
     const backupStore = new BackupStore({
@@ -217,11 +226,181 @@ describe('deploy engine', () => {
     });
 
     expect(result.planned).toEqual(['first.html']);
+    expect(result.plannedDeletes).toEqual([]);
+    expect(result.uploaded.map((entry) => entry.path)).toEqual(['first.html']);
     expect(result.backupSnapshot).not.toBeNull();
     expect(result.backupSnapshot?.type).toBe('auto');
-    expect(result.backupSnapshot?.fileCount).toBe(0);
-    expect(backupReads).toEqual(['first.html']);
+    expect(result.backupSnapshot?.counts).toEqual({ added: 1, modified: 0, removed: 0 });
+    expect(result.backupSnapshot?.files).toEqual([
+      expect.objectContaining({ path: 'first.html', operation: 'added', storedName: null }),
+    ]);
+    expect(backupReads).toEqual([]);
     await expect(backupStore.listSnapshots()).resolves.toHaveLength(1);
+  });
+
+  it('prune-auto snapshots removed content, uploads first, deletes second, and removes state entries', async () => {
+    await writeLocal('index.html', '<h1>changed</h1>\n');
+    remoteFiles.set('old.html', Buffer.from('<p>remote removed</p>\n', 'utf8'));
+    const events: string[] = [];
+    const backupStore = createBackupStore();
+    const uploader: DeployUploader = {
+      upload: async (localPath, remotePath) => {
+        events.push(`upload:${remotePath}`);
+        uploaded.push({ localPath, remotePath });
+        const info = await stat(localPath);
+        return { remotePath, bytesUploaded: info.size };
+      },
+      delete: async (remotePath) => {
+        events.push(`delete:${remotePath}`);
+        deleted.push(remotePath);
+        remoteFiles.delete(remotePath.replace(/^\/public_html\//u, ''));
+      },
+      size: async (remotePath) => {
+        const record = uploaded.find((entry) => entry.remotePath === remotePath);
+        if (!record) throw new Error(`not uploaded: ${remotePath}`);
+        return (await stat(record.localPath)).size;
+      },
+    };
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: {
+        schema: 1,
+        files: {
+          'index.html': {
+            hash: 'old-hash',
+            size: 10,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+          'old.html': {
+            hash: 'old-remote-hash',
+            size: 22,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+        },
+      },
+      excluder: createExcluder(),
+      backupStore,
+      uploader,
+      safety: { deletionPolicy: 'prune-auto' },
+    });
+
+    expect(result.planned).toEqual(['index.html']);
+    expect(result.plannedDeletes).toEqual(['old.html']);
+    expect(result.deleted).toEqual([{ path: 'old.html', remotePath: '/public_html/old.html' }]);
+    expect(events).toEqual(['upload:/public_html/index.html', 'delete:/public_html/old.html']);
+    expect(result.backupSnapshot?.counts).toEqual({ added: 0, modified: 1, removed: 1 });
+    expect(result.backupSnapshot?.files.map((file) => [file.path, file.operation])).toEqual([
+      ['index.html', 'modified'],
+      ['old.html', 'removed'],
+    ]);
+    await expect(
+      backupStore.restoreFile(result.backupSnapshot?.id ?? '', 'old.html'),
+    ).resolves.toEqual(Buffer.from('<p>remote removed</p>\n', 'utf8'));
+    expect(result.nextState.files['old.html']).toBeUndefined();
+  });
+
+  it('deletionPolicy never does not delete and does not record removed operations', async () => {
+    remoteFiles.set('old.html', Buffer.from('<p>remote removed</p>\n', 'utf8'));
+    const backupReads: string[] = [];
+    const backupStore = new BackupStore({
+      rootDir: backupRoot,
+      key: generateKey(),
+      source: {
+        readFile: async (path) => {
+          backupReads.push(path);
+          return remoteFiles.get(path) ?? null;
+        },
+      },
+      excluder: createExcluder(),
+      now: () => new Date('2026-05-18T12:30:00.000Z'),
+    });
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: {
+        schema: 1,
+        files: {
+          'old.html': {
+            hash: 'old-remote-hash',
+            size: 22,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+        },
+      },
+      excluder: createExcluder(),
+      backupStore,
+      uploader: createUploader(),
+      safety: { deletionPolicy: 'never' },
+    });
+
+    expect(result.diff.removed).toEqual(['old.html']);
+    expect(result.planned).toEqual([]);
+    expect(result.plannedDeletes).toEqual([]);
+    expect(result.deleted).toEqual([]);
+    expect(result.backupSnapshot).toBeNull();
+    expect(result.nextState.files['old.html']).toBeDefined();
+    expect(backupReads).toEqual([]);
+    expect(deleted).toEqual([]);
+  });
+
+  it('never deletes hard-excluded removed entries', async () => {
+    remoteFiles.set('.env', Buffer.from('SECRET=value\n', 'utf8'));
+
+    const result = await runPush({
+      localRoot,
+      remoteRoot: '/public_html',
+      state: {
+        schema: 1,
+        files: {
+          '.env': {
+            hash: 'secret-hash',
+            size: 13,
+            updatedAt: '2026-05-18T10:00:00.000Z',
+          },
+        },
+      },
+      excluder: createExcluder(),
+      backupStore: createBackupStore(),
+      uploader: createUploader(),
+      safety: { deletionPolicy: 'prune-auto' },
+    });
+
+    expect(result.diff.removed).toEqual([]);
+    expect(result.plannedDeletes).toEqual([]);
+    expect(result.deleted).toEqual([]);
+    expect(result.backupSnapshot).toBeNull();
+    expect(result.nextState.files['.env']).toBeDefined();
+    expect(deleted).toEqual([]);
+  });
+
+  it('prune-with-confirm requires delete acknowledgment when deletes are planned', async () => {
+    remoteFiles.set('old.html', Buffer.from('<p>remote removed</p>\n', 'utf8'));
+
+    await expect(
+      runPush({
+        localRoot,
+        remoteRoot: '/public_html',
+        state: {
+          schema: 1,
+          files: {
+            'old.html': {
+              hash: 'old-remote-hash',
+              size: 22,
+              updatedAt: '2026-05-18T10:00:00.000Z',
+            },
+          },
+        },
+        excluder: createExcluder(),
+        backupStore: createBackupStore(),
+        uploader: createUploader(),
+        safety: { deletionPolicy: 'prune-with-confirm' },
+      }),
+    ).rejects.toThrow(DeployLimitError);
+
+    expect(deleted).toEqual([]);
   });
 
   it('acquires the deployment lock before backup snapshot reads remote content', async () => {
@@ -245,6 +424,9 @@ describe('deploy engine', () => {
         events.push(`upload:${remotePath}`);
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: info.size };
+      },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
       },
     };
 
@@ -384,6 +566,9 @@ describe('deploy engine', () => {
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: info.size };
       },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
+      },
     };
 
     await runPush({
@@ -426,6 +611,9 @@ describe('deploy engine', () => {
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: info.size };
       },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
+      },
     };
 
     await runPush({
@@ -448,6 +636,9 @@ describe('deploy engine', () => {
       upload: async (localPath, remotePath) => {
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: info.size };
+      },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
       },
     };
 
@@ -474,6 +665,9 @@ describe('deploy engine', () => {
       upload: async (localPath, remotePath) => {
         const info = await stat(localPath);
         return { remotePath, bytesUploaded: info.size };
+      },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
       },
     };
 

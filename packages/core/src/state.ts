@@ -158,3 +158,12 @@ export function updateFileEntry(
 
   return validateState(next);
 }
+
+export function removeFileEntry(state: State, path: string): State {
+  const normalizedPath = normalizeStatePath(path);
+  const { [normalizedPath]: _removed, ...files } = state.files;
+  return validateState({
+    schema: STATE_SCHEMA,
+    files,
+  });
+}
