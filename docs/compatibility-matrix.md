@@ -1,6 +1,6 @@
 # Server compatibility matrix
 
-> Status as of v0.2.0. Last updated 2026-05-19.
+> Status as of v0.9.3. Last updated 2026-05-22.
 
 aiftp's safety story is only as good as how well it handles each
 real-world FTPS server's quirks. This page records what's actually been
@@ -18,10 +18,10 @@ Legend:
 
 | Provider | TLS hostname | PASV | MLSD | SIZE | Encoding | `server_kind` preset | Status |
 |---|---|---|---|---|---|---|---|
-| **Star Server**（スターサーバー） | ⚠️ `*.star.ne.jp` vs `*.stars.ne.jp` mismatch | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `starserver` | ✅ end-to-end push + doctor verified on `glocalworks.co.jp` Master FTP account (v0.2.5, 2026-05-19) |
-| ロリポップ | — | — | — | — | — | `lolipop` | — |
-| さくらインターネット | — | — | — | — | — | `sakura` | — |
-| エックスサーバー | — | — | — | — | — | `xserver` | — |
+| **Star Server**（スターサーバー） | ⚠️ `*.star.ne.jp` vs `*.stars.ne.jp` mismatch (v0.9.3 still warns — CN truly doesn't cover the host) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `starserver` | ✅ end-to-end push + doctor verified on `glocalworks.co.jp` Master FTP account (v0.2.5, 2026-05-19) |
+| **ロリポップ！** | ✅ `*.lolipop.jp` covers `ftp-*.lolipop.jp` (v0.9.3 wildcard match) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `lolipop` | ✅ doctor 11/2/0 on Light plan (v0.9.3, 2026-05-22). 海外アタックガード ON does NOT affect FTP (verified). |
+| **さくらインターネット** | ✅ `*.sakura.ne.jp` covers `<user>.sakura.ne.jp` (v0.9.3 wildcard match) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `sakura` | ✅ doctor 11/2/0 on Standard plan (v0.9.3, 2026-05-22). push + rollback verified at v0.9.2 (Sakura). **国外IPフィルタは 2026-05 新規契約でもデフォルト ON、FTP を含む** — verified against the 2014-03 announcement. |
+| **エックスサーバー** | ✅ `*.xserver.jp` covers `sv<N>.xserver.jp` (v0.9.3 wildcard match) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `xserver` | ✅ doctor 11/2/0 on Standard plan (v0.9.3, 2026-05-22). FTP unrestricted by default per public docs — verified. |
 
 ### Star Server (starserver) notes
 
@@ -122,6 +122,8 @@ returned `index.html` after the push. End-to-end loop confirmed.
 | Server reports private PASV address behind NAT | `[quirks].ignore_pasv_address = true` | Use the control connection's host instead of the PASV reply |
 | MLSD not supported | `[quirks].use_mlsd = false` | Fall back to LIST parsing (basic-ftp default) |
 | Idle disconnect under N seconds | `[quirks].noop_interval_sec = <secs>` | Send NOOP keepalive (wired in v0.2.2; basic-ftp control connection receives NOOP every N seconds) |
+| Shared wildcard cert (Sakura / Xserver / Lolipop) | (handled automatically by v0.9.3 wildcard matching — **no quirk needed**) | RFC 6125 §6.4.3 single-label leading wildcard; `*.sakura.ne.jp` matches `<user>.sakura.ne.jp` etc. |
+| TLS hostname check needs to be skipped (legacy v0.9.2 escape hatch) | `[quirks].tls_check_hostname = false` | Bypass Node's `checkServerIdentity`. **Rarely needed in v0.9.3+** — only for hosts where the cert CN truly doesn't cover the requested host (e.g. Star Server's `*.star.ne.jp` vs `*.stars.ne.jp`) and the operator has confirmed server identity another way. |
 
 ## Operator platform support
 
