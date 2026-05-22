@@ -18,6 +18,27 @@ See [the roadmap](docs/roadmap.md) and
 
 ---
 
+## [0.9.5] — 2026-05-22
+
+Release-check hardening patch for v0.9.4.
+
+### Fixed
+
+- `pnpm test` and `pnpm test:coverage` now generate the core
+  `VERSION` module before Vitest imports `@aiftp-tools/core`, so a
+  fresh clone no longer depends on an ignored local
+  `packages/core/src/version.generated.ts` file.
+- `aiftp push --dry-run` no longer requires an initialized backup key.
+  The CLI now mirrors the MCP dry-run path and uses a no-op backup store
+  because core never creates snapshots during dry runs.
+
+### Tests
+
+- Added regression coverage for backup-key-free CLI dry runs, root
+  test-script version generation, and `[walk] follow_symlinks` behavior.
+
+---
+
 ## [0.9.4] — 2026-05-22
 
 UX / init hardening patch — four small features bundled together so
@@ -591,7 +612,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.5
 [0.9.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.4
 [0.9.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.3
 [0.9.2]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.2

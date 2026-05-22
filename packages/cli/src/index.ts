@@ -366,6 +366,14 @@ function injectedRuntimeUploader(): DeployUploader {
   };
 }
 
+function dryRunBackupStore(): PushOptions['backupStore'] {
+  return {
+    createAutoSnapshot: async () => {
+      throw new Error('Dry-run backup store must not create snapshots.');
+    },
+  } as unknown as PushOptions['backupStore'];
+}
+
 async function createDefaultFtpClient(
   cwd: string,
   profileName: string,
@@ -1176,12 +1184,14 @@ export function createCli(options: CliOptions = {}): Command {
             : undefined;
           const backupStore =
             runtimeBackupStore ??
-            (await createDefaultBackupStore({
-              cwd,
-              profileName: cmd.profile,
-              keychain,
-              ftpClient: sharedFtpClient,
-            }));
+            (cmd.dryRun
+              ? dryRunBackupStore()
+              : await createDefaultBackupStore({
+                  cwd,
+                  profileName: cmd.profile,
+                  keychain,
+                  ftpClient: sharedFtpClient,
+                }));
           const managedUploader = await resolveManagedUploader(
             cwd,
             cmd.profile,

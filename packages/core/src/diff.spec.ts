@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import { type State, computeHash } from './state.js';
 
 describe('computeDiff', () => {
   let tempDir: string;
+  const symlinkIt = process.platform === 'win32' ? it.skip : it;
 
   beforeEach(async () => {
     tempDir = join(tmpdir(), `aiftp-diff-test-${randomUUID()}`);
@@ -140,6 +141,28 @@ describe('computeDiff', () => {
       added: [],
       modified: [],
       removed: ['index.html'],
+      unchanged: [],
+    });
+  });
+
+  symlinkIt('follows symlinked files only when followSymlinks is true', async () => {
+    await writeLocal('fixtures/index.html', '<h1>fixture</h1>\n');
+    await symlink(join(tempDir, 'fixtures', 'index.html'), join(tempDir, 'index.html'));
+
+    const state: State = { schema: 1, files: {} };
+
+    await expect(computeDiff(tempDir, state, createExcluder())).resolves.toEqual({
+      added: ['fixtures/index.html'],
+      modified: [],
+      removed: [],
+      unchanged: [],
+    });
+    await expect(
+      computeDiff(tempDir, state, createExcluder(), { followSymlinks: true }),
+    ).resolves.toEqual({
+      added: ['fixtures/index.html', 'index.html'],
+      modified: [],
+      removed: [],
       unchanged: [],
     });
   });

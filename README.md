@@ -237,9 +237,9 @@ This is a pnpm monorepo:
 
 ```bash
 pnpm install
-pnpm vitest run          # 485 passed / 3 skipped (v0.9.1)
-pnpm -r typecheck
-pnpm biome check packages
+pnpm test
+pnpm typecheck
+pnpm lint
 ```
 
 ## Status / roadmap

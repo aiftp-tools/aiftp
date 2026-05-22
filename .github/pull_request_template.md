@@ -26,9 +26,9 @@
 
 <!-- How did you verify this works? Include automated and manual steps. -->
 
-- [ ] `pnpm vitest run` passes
-- [ ] `pnpm -r typecheck` clean
-- [ ] `pnpm biome check packages` clean
+- [ ] `pnpm test` passes
+- [ ] `pnpm typecheck` clean
+- [ ] `pnpm lint` clean
 - [ ] New tests added for new behavior
 - [ ] Manually tested against real FTP server (describe below if applicable)
 

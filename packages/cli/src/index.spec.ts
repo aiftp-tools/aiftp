@@ -436,6 +436,25 @@ describe('cli', () => {
     });
   });
 
+  it('push --dry-run does not require an initialized backup key', async () => {
+    await writeConfig();
+    await writeLocal('index.html', '<h1>new</h1>\n');
+
+    await parse(['push', '--profile', 'production', '--dry-run', '--json'], {
+      keychain: {
+        ...keychain(),
+        getPassword: async (service, account) => {
+          throw new Error(`unexpected keychain read: ${service}:${account}`);
+        },
+      },
+    });
+
+    expect(JSON.parse(stdout[0] ?? '')).toMatchObject({
+      dryRun: true,
+      planned: ['index.html'],
+    });
+  });
+
   it('push prints the target banner to stderr before any FTP activity (v0.6.0 #7)', async () => {
     await writeConfig();
     await writeLocal('index.html', '<h1>new</h1>\n');
