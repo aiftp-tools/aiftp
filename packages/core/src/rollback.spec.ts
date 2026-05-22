@@ -1,5 +1,9 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { SnapshotMeta } from './backup/store.js';
+import { BackupStore, type FileOperation, type SnapshotMeta } from './backup/store.js';
+import { decryptBuffer, encryptBuffer } from './encryption.js';
 import { createExcluder } from './exclude.js';
 import {
   type RollbackBackupStore,
@@ -33,22 +37,33 @@ function snap(
   id: string,
   createdAt: string,
   type: 'auto' | 'full',
-  files: Array<{ path: string; size?: number }>,
+  files: Array<{ path: string; operation?: FileOperation; size?: number }>,
 ): SnapshotMeta {
+  const snapshotFiles = files.map((f) => {
+    const operation = f.operation ?? 'modified';
+    const size = f.size ?? 16;
+    return {
+      path: f.path,
+      operation,
+      storedName: operation === 'added' ? null : `${f.path}.enc`,
+      sizeOriginal: operation === 'added' ? null : size,
+      sizeEncrypted: operation === 'added' ? null : size + 28,
+      sha256Original: operation === 'added' ? null : 'a'.repeat(64),
+      sha256Encrypted: operation === 'added' ? null : 'b'.repeat(64),
+    };
+  });
   return {
     id,
     type,
     createdAt,
     fileCount: files.length,
     totalBytes: files.reduce((acc, f) => acc + (f.size ?? 16), 0),
-    files: files.map((f) => ({
-      path: f.path,
-      storedName: `${f.path}.enc`,
-      sizeOriginal: f.size ?? 16,
-      sizeEncrypted: (f.size ?? 16) + 28,
-      sha256Original: 'a'.repeat(64),
-      sha256Encrypted: 'b'.repeat(64),
-    })),
+    counts: {
+      added: snapshotFiles.filter((file) => file.operation === 'added').length,
+      modified: snapshotFiles.filter((file) => file.operation === 'modified').length,
+      removed: snapshotFiles.filter((file) => file.operation === 'removed').length,
+    },
+    files: snapshotFiles,
   };
 }
 
@@ -173,7 +188,93 @@ describe('runRollback', () => {
     });
     expect(result.dryRun).toBe(true);
     expect(result.planned.sort()).toEqual(['about.html', 'index.html']);
+    expect(result.plannedDeletes).toEqual([]);
     expect(result.rolledBack).toHaveLength(0);
+  });
+
+  it('previews added-only snapshots as deletes and executes uploader.delete', async () => {
+    const addedSnap = snap(
+      '2026-05-19T03:00:00.000Z-auto-add',
+      '2026-05-19T03:00:00.000Z',
+      'auto',
+      [{ path: 'new-page.html', operation: 'added' }],
+    );
+    const store = makeStore([addedSnap], new Map([[addedSnap.id, new Map()]]));
+    const deleted: string[] = [];
+    const uploader: RollbackUploader = {
+      upload: async () => {
+        throw new Error('upload must not be called for added rollback');
+      },
+      delete: async (remotePath) => {
+        deleted.push(remotePath);
+      },
+    };
+
+    const dryRun = await runRollback({
+      snapshotId: addedSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: true,
+    });
+
+    expect(dryRun.planned).toEqual([]);
+    expect(dryRun.plannedDeletes).toEqual(['new-page.html']);
+    expect(deleted).toEqual([]);
+
+    const executed = await runRollback({
+      snapshotId: addedSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+
+    expect(deleted).toEqual(['/public_html/new-page.html']);
+    expect(executed.deleted).toEqual([
+      {
+        path: 'new-page.html',
+        remotePath: '/public_html/new-page.html',
+        size: 0,
+        status: 'deleted',
+      },
+    ]);
+    expect(executed.rolledBack).toEqual([]);
+  });
+
+  it('restores removed snapshot entries by uploading their snapshot content', async () => {
+    const removedSnap = snap(
+      '2026-05-19T04:00:00.000Z-auto-rem',
+      '2026-05-19T04:00:00.000Z',
+      'auto',
+      [{ path: 'deleted-page.html', operation: 'removed', size: 7 }],
+    );
+    const store = makeStore(
+      [removedSnap],
+      new Map([[removedSnap.id, new Map([['deleted-page.html', Buffer.from('old-new')]])]]),
+    );
+    const uploads: Array<{ remotePath: string; content: string }> = [];
+    const uploader: RollbackUploader = {
+      upload: async (_localPath, remotePath, content) => {
+        uploads.push({ remotePath, content: content.toString('utf8') });
+      },
+    };
+
+    const result = await runRollback({
+      snapshotId: removedSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+
+    expect(result.planned).toEqual(['deleted-page.html']);
+    expect(result.plannedDeletes).toEqual([]);
+    expect(uploads).toEqual([{ remotePath: '/public_html/deleted-page.html', content: 'old-new' }]);
+    expect(result.rolledBack[0]?.status).toBe('rolled-back');
   });
 
   it('NEVER uploads hard-excluded files (auth-bearing patterns)', async () => {
@@ -220,6 +321,148 @@ describe('runRollback', () => {
     for (const entry of result.skipped) {
       expect(entry.status).toBe('skipped-hard-exclude');
     }
+  });
+
+  it('never uploads or deletes hard-excluded entries regardless of operation', async () => {
+    const snapshotWithSecrets = snap(
+      '2026-05-19T03:30:00.000Z-auto-hard',
+      '2026-05-19T03:30:00.000Z',
+      'auto',
+      [
+        { path: '.env', operation: 'added' },
+        { path: 'wp-config.php', operation: 'removed', size: 20 },
+      ],
+    );
+    const store = makeStore([snapshotWithSecrets], new Map([[snapshotWithSecrets.id, new Map()]]));
+    const calls: string[] = [];
+    const uploader: RollbackUploader = {
+      upload: async () => {
+        calls.push('upload');
+      },
+      delete: async () => {
+        calls.push('delete');
+      },
+    };
+
+    const result = await runRollback({
+      snapshotId: snapshotWithSecrets.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.planned).toEqual([]);
+    expect(result.plannedDeletes).toEqual([]);
+    expect(result.skipped.map((entry) => entry.status)).toEqual([
+      'skipped-hard-exclude',
+      'skipped-hard-exclude',
+    ]);
+  });
+
+  it('schema 1 snapshots rollback as modified-only and are not rewritten', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'aiftp-rollback-schema1-'));
+    try {
+      const sourceFiles = new Map<string, Buffer>([
+        ['index.html', Buffer.from('<h1>old</h1>')],
+        ['assets/app.css', Buffer.from('body{}')],
+      ]);
+      const store = new BackupStore({
+        rootDir: tempDir,
+        key: Buffer.alloc(32, 9),
+        source: {
+          readFile: async (path) => sourceFiles.get(path) ?? null,
+        },
+        excluder: createExcluder(),
+      });
+      const snapshot = await store.createAutoSnapshot({
+        added: [],
+        modified: ['index.html', 'assets/app.css'],
+        removed: [],
+      });
+      const manifestPath = join(tempDir, 'snapshots', snapshot.id, 'manifest.enc');
+      const schema2Manifest = JSON.parse(
+        decryptBuffer(await readFile(manifestPath), store.key).toString('utf8'),
+      ) as Record<string, unknown>;
+      const schema1Manifest = {
+        ...schema2Manifest,
+        schema: 1,
+        counts: undefined,
+        files: (schema2Manifest.files as Array<Record<string, unknown>>).map(
+          ({ operation: _operation, ...file }) => file,
+        ),
+      };
+      await writeFile(
+        manifestPath,
+        encryptBuffer(Buffer.from(JSON.stringify(schema1Manifest, null, 2), 'utf8'), store.key),
+        { mode: 0o600 },
+      );
+      const before = await readFile(manifestPath);
+      const uploads: string[] = [];
+      const deletes: string[] = [];
+      const uploader: RollbackUploader = {
+        upload: async (_localPath, remotePath) => {
+          uploads.push(remotePath);
+        },
+        delete: async (remotePath) => {
+          deletes.push(remotePath);
+        },
+      };
+
+      const result = await runRollback({
+        snapshotId: snapshot.id,
+        backupStore: store,
+        uploader,
+        remoteRoot: '/public_html',
+        excluder: createExcluder(),
+        dryRun: false,
+      });
+
+      expect(result.planned).toEqual(['assets/app.css', 'index.html']);
+      expect(result.plannedDeletes).toEqual([]);
+      expect(uploads.sort()).toEqual(['/public_html/assets/app.css', '/public_html/index.html']);
+      expect(deletes).toEqual([]);
+      expect(await readFile(manifestPath)).toEqual(before);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips added snapshot entries when rollback delete is unavailable', async () => {
+    const addedSnap = snap(
+      '2026-05-19T04:30:00.000Z-auto-nodelete',
+      '2026-05-19T04:30:00.000Z',
+      'auto',
+      [{ path: 'new-page.html', operation: 'added' }],
+    );
+    const store = makeStore([addedSnap], new Map([[addedSnap.id, new Map()]]));
+    const uploader: RollbackUploader = {
+      upload: async () => {
+        throw new Error('upload must not be called for added rollback');
+      },
+    };
+
+    const result = await runRollback({
+      snapshotId: addedSnap.id,
+      backupStore: store,
+      uploader,
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+    });
+
+    expect(result.deleted).toEqual([]);
+    expect(result.skipped).toEqual([
+      {
+        path: 'new-page.html',
+        remotePath: '/public_html/new-page.html',
+        size: 0,
+        status: 'skipped-no-delete',
+        reason: 'rollback uploader does not implement delete(remotePath)',
+      },
+    ]);
   });
 
   it('returns a verifiable diff_hash anchor: same snapshot id + same file set produces same uploads', async () => {

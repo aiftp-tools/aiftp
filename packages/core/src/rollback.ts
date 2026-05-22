@@ -53,6 +53,12 @@ export interface RollbackUploader {
    * `*.aiftp-rb-<uuid>` files manually in that case.
    */
   unlink?(remotePath: string): Promise<void>;
+  /**
+   * Delete a remote path that was created by the push being rolled back.
+   * Optional for compatibility with older CLI/MCP adapters; when missing,
+   * delete-required entries are reported as `skipped-no-delete`.
+   */
+  delete?(remotePath: string): Promise<void>;
 }
 
 export interface ResolveRollbackTargetOptions {
@@ -108,9 +114,11 @@ export async function resolveRollbackTarget(
 }
 
 export type RollbackFileStatus =
+  | 'deleted'
   | 'rolled-back'
   | 'skipped-hard-exclude'
   | 'skipped-dry-run'
+  | 'skipped-no-delete'
   | 'failed';
 
 export interface RollbackFileResult {
@@ -164,11 +172,21 @@ export interface RollbackResult {
    */
   planned: string[];
   /**
+   * Sorted list of file paths the rollback WOULD delete. These are
+   * snapshot entries with `operation: "added"`: the original push created
+   * the file, so rollback removes it instead of trying to restore content.
+   */
+  plannedDeletes: string[];
+  /**
    * Files successfully rolled back. Sorted by path so a deterministic
    * order is always presented to the caller (matches `planned` order on
    * full success).
    */
   rolledBack: RollbackFileResult[];
+  /**
+   * Files successfully deleted during rollback. Sorted by path.
+   */
+  deleted: RollbackFileResult[];
   /**
    * Files skipped (hard-exclude or dry-run) AND files that failed to
    * upload after starting. Failed entries carry `status: 'failed'` and a
@@ -186,6 +204,10 @@ function joinRemote(remoteRoot: string, path: string): string {
 function remoteDirname(remotePath: string): string {
   const idx = remotePath.lastIndexOf('/');
   return idx <= 0 ? '/' : remotePath.slice(0, idx);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'FtpNotFoundError';
 }
 
 /**
@@ -231,7 +253,8 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
   }
 
   type Classified = { meta: { path: string; size: number }; remotePath: string };
-  const allowList: Classified[] = [];
+  const uploadList: Classified[] = [];
+  const deleteList: Classified[] = [];
   const skipped: RollbackFileResult[] = [];
 
   // Two-pass design: classify first (hard-exclude check is pure), then
@@ -252,31 +275,43 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       });
       continue;
     }
-    allowList.push({
+    const entry = {
       meta: { path: file.path, size },
       remotePath,
-    });
+    };
+    if (file.operation === 'added') {
+      deleteList.push(entry);
+    } else {
+      uploadList.push(entry);
+    }
   }
 
-  const planned = allowList.map((c) => c.meta.path).sort();
+  uploadList.sort((a, b) => a.meta.path.localeCompare(b.meta.path));
+  deleteList.sort((a, b) => a.meta.path.localeCompare(b.meta.path));
+
+  const planned = uploadList.map((c) => c.meta.path);
+  const plannedDeletes = deleteList.map((c) => c.meta.path);
 
   if (options.dryRun) {
     return {
       dryRun: true,
       snapshotId: options.snapshotId,
       planned,
+      plannedDeletes,
       rolledBack: [],
+      deleted: [],
       skipped,
     };
   }
 
   const rolledBack: RollbackFileResult[] = [];
+  const deleted: RollbackFileResult[] = [];
   // mkdir is per-directory cached so we don't redundantly call ensureDir
   // for every file under the same parent. basic-ftp's ensureDir is
   // tolerant of "already exists" but the round-trip cost adds up.
   const mkdirSeen = new Set<string>();
 
-  for (const entry of allowList) {
+  for (const entry of uploadList) {
     const parentDir = remoteDirname(entry.remotePath);
     if (options.uploader.mkdir && !mkdirSeen.has(parentDir)) {
       try {
@@ -347,14 +382,43 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
     });
   }
 
+  for (const entry of deleteList) {
+    if (typeof options.uploader.delete !== 'function') {
+      skipped.push({
+        path: entry.meta.path,
+        remotePath: entry.remotePath,
+        size: entry.meta.size,
+        status: 'skipped-no-delete',
+        reason: 'rollback uploader does not implement delete(remotePath)',
+      });
+      continue;
+    }
+    try {
+      await options.uploader.delete(entry.remotePath);
+    } catch (error: unknown) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+    deleted.push({
+      path: entry.meta.path,
+      remotePath: entry.remotePath,
+      size: entry.meta.size,
+      status: 'deleted',
+    });
+  }
+
   // Sort rolledBack by path for deterministic output (matches `planned`).
   rolledBack.sort((a, b) => a.path.localeCompare(b.path));
+  deleted.sort((a, b) => a.path.localeCompare(b.path));
 
   return {
     dryRun: false,
     snapshotId: options.snapshotId,
     planned,
+    plannedDeletes,
     rolledBack,
+    deleted,
     skipped,
   };
 }
