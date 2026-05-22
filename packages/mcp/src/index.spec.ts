@@ -24,7 +24,9 @@ describe('mcp', () => {
     await rm(cwd, { recursive: true, force: true });
   });
 
-  async function writeConfig(): Promise<void> {
+  async function writeConfig(
+    options: { deletionPolicy?: string; warnOnProdProfile?: boolean } = {},
+  ): Promise<void> {
     await writeFile(
       join(cwd, '.aiftp.toml'),
       [
@@ -40,6 +42,14 @@ describe('mcp', () => {
         'keychain_service = "aiftp:production"',
         'server_kind = "starserver"',
         '',
+        ...(options.deletionPolicy || options.warnOnProdProfile === false
+          ? [
+              '[safety]',
+              ...(options.warnOnProdProfile === false ? ['warn_on_prod_profile = false'] : []),
+              ...(options.deletionPolicy ? [`deletion_policy = "${options.deletionPolicy}"`] : []),
+              '',
+            ]
+          : []),
       ].join('\n'),
       'utf8',
     );
@@ -158,6 +168,36 @@ describe('mcp', () => {
     expect(parsed.profile).toBe('production');
   });
 
+  it('aiftp_push_prepare includes upload and delete preview', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto' });
+    const pushResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] },
+      planned: ['index.html'],
+      plannedDeletes: ['old.html'],
+      uploaded: [],
+      deleted: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) => {
+        expect(opts.safety?.deletionPolicy).toBe('prune-auto');
+        return pushResult;
+      },
+    };
+
+    const parsed = parseText(
+      await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+        profile: 'production',
+      }),
+    ) as { planned: string[]; plannedDeletes: string[]; expected_file_count: number };
+
+    expect(parsed.planned).toEqual(['index.html']);
+    expect(parsed.plannedDeletes).toEqual(['old.html']);
+    expect(parsed.expected_file_count).toBe(1);
+  });
+
   it('aiftp_push_confirm requires matching plan_id, diff_hash, and confirm_token', async () => {
     await writeConfig();
     const dryRunResult: PushResult = {
@@ -248,6 +288,89 @@ describe('mcp', () => {
     };
     expect(confirmed.result.dryRun).toBe(false);
     expect(confirmed.result.uploaded).toHaveLength(1);
+  });
+
+  it('aiftp_push_confirm rejects upload/delete drift before mutation', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto', warnOnProdProfile: false });
+    let dryRunCount = 0;
+    const calls: Array<{ dryRun?: boolean }> = [];
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) => {
+        calls.push({ dryRun: opts.dryRun });
+        if (opts.dryRun) {
+          dryRunCount += 1;
+          return {
+            dryRun: true,
+            diff:
+              dryRunCount === 1
+                ? { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] }
+                : {
+                    added: ['changed.html'],
+                    modified: [],
+                    removed: ['old.html', 'extra.html'],
+                    unchanged: [],
+                  },
+            planned: dryRunCount === 1 ? ['index.html'] : ['changed.html'],
+            plannedDeletes: dryRunCount === 1 ? ['old.html'] : ['extra.html', 'old.html'],
+            uploaded: [],
+            deleted: [],
+            backupSnapshot: null,
+            nextState: { schema: 1, files: {} },
+          };
+        }
+        throw new Error('real mutation must not run after drift');
+      },
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_deletions: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/drift|diff_hash/i);
+    expect(calls).toEqual([{ dryRun: true }, { dryRun: true }]);
+  });
+
+  it('aiftp_push_confirm requires acknowledge_deletions when deletes are planned', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto', warnOnProdProfile: false });
+    const dryRunResult: PushResult = {
+      dryRun: true,
+      diff: { added: [], modified: [], removed: ['old.html'], unchanged: [] },
+      planned: [],
+      plannedDeletes: ['old.html'],
+      uploaded: [],
+      deleted: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) => {
+        if (opts.dryRun) return dryRunResult;
+        throw new Error('real mutation must not run without deletion acknowledgement');
+      },
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/acknowledge_deletions|delete/i);
   });
 
   it('aiftp_push_confirm rejects a stale plan_id (already consumed)', async () => {
@@ -1418,6 +1541,74 @@ describe('mcp', () => {
     expect(confirmed.ok).toBe(true);
     expect(uploads).toEqual(['/public_html/index.html']);
     expect(confirmed.rolled_back).toEqual(['index.html']);
+  });
+
+  it('aiftp_rollback_prepare and confirm bind plannedDeletes', async () => {
+    await writeConfig();
+    const deletes: string[] = [];
+    const runtime: AiftpMcpRuntime = {
+      createBackupStore: async () => ({
+        listSnapshots: async () => [
+          {
+            id: '2026-05-19T01:00:00.000Z-auto-delete',
+            type: 'auto',
+            createdAt: '2026-05-19T01:00:00.000Z',
+            fileCount: 1,
+            totalBytes: 0,
+            files: [
+              {
+                path: 'new-page.html',
+                operation: 'added',
+                storedName: null,
+                sizeOriginal: null,
+                sizeEncrypted: null,
+                sha256Original: null,
+                sha256Encrypted: null,
+              },
+            ],
+          },
+        ],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => {
+          throw new Error('added rollback should delete, not restore');
+        },
+      }),
+      createRollbackUploader: async () => ({
+        upload: async () => {
+          throw new Error('added rollback should not upload');
+        },
+        delete: async (remotePath) => {
+          deletes.push(remotePath);
+        },
+      }),
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      planned: string[];
+      plannedDeletes: string[];
+    };
+    expect(prepared.planned).toEqual([]);
+    expect(prepared.plannedDeletes).toEqual(['new-page.html']);
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; rolled_back: string[]; deleted: string[] };
+
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual([]);
+    expect(confirmed.deleted).toEqual(['new-page.html']);
+    expect(deletes).toEqual(['/public_html/new-page.html']);
   });
 
   it('aiftp_rollback_confirm rejects replay of a consumed plan', async () => {

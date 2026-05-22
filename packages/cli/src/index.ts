@@ -1172,6 +1172,40 @@ export function createCli(options: CliOptions = {}): Command {
         }
 
         const context = await loadStatusContext(cwd, cmd.profile);
+        const pushSafety: PushOptions['safety'] = {
+          maxFilesPerPush: config.safety.max_files_per_push,
+          maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
+          verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+          deletionPolicy: config.safety.deletion_policy,
+        };
+        let confirmDeletes = false;
+        if (config.safety.deletion_policy === 'prune-with-confirm' && !cmd.dryRun) {
+          const preview = await (runtime.runPush ?? runPush)({
+            ...context,
+            backupStore: dryRunBackupStore(),
+            uploader: injectedRuntimeUploader(),
+            remoteRoot: profile.remote_root,
+            files: cmd.only,
+            dryRun: true,
+            safety: pushSafety,
+            preflight: (paths) => checkAll(paths),
+          });
+          const previewDeletes = preview.plannedDeletes ?? [];
+          if (previewDeletes.length > 0) {
+            stderr(
+              `⚠️  ${previewDeletes.length} remote delete(s) are planned. Type DELETE to confirm:`,
+            );
+            const typed = await prompt({
+              type: 'text',
+              name: 'deleteConfirmation',
+              message: 'Type "DELETE" to delete remote files:',
+            });
+            if (typed.deleteConfirmation !== 'DELETE') {
+              throw new Error('Delete confirmation aborted: typed value did not match "DELETE".');
+            }
+            confirmDeletes = true;
+          }
+        }
         const runtimeBackupStore = await runtime.createBackupStore?.({
           cwd,
           profileName: cmd.profile,
@@ -1214,14 +1248,13 @@ export function createCli(options: CliOptions = {}): Command {
             uploader: managedUploader.uploader,
             remoteRoot: profile.remote_root,
             files: cmd.only,
-            dryRun: cmd.dryRun,
-            safety: {
-              maxFilesPerPush: config.safety.max_files_per_push,
-              maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
-              verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
-            },
+            dryRun: cmd.dryRun === true,
+            confirmDeletes,
+            safety: pushSafety,
             preflight: (paths) => checkAll(paths),
           }).finally(() => managedUploader.close());
+          const plannedDeletes = result.plannedDeletes ?? [];
+          const deleted = result.deleted ?? [];
 
           if (!result.dryRun) {
             await saveState(stateDir(cwd, cmd.profile), result.nextState);
@@ -1230,15 +1263,18 @@ export function createCli(options: CliOptions = {}): Command {
               event: 'push',
               profile: cmd.profile,
               uploaded: result.uploaded.length,
+              deleted: deleted.length,
             });
           }
 
           if (cmd.json) {
             stdout(JSON.stringify(result));
           } else if (result.dryRun) {
-            stdout(`Planned ${result.planned.length} file(s)`);
+            stdout(
+              `Planned ${result.planned.length} upload(s), ${plannedDeletes.length} delete(s)`,
+            );
           } else {
-            stdout(`Uploaded ${result.uploaded.length} file(s)`);
+            stdout(`Uploaded ${result.uploaded.length} file(s), deleted ${deleted.length} file(s)`);
           }
         } finally {
           await sharedFtpClient?.disconnect();

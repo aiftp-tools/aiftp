@@ -75,7 +75,9 @@ describe('cli', () => {
     await command.parseAsync(['node', 'aiftp', ...args], { from: 'node' });
   }
 
-  async function writeConfig(): Promise<void> {
+  async function writeConfig(
+    options: { deletionPolicy?: string; warnOnProdProfile?: boolean } = {},
+  ): Promise<void> {
     await writeFile(
       join(cwd, '.aiftp.toml'),
       [
@@ -91,6 +93,14 @@ describe('cli', () => {
         'keychain_service = "aiftp:production"',
         'server_kind = "starserver"',
         '',
+        ...(options.deletionPolicy || options.warnOnProdProfile === false
+          ? [
+              '[safety]',
+              ...(options.warnOnProdProfile === false ? ['warn_on_prod_profile = false'] : []),
+              ...(options.deletionPolicy ? [`deletion_policy = "${options.deletionPolicy}"`] : []),
+              '',
+            ]
+          : []),
       ].join('\n'),
       'utf8',
     );
@@ -424,6 +434,28 @@ describe('cli', () => {
     ).rejects.toThrow();
   });
 
+  it('push --dry-run text output separates upload and delete counts', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto' });
+    const pushResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] },
+      planned: ['index.html'],
+      plannedDeletes: ['old.html'],
+      uploaded: [],
+      deleted: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+
+    await parse(['push', '--profile', 'production', '--dry-run'], {
+      runtime: {
+        runPush: async () => pushResult,
+      },
+    });
+
+    expect(stdout.join('\n')).toContain('Planned 1 upload(s), 1 delete(s)');
+  });
+
   it('push --dry-run can use the built-in core flow without connecting to FTP', async () => {
     await writeConfig();
     await writeLocal('index.html', '<h1>new</h1>\n');
@@ -508,6 +540,56 @@ describe('cli', () => {
       runtime: { runPush: async () => realResult },
     });
     expect(stdout.join('\n')).toContain('Uploaded 1 file(s)');
+  });
+
+  it('push prune-with-confirm requires typed delete confirmation before mutation', async () => {
+    await writeConfig({ deletionPolicy: 'prune-with-confirm', warnOnProdProfile: false });
+    const calls: Array<{ dryRun?: boolean; confirmDeletes?: boolean }> = [];
+    const dryRunResult: PushResult = {
+      dryRun: true,
+      diff: { added: [], modified: [], removed: ['old.html'], unchanged: [] },
+      planned: [],
+      plannedDeletes: ['old.html'],
+      uploaded: [],
+      deleted: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const realResult: PushResult = {
+      ...dryRunResult,
+      dryRun: false,
+      deleted: [{ path: 'old.html', remotePath: '/public_html/old.html' }],
+    };
+
+    await expect(
+      parse(['push', '--profile', 'production'], {
+        prompt: prompt({ deleteConfirmation: 'NOPE' }),
+        runtime: {
+          runPush: async (opts) => {
+            calls.push({ dryRun: opts.dryRun, confirmDeletes: opts.confirmDeletes });
+            return opts.dryRun ? dryRunResult : realResult;
+          },
+        },
+      }),
+    ).rejects.toThrow(/delete confirmation|aborted/i);
+    expect(calls).toEqual([{ dryRun: true, confirmDeletes: undefined }]);
+
+    calls.length = 0;
+    await parse(['push', '--profile', 'production'], {
+      prompt: prompt({ deleteConfirmation: 'DELETE' }),
+      runtime: {
+        runPush: async (opts) => {
+          calls.push({ dryRun: opts.dryRun, confirmDeletes: opts.confirmDeletes });
+          return opts.dryRun ? dryRunResult : realResult;
+        },
+      },
+    });
+
+    expect(calls).toEqual([
+      { dryRun: true, confirmDeletes: undefined },
+      { dryRun: false, confirmDeletes: true },
+    ]);
+    expect(stdout.join('\n')).toContain('Uploaded 0 file(s), deleted 1 file(s)');
   });
 
   it('push --dry-run never triggers the production confirmation gate', async () => {

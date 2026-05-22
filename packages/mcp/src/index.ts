@@ -181,6 +181,12 @@ const pushConfirmSchema = requiredProfileSchema
     plan_id: z.string().min(1),
     diff_hash: z.string().min(1),
     confirm_token: z.string().min(1),
+    acknowledge_deletions: z
+      .literal(true)
+      .optional()
+      .describe(
+        'Required when the prepare step returned one or more plannedDeletes. Must be the literal `true` to apply remote deletes.',
+      ),
     /**
      * v0.6.0 #7: when the prepare step set `prod_profile_warning: true`
      * (profile matched `safety.prod_profile_patterns`), the confirm step
@@ -685,7 +691,10 @@ interface PreparedPushPlan {
   profile: string;
   files?: readonly string[];
   expectedFileCount: number;
+  expectedDeleteCount: number;
   expectedRemoteRoot: string;
+  planned: readonly string[];
+  plannedDeletes: readonly string[];
   /**
    * v0.6.0 #7: true when the profile matched `safety.prod_profile_patterns`
    * at prepare time. When set, `aiftp_push_confirm` requires
@@ -705,14 +714,48 @@ function pruneExpiredPlans(now: number): void {
   }
 }
 
-function hashPlannedFiles(files: readonly string[]): string {
-  const stable = [...files].sort().join('\n');
-  return createHash('sha256').update(stable).digest('hex');
+function sortedCopy(files: readonly string[]): string[] {
+  return [...files].sort((a, b) => a.localeCompare(b));
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const sortedLeft = sortedCopy(left);
+  const sortedRight = sortedCopy(right);
+  return (
+    sortedLeft.length === sortedRight.length &&
+    sortedLeft.every((value, index) => value === sortedRight[index])
+  );
+}
+
+function plannedDeletesOf(result: PushResult): readonly string[] {
+  return result.plannedDeletes ?? [];
+}
+
+function hashPushPlan(input: {
+  profile: string;
+  remoteRoot: string;
+  planned: readonly string[];
+  plannedDeletes: readonly string[];
+}): string {
+  return createHash('sha256')
+    .update(
+      [
+        'aiftp-push-plan-v2',
+        VERSION,
+        `profile=${input.profile}`,
+        `remote_root=${input.remoteRoot}`,
+        '[uploads]',
+        ...sortedCopy(input.planned),
+        '[deletes]',
+        ...sortedCopy(input.plannedDeletes),
+      ].join('\n'),
+    )
+    .digest('hex');
 }
 
 async function executePush(
   app: AiftpMcpApp,
-  args: { profile: string; files?: readonly string[]; dry_run: boolean },
+  args: { profile: string; files?: readonly string[]; dry_run: boolean; confirmDeletes?: boolean },
 ): Promise<PushResult> {
   const config = await loadConfigForMcp(app.cwd);
   const profile = config.profile[args.profile];
@@ -752,10 +795,12 @@ async function executePush(
       remoteRoot: profile.remote_root,
       files: args.files ? [...args.files] : undefined,
       dryRun: args.dry_run,
+      confirmDeletes: args.confirmDeletes,
       safety: {
         maxFilesPerPush: config.safety.max_files_per_push,
         maxTotalSizeBytes: config.safety.max_total_size_mb * 1024 * 1024,
         verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
+        deletionPolicy: config.safety.deletion_policy,
       },
       preflight: (paths) => checkAll(paths),
     });
@@ -794,7 +839,13 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   const now = Date.now();
   pruneExpiredPlans(now);
   const planId = randomUUID();
-  const diffHash = hashPlannedFiles(previewResult.planned);
+  const diffHash = hashPushPlan({
+    profile: profileName,
+    remoteRoot: profile.remote_root,
+    planned: previewResult.planned,
+    plannedDeletes: plannedDeletesOf(previewResult),
+  });
+  const plannedDeletes = plannedDeletesOf(previewResult);
   const confirmToken = randomBytes(24).toString('base64url');
   planStore.set(planId, {
     planId,
@@ -803,7 +854,10 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     profile: profileName,
     files: args.files,
     expectedFileCount: previewResult.planned.length,
+    expectedDeleteCount: plannedDeletes.length,
     expectedRemoteRoot: profile.remote_root,
+    planned: previewResult.planned,
+    plannedDeletes,
     prodProfileWarning,
     createdAt: now,
   });
@@ -814,9 +868,11 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     diff_hash: diffHash,
     confirm_token: confirmToken,
     expected_file_count: previewResult.planned.length,
+    expected_delete_count: plannedDeletes.length,
     expected_remote_root: profile.remote_root,
     diff: previewResult.diff,
     planned: previewResult.planned,
+    plannedDeletes,
     ttl_ms: PLAN_TTL_MS,
     prod_profile_warning: prodProfileWarning,
     ...(prodProfileWarning
@@ -864,6 +920,34 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
       `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
     );
   }
+  if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
+    throw new Error(
+      `Deletion push refused: ${plan.plannedDeletes.length} remote delete(s) were planned. Re-call aiftp_push_confirm with acknowledge_deletions: true.`,
+    );
+  }
+  const preview = await executePush(app, {
+    profile: plan.profile,
+    files: plan.files,
+    dry_run: true,
+  });
+  const currentConfig = await loadConfigForMcp(app.cwd);
+  const currentRemoteRoot =
+    currentConfig.profile[plan.profile]?.remote_root ?? plan.expectedRemoteRoot;
+  const currentDiffHash = hashPushPlan({
+    profile: plan.profile,
+    remoteRoot: currentRemoteRoot,
+    planned: preview.planned,
+    plannedDeletes: plannedDeletesOf(preview),
+  });
+  if (
+    currentDiffHash !== plan.diffHash ||
+    !sameStringSet(preview.planned, plan.planned) ||
+    !sameStringSet(plannedDeletesOf(preview), plan.plannedDeletes)
+  ) {
+    throw new Error(
+      'diff_hash mismatch: the upload/delete plan drifted between prepare and confirm. Call aiftp_push_prepare again to inspect the new plan.',
+    );
+  }
   // Consume the plan before performing the side-effectful push so a second
   // confirm with the same token cannot replay the upload.
   planStore.delete(args.plan_id);
@@ -871,6 +955,7 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     profile: plan.profile,
     files: plan.files,
     dry_run: false,
+    confirmDeletes: plan.plannedDeletes.length > 0,
   });
   if (!result.dryRun) {
     await saveState(stateDir(app.cwd, plan.profile), result.nextState);
@@ -1804,6 +1889,7 @@ interface PreparedRollback {
   snapshotId: string;
   remoteRoot: string;
   planned: readonly string[];
+  plannedDeletes: readonly string[];
   /**
    * The hard-exclude-skipped list captured at prepare. Returned again at
    * confirm so the operator can audit which credentials-bearing files
@@ -1814,6 +1900,28 @@ interface PreparedRollback {
 }
 
 const rollbackPlanStore = new Map<string, PreparedRollback>();
+
+function hashRollbackPlan(input: {
+  snapshotId: string;
+  remoteRoot: string;
+  planned: readonly string[];
+  plannedDeletes: readonly string[];
+}): string {
+  return createHash('sha256')
+    .update(
+      [
+        'aiftp-rollback-plan-v2',
+        VERSION,
+        `snapshot_id=${input.snapshotId}`,
+        `remote_root=${input.remoteRoot}`,
+        '[uploads]',
+        ...sortedCopy(input.planned),
+        '[deletes]',
+        ...sortedCopy(input.plannedDeletes),
+      ].join('\n'),
+    )
+    .digest('hex');
+}
 
 /**
  * Upper bound on outstanding rollback plans. Combined with PLAN_TTL_MS
@@ -1885,9 +1993,12 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     excluder,
     dryRun: true,
   });
-  const diffHash = createHash('sha256')
-    .update(`${target.id}\n${profile.remote_root}\n${preview.planned.join('\n')}`)
-    .digest('hex');
+  const diffHash = hashRollbackPlan({
+    snapshotId: target.id,
+    remoteRoot: profile.remote_root,
+    planned: preview.planned,
+    plannedDeletes: preview.plannedDeletes,
+  });
   const confirmToken = randomBytes(24).toString('base64url');
   const planId = randomUUID();
   const now = Date.now();
@@ -1900,6 +2011,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     snapshotId: target.id,
     remoteRoot: profile.remote_root,
     planned: preview.planned,
+    plannedDeletes: preview.plannedDeletes,
     skipped: preview.skipped.map((s) => ({
       path: s.path,
       reason: s.reason ?? 'hard-exclude',
@@ -1919,6 +2031,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     snapshot_created_at: target.createdAt,
     remote_root: profile.remote_root,
     planned: preview.planned,
+    plannedDeletes: preview.plannedDeletes,
     skipped: preview.skipped.map((s) => ({
       path: s.path,
       remote_path: s.remotePath,
@@ -1979,12 +2092,17 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
     excluder,
     dryRun: true,
   });
-  const expectedPlanned = [...plan.planned].sort();
-  const currentPlanned = [...preview.planned].sort();
-  const sameSet =
-    currentPlanned.length === expectedPlanned.length &&
-    currentPlanned.every((p, i) => p === expectedPlanned[i]);
-  if (!sameSet) {
+  const currentDiffHash = hashRollbackPlan({
+    snapshotId: plan.snapshotId,
+    remoteRoot: plan.remoteRoot,
+    planned: preview.planned,
+    plannedDeletes: preview.plannedDeletes,
+  });
+  if (
+    currentDiffHash !== plan.diffHash ||
+    !sameStringSet(preview.planned, plan.planned) ||
+    !sameStringSet(preview.plannedDeletes, plan.plannedDeletes)
+  ) {
     throw new Error(
       'rollback plan drifted between prepare and confirm (hard-exclude config may have changed). Call aiftp_rollback_prepare again to inspect the new plan.',
     );
@@ -2044,6 +2162,7 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
       plan_id: args.plan_id,
       snapshot_id: plan.snapshotId,
       rolled_back: result.rolledBack.map((r) => r.path),
+      deleted: result.deleted.map((r) => r.path),
       skipped: result.skipped.map((s) => ({
         path: s.path,
         status: s.status,
