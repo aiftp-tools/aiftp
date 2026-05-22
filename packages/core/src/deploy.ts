@@ -10,6 +10,11 @@ export interface StatusOptions {
   localRoot: string;
   state: State;
   excluder: Excluder;
+  /**
+   * v0.9.4+: forwarded to `computeDiff`/`walkFiles`. When omitted,
+   * symlinks are not followed (the prior implicit default).
+   */
+  followSymlinks?: boolean;
 }
 
 export interface StatusResult {
@@ -175,7 +180,9 @@ async function verifyUploadSize(
 }
 
 export async function runStatus(options: StatusOptions): Promise<StatusResult> {
-  const diff = await computeDiff(options.localRoot, options.state, options.excluder);
+  const diff = await computeDiff(options.localRoot, options.state, options.excluder, {
+    followSymlinks: options.followSymlinks,
+  });
   return {
     diff,
     counts: countDiff(diff),
