@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { decryptBuffer, encryptBuffer, generateKey } from '../encryption.js';
 import { createExcluder } from '../exclude.js';
 import {
+  BackupError,
   BackupLimitError,
   type BackupSource,
   BackupStore,
@@ -187,6 +188,55 @@ describe('BackupStore', () => {
     expect(readSnapshot?.counts).toEqual({ added: 0, modified: 2, removed: 0 });
     expect(readSnapshot?.files.map((file) => file.operation)).toEqual(['modified', 'modified']);
     expect(await readFile(manifestPath)).toEqual(before);
+  });
+
+  it('restoreAll succeeds for schema 1 manifests', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html', 'assets/app.css'],
+      removed: [],
+    });
+    const manifestPath = join(tempDir, 'snapshots', snapshot.id, 'manifest.enc');
+    const schema2Manifest = JSON.parse(
+      decryptBuffer(await readFile(manifestPath), store.key).toString('utf8'),
+    ) as Record<string, unknown>;
+    const schema1Manifest = {
+      ...schema2Manifest,
+      schema: 1,
+      counts: undefined,
+      files: (schema2Manifest.files as Array<Record<string, unknown>>).map(
+        ({ operation: _operation, ...file }) => file,
+      ),
+    };
+    await writeFile(
+      manifestPath,
+      encryptBuffer(Buffer.from(JSON.stringify(schema1Manifest, null, 2), 'utf8'), store.key),
+      { mode: 0o600 },
+    );
+
+    const restored = await store.restoreAll(snapshot.id);
+
+    expect(restored).toEqual(
+      new Map([
+        ['assets/app.css', sourceFiles.get('assets/app.css')],
+        ['index.html', sourceFiles.get('index.html')],
+      ]),
+    );
+  });
+
+  it('restoreAll rejects schema 2 added tombstones', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: ['new-page.html'],
+      modified: [],
+      removed: [],
+    });
+
+    await expect(store.restoreAll(snapshot.id)).rejects.toThrow(BackupError);
+    await expect(store.restoreAll(snapshot.id)).rejects.toThrow(
+      /Cannot restore added file tombstone/,
+    );
   });
 
   it('rejects schema 2 manifests with invalid operation metadata', async () => {
