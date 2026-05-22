@@ -443,6 +443,47 @@ describe('mcp', () => {
     expect(calls).toEqual([{ dryRun: true }, { dryRun: true }]);
   });
 
+  it('aiftp_push_confirm rejects delete-only drift before mutation', async () => {
+    await writeConfig({ deletionPolicy: 'prune-auto', warnOnProdProfile: false });
+    let dryRunCount = 0;
+    const calls: Array<{ dryRun?: boolean }> = [];
+    const runtime: AiftpMcpRuntime = {
+      runPush: async (opts) => {
+        calls.push({ dryRun: opts.dryRun });
+        if (opts.dryRun) {
+          dryRunCount += 1;
+          return {
+            dryRun: true,
+            diff: { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] },
+            planned: ['index.html'],
+            plannedDeletes: dryRunCount === 1 ? ['old.html'] : ['extra.html', 'old.html'],
+            uploaded: [],
+            deleted: [],
+            backupSnapshot: null,
+            nextState: { schema: 1, files: {} },
+          };
+        }
+        throw new Error('real mutation must not run after delete-only drift');
+      },
+    };
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_deletions: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/drift|diff_hash/i);
+    expect(calls).toEqual([{ dryRun: true }, { dryRun: true }]);
+  });
+
   it('aiftp_push_confirm requires acknowledge_deletions when deletes are planned', async () => {
     await writeConfig({ deletionPolicy: 'prune-auto', warnOnProdProfile: false });
     const dryRunResult: PushResult = {
@@ -475,6 +516,20 @@ describe('mcp', () => {
 
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toMatch(/acknowledge_deletions|delete/i);
+  });
+
+  it('aiftp_push_confirm schema rejects acknowledge_deletions: false outright', async () => {
+    const result = await callAiftpTool(createAiftpMcp({ cwd }), 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: 'push-plan',
+      diff_hash: 'diff-hash',
+      confirm_token: 'confirm-token',
+      acknowledge_deletions: false,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/acknowledge_deletions/);
+    expect(JSON.stringify(result.content)).toMatch(/expected true/i);
   });
 
   it('aiftp_push_confirm rejects a stale plan_id (already consumed)', async () => {
