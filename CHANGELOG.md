@@ -12,9 +12,87 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-Working toward v0.9.4 (UX / init hardening) and v0.10.0 (snapshot
-semantic redesign). See [the roadmap](docs/roadmap.md) for the
-full sequence.
+Working toward v0.10.0 (snapshot semantic redesign — breaking).
+See [the roadmap](docs/roadmap.md) and
+[`docs/v0.10.0-plan.md`](docs/v0.10.0-plan.md) for the design.
+
+---
+
+## [0.9.4] — 2026-05-22
+
+UX / init hardening patch — four small features bundled together so
+the v0.10.0 snapshot redesign starts from a less footgun-prone base.
+
+### Fixed
+
+- **Default-exclude rules are now actually applied.** Prior to v0.9.4,
+  `DEFAULT_EXCLUDE_PATTERNS` (`.aiftp.toml`, `.aiftp/`, `.git/`) was
+  only respected when the CLI / MCP layers manually merged it into
+  `userPatterns`. The A-7 verification accidentally uploaded the
+  operator's `doctor-*.txt` / `doctor-*.json` files to a Sakura test
+  account because that merge happened in some codepaths but not
+  others. `Excluder` now auto-applies the list internally (controlled
+  by a new `useDefaults` option, default `true`), and the manual
+  merges in CLI / MCP / `default-store.ts` were removed to avoid
+  double-prepending.
+
+### Added
+
+- **Expanded `DEFAULT_EXCLUDE_PATTERNS`**: `doctor-*.{txt,json}`,
+  editor swap files (`*.swp`, `*.swo`, `*~`, `#*#`, `.#*`), OS
+  metadata (`.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`), and
+  VCS metadata (`.gitignore`, `.gitattributes` joined the existing
+  `.git/`). All are gitignore-style soft excludes so an operator
+  who legitimately needs to ship a `.DS_Store` can opt back in via
+  a `!` negation pattern.
+- **`[exclude] use_defaults` config option** (default `true`). Set
+  to `false` in `.aiftp.toml` to skip the defaults entirely.
+- **`[walk] follow_symlinks` config option** (default `false`).
+  The file walker now explicitly documents and controls symlink
+  behaviour. Setting it to `true` lets the walker resolve symlinks
+  via `stat()`, useful for operators sharing fixture directories
+  via `ln -s`. The A-7 verification hit this when
+  `~/aiftp-verify/sakura/index.html` was a symlink and produced
+  `added=0`; opting in now fixes that.
+- **`packages/core/scripts/generate-version.mjs`** auto-generates
+  the runtime `VERSION` constant from `packages/core/package.json`
+  at build time (`prebuild` / `pretypecheck` hooks). The generated
+  file `packages/core/src/version.generated.ts` is gitignored. This
+  closes the "v0.9.2 shipped twice with `aiftp --version` reporting
+  `0.0.0`" footgun: bumping the package version is now enough.
+- **New `aiftp backup init` CLI command**. Creates a fresh
+  AES-256-GCM backup key in the OS keychain for a profile without
+  re-running `aiftp init` (which would overwrite `.aiftp.toml`).
+  Use this after hand-editing `.aiftp.toml` to add a profile. The
+  `--force` flag overwrites an existing key (and breaks all prior
+  encrypted snapshots — there's a loud warning).
+- **Friendlier error from `default-store` when the backup key is
+  missing**: previously surfaced the bare
+  `Keychain entry not found: service=... account=...`; now wraps
+  it in a `BackupError` whose message includes the exact
+  `aiftp backup init --profile <name>` command to fix it. The
+  underlying error is preserved as `cause` for debugging.
+
+### Documentation
+
+- `Excluder.getEffectivePatterns()` now returns the defaults as
+  part of the user-pattern list (per the new auto-apply behaviour).
+  Two tests in `exclude.spec.ts` were updated to reflect the new
+  expectation and a new test was added for the `useDefaults: false`
+  opt-out path.
+- `default-exclude.spec.ts` is new (16 cases covering the A-7
+  leak vector, hard-exclude precedence, user negation, and opt-out).
+
+### Notes
+
+- Test suite at v0.9.4: **530 passed / 3 skipped** across 30 files.
+- No `.aiftp.toml` schema changes beyond the two new optional
+  fields (`exclude.use_defaults`, `walk.follow_symlinks`); existing
+  configs continue to load.
+- v0.10.0 (snapshot semantic redesign — `docs/v0.10.0-plan.md`)
+  remains the next planned release; v0.9.4 closes out the small
+  hardening work first so the v0.10.0 PR series can focus on data
+  model changes.
 
 ---
 
@@ -513,7 +591,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.4
 [0.9.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.3
 [0.9.2]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.2
 [0.9.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.1
