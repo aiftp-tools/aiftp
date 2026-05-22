@@ -6,7 +6,7 @@
 [![CI](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml/badge.svg)](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**Status**: v0.9.2 — verified on Star Server / Sakura / Xserver / Lolipop (Japan). Phase 2 complete (import / watch / hook / multi-profile / rollback).
+**Status**: v0.9.3 — verified on Star Server / Sakura / Xserver / Lolipop (Japan). Phase 2 complete (import / watch / hook / multi-profile / rollback). v0.9.3 adds RFC 6125 wildcard cert matching and the `ftp-auth` doctor check.
 
 ## Two problems aiftp solves
 

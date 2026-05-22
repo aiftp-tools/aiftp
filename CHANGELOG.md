@@ -12,8 +12,77 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-Working toward v0.10.0 then v1.0.0. See
-[the roadmap](docs/roadmap.md) for what's planned next.
+Working toward v0.9.4 (UX / init hardening) and v0.10.0 (snapshot
+semantic redesign). See [the roadmap](docs/roadmap.md) for the
+full sequence.
+
+---
+
+## [0.9.3] — 2026-05-22
+
+Safety hardening patch — two targeted fixes that came out of A-7
+multi-provider verification on the day after v0.9.2 shipped.
+
+### Fixed
+
+- **`certificateMatchesHost` now supports RFC 6125 single-label
+  leading wildcards.** Previously it did exact-string matching only,
+  so `*.sakura.ne.jp` did not match `<user>.sakura.ne.jp` and
+  `ftps-cert: warn` fired spuriously on every Sakura / Xserver /
+  Lolipop hostname (all three use shared wildcard certs). The
+  matcher now follows §6.4.3 of RFC 6125:
+  - exact match always wins
+  - `*.example.com` matches exactly one host label
+    (`foo.example.com`, not `foo.bar.example.com` and not
+    `example.com`)
+  - middle wildcards (`foo.*.example.com`), trailing wildcards
+    (`example.*`), bare `*`, and `*.` are refused
+  - matching is case-insensitive (DNS names are case-insensitive)
+  - both the CN and every SAN are tested
+  See `packages/core/src/diagnostics/cert-match.spec.ts` for the
+  full table of accepted / rejected patterns (22 cases).
+
+### Added
+
+- **`aiftp doctor` now has a dedicated `ftp-auth` check** (split
+  out of `ftps-handshake`). Before v0.9.3 a wrong password and a
+  broken TLS handshake both reported as `ftps-handshake: fail`,
+  which during A-7 verification cost about an hour of debugging a
+  "TLS issue" that was actually a typo'd password. Now:
+  - `ftps-handshake`: TLS layer only — pass if the TLS handshake
+    completes (cert obtained, cipher negotiated)
+  - `ftp-auth`: USER/PASS only — pass if login succeeds, fail with
+    `recommendation: aiftp auth set --profile <name>` if the
+    server returns 530, skip when handshake failed first or the
+    probe stub didn't separate the two phases
+  The CLI's `probeFtps` wrapper classifies `FtpAuthError` /
+  `FtpTlsError` from the core FTP client so the new split is
+  driven by the real underlying error, not by string-matching
+  the message.
+
+### Documentation
+
+- CHANGELOG entry for v0.9.3 lists the cert-match rules
+  explicitly so operators can predict whether their provider's
+  shared cert will pass without `tls_check_hostname=false`.
+
+### Known limitations (still planned for v0.9.4 / v0.10.0)
+
+- VERSION constant in `packages/core/src/index.ts` still has to
+  be hand-bumped alongside the four package.json files; v0.9.4
+  will auto-generate it at build time.
+- `local_root = "."` still walks every file in the working
+  directory; v0.9.4 will introduce a default-exclude list.
+- `aiftp init` is still the only path that creates
+  `.aiftp/backups/`; v0.9.4 will add an auto-init path or a
+  clearer error.
+- Snapshot semantic for added-only push is still metadata-only;
+  v0.10.0 (`docs/v0.10.0-plan.md`) is the redesign.
+
+### Notes
+
+- Test suite at v0.9.3: **508 passed / 3 skipped** across 29 files.
+- No schema changes from v0.9.2 → v0.9.3.
 
 ---
 
@@ -444,7 +513,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.3
 [0.9.2]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.2
 [0.9.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.1
 [0.9.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.0

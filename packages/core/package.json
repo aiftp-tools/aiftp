@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/core",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "description": "aiftp core engine: config, diff, deploy, backup, keychain",
   "license": "MIT",
