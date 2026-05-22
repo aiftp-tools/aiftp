@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/core",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
   "description": "aiftp core engine: config, diff, deploy, backup, keychain",
   "license": "MIT",
@@ -16,7 +16,9 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prebuild": "node scripts/generate-version.mjs",
+    "pretypecheck": "node scripts/generate-version.mjs"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",

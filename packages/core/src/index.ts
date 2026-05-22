@@ -1,4 +1,7 @@
-export const VERSION = '0.9.3';
+// v0.9.4+: VERSION is generated at build time from package.json so
+// `aiftp --version` cannot drift away from the published npm version.
+// See `packages/core/scripts/generate-version.mjs`.
+export { VERSION } from './version.generated.js';
 
 export {
   type BackupFtpClient,

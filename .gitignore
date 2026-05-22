@@ -40,3 +40,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# v0.9.4+: auto-generated VERSION constant (sourced from package.json)
+packages/core/src/version.generated.ts
