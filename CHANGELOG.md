@@ -12,9 +12,49 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-Working toward v0.10.0 (snapshot semantic redesign — breaking).
-See [the roadmap](docs/roadmap.md) and
-[`docs/v0.10.0-plan.md`](docs/v0.10.0-plan.md) for the design.
+(Pending work for v0.10.1+.)
+
+---
+
+## [0.10.0] — TBD
+
+**Breaking release** — Snapshot manifest schema 1 → 2, remote delete/prune semantics, and MCP rollback confirmation contract change.
+
+See [`docs/migration-v0.10.0.md`](docs/migration-v0.10.0.md) for migration guidance.
+
+### Breaking changes
+
+- Snapshot manifest schema bumped to `2`. v0.9.x cannot read schema 2 manifests; downgrade is unsupported once v0.10.0 has written a snapshot to `.aiftp/`. Restore from manual backup of `.aiftp/` if a downgrade is required.
+- `aiftp_rollback_confirm` (MCP) now **requires** `acknowledge_deletions: true` when the corresponding prepare returned `plannedDeletes.length > 0`. Rollback was previously single-factor (`confirm_token`); it is now 2-factor in line with `aiftp_push_confirm`.
+- `diff_hash` format updated to `aiftp-push-plan-v2` / `aiftp-rollback-plan-v2`. The hash input now includes both upload and delete sets. Older hashes are rejected on confirm.
+
+### Added
+
+- **Snapshot schema 2**: per-file `operation` field (`"added" | "modified" | "removed"`) and manifest-level `counts: { added, modified, removed }`. `added` files are recorded as tombstones (no content stored) so rollback can issue a real `delete`.
+- **`[safety].deletion_policy`** config (default `"never"`): `"never"` / `"prune-auto"` / `"prune-with-confirm"`. Default preserves v0.9.x behavior.
+- **CLI `aiftp push --confirm-deletes`** flag, required for `deletion_policy = "prune-with-confirm"` when at least one remote delete is planned. CLI also prompts for typed `DELETE` confirmation before mutating.
+- **CLI `aiftp rollback`** now issues a real remote `delete` for `added` tombstones in the target snapshot. Dry-run output now shows planned deletes alongside planned uploads.
+- **MCP `aiftp_push_prepare` / `aiftp_push_confirm`** now bind `plannedDeletes`, `expected_delete_count`, and re-run the dry-run on confirm to detect drift in both upload and delete sets.
+- **MCP `aiftp_rollback_prepare` / `aiftp_rollback_confirm`** now bind `plannedDeletes`, surface `deleted` in the confirm response, and require `acknowledge_deletions: true` when deletes are planned (see Breaking changes).
+- **New docs**: [`docs/migration-v0.10.0.md`](docs/migration-v0.10.0.md), [`docs/v0.10.0-field-verification.md`](docs/v0.10.0-field-verification.md).
+
+### Changed
+
+- `max_files_per_push` now counts uploads + deletes combined (was upload-only).
+- Hard-exclude (`wp-config.php`, `.env*`, `db.php`, ...) now applies to both upload AND delete planning. Auth-bearing files are NEVER deleted or rolled back.
+- `runPush` schedules upload first, then delete second; snapshot creation happens before any remote mutation (push or delete) so every push remains reversible.
+- `rollback` delete intentionally does NOT swallow `FtpNotFoundError` (FTP 550): on Sakura / Lolipop the same code can also mean "permission denied", so the error surfaces to the caller.
+- MCP `aiftp_push` (direct dry-run tool) now wires `deletion_policy` into the underlying `runPush` `safety` block. Previously direct dry-run preview always showed `plannedDeletes: []`.
+
+### Fixed
+
+- `restoreAll()` JSDoc now documents the schema 2 tombstone throw behavior. (`restoreAll()` itself has no production callers in v0.10.0; the public surface is reserved for future runtime adapters.)
+- Stale `default-store.spec.ts` assertion (`fileCount === 0` for added-only push) aligned with schema 2 semantics (`fileCount === 1` for one tombstone).
+
+### Internal
+
+- New `PushBackupStore` interface in `@aiftp-tools/core` minimizes the backup-store contract that `runPush` requires, eliminating `as unknown as` casts in MCP and CLI runtime/dry-run wiring.
+- `SnapshotCounts` is now re-exported from `@aiftp-tools/core` root index.
 
 ---
 
