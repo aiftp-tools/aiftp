@@ -370,6 +370,20 @@ export class BackupStore {
     return decryptBuffer(await readFile(this.filePath(id, file.storedName)), this.key);
   }
 
+  /**
+   * Restore every file in the snapshot to a Buffer keyed by snapshot-relative path.
+   *
+   * Schema 1 manifests round-trip fully.
+   *
+   * Schema 2 manifests with `operation: 'added'` tombstone entries will throw
+   * BackupError('Cannot restore added file tombstone'). Tombstones have no
+   * stored content because the original file did not exist before the push;
+   * callers needing partial restore must inspect manifest.files and call
+   * restoreFile() selectively for `modified`/`removed` operations only.
+   *
+   * Currently this method has no production callers in v0.10.0 — kept as a
+   * public surface for future use cases (e.g. external runtime adapters).
+   */
   async restoreAll(id: SnapshotId): Promise<Map<string, Buffer>> {
     const manifest = await this.readManifest(id);
     const restored = new Map<string, Buffer>();
