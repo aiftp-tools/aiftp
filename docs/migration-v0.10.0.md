@@ -15,7 +15,7 @@
 | Schema 1 reads | Still supported (read-only). Schema 2 is write-only. |
 | Downgrade | **NOT supported**. Restore from a manual `.aiftp/` backup if you must return to v0.9.x. |
 | `deletion_policy` (new) | Defaults to `"never"` — v0.9.x behavior preserved. Opt in to `"prune-auto"` or `"prune-with-confirm"`. |
-| CLI `push` | dry-run output now shows planned deletes when `deletion_policy ≠ "never"`. New `--confirm-deletes` flag for `"prune-with-confirm"`. |
+| CLI `push` | dry-run output now shows planned deletes when `deletion_policy ≠ "never"`. For `"prune-with-confirm"`, CLI requires a typed `DELETE` prompt before mutation; there is no `--confirm-deletes` flag. |
 | CLI `rollback` | dry-run output now shows planned deletes. Tombstones in target snapshot trigger remote `delete`. |
 | MCP `aiftp_rollback_confirm` | **BREAKING**: when `plannedDeletes > 0`, the call MUST include `acknowledge_deletions: true`. |
 | MCP `diff_hash` | New format `aiftp-rollback-plan-v2` / `aiftp-push-plan-v2` — includes both upload and delete sets. |
@@ -74,7 +74,7 @@ If you must roll back to v0.9.x:
 [safety]
 # "never"             — never delete remote files (v0.9.x behavior, default)
 # "prune-auto"        — delete remote files when the local copy is gone (no extra ack)
-# "prune-with-confirm"— delete only when CLI passes --confirm-deletes / MCP passes acknowledge_deletions
+# "prune-with-confirm"— delete only after CLI typed DELETE / MCP acknowledge_deletions
 deletion_policy = "never"
 ```
 
@@ -92,7 +92,8 @@ deletion_policy = "never"
 
 ### `aiftp push`
 
-- New `--confirm-deletes` flag, required when `deletion_policy = "prune-with-confirm"` and at least one remote delete is planned. The CLI also prompts for a typed `DELETE` confirmation before mutation.
+- When `deletion_policy = "prune-with-confirm"` and at least one remote delete is planned, the CLI requires the operator to type `DELETE` at an interactive prompt before mutation. There is no `--confirm-deletes` CLI flag (typed-prompt is intentionally the only confirmation path).
+- The existing `--yes` flag continues to skip only the production-profile confirmation prompt (it does NOT auto-approve deletions).
 - Dry-run output now lists planned deletes separately:
   ```
   Planned uploads: 5
@@ -182,7 +183,9 @@ npm install -g aiftp@0.10.0   # or pnpm/yarn equivalent
 aiftp doctor --profile production
 
 # 4. Verify config (deletion_policy is "never" by default)
-aiftp config show --profile production
+cat .aiftp.toml
+# Optionally: aiftp doctor --profile production
+#   - doctor will surface a warning if deletion_policy is set to a non-default value.
 
 # 5. Dry-run a push
 aiftp push --profile production --dry-run

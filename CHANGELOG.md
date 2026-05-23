@@ -32,7 +32,7 @@ See [`docs/migration-v0.10.0.md`](docs/migration-v0.10.0.md) for migration guida
 
 - **Snapshot schema 2**: per-file `operation` field (`"added" | "modified" | "removed"`) and manifest-level `counts: { added, modified, removed }`. `added` files are recorded as tombstones (no content stored) so rollback can issue a real `delete`.
 - **`[safety].deletion_policy`** config (default `"never"`): `"never"` / `"prune-auto"` / `"prune-with-confirm"`. Default preserves v0.9.x behavior.
-- **CLI `aiftp push --confirm-deletes`** flag, required for `deletion_policy = "prune-with-confirm"` when at least one remote delete is planned. CLI also prompts for typed `DELETE` confirmation before mutating.
+- **CLI `aiftp push` interactive delete confirmation**: when `deletion_policy = "prune-with-confirm"` and at least one remote delete is planned, the CLI now requires the operator to type `DELETE` at an interactive prompt before mutating. There is no `--confirm-deletes` flag — the typed-prompt is the only confirmation path (intentionally, to prevent muscle-memory `y`/Enter from deleting production files).
 - **CLI `aiftp rollback`** now issues a real remote `delete` for `added` tombstones in the target snapshot. Dry-run output now shows planned deletes alongside planned uploads.
 - **MCP `aiftp_push_prepare` / `aiftp_push_confirm`** now bind `plannedDeletes`, `expected_delete_count`, and re-run the dry-run on confirm to detect drift in both upload and delete sets.
 - **MCP `aiftp_rollback_prepare` / `aiftp_rollback_confirm`** now bind `plannedDeletes`, surface `deleted` in the confirm response, and require `acknowledge_deletions: true` when deletes are planned (see Breaking changes).
