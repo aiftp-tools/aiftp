@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { SnapshotId, SnapshotMeta } from './backup/store.js';
+import type { SnapshotFileMeta, SnapshotId, SnapshotMeta } from './backup/store.js';
 import type { Excluder } from './exclude.js';
+import { type State, removeFileEntry, updateFileEntry } from './state.js';
 
 /**
  * The slice of `BackupStore` that `runRollback` needs. Defined as a
@@ -135,6 +136,11 @@ export interface RollbackOptions {
   backupStore: RollbackBackupStore;
   uploader: RollbackUploader;
   /**
+   * Current local deployment state. Real rollback mutates the remote, so
+   * callers must persist `RollbackResult.nextState` after successful runs.
+   */
+  state?: State;
+  /**
    * Remote path prefix applied to every file's `path` field to compute
    * the destination on the FTP server.
    */
@@ -188,6 +194,11 @@ export interface RollbackResult {
    */
   deleted: RollbackFileResult[];
   /**
+   * State after a successful real rollback. Dry-run returns the input
+   * state unchanged, matching push dry-run semantics.
+   */
+  nextState: State;
+  /**
    * Files skipped (hard-exclude or dry-run) AND files that failed to
    * upload after starting. Failed entries carry `status: 'failed'` and a
    * `reason` describing the underlying error.
@@ -204,6 +215,15 @@ function joinRemote(remoteRoot: string, path: string): string {
 function remoteDirname(remotePath: string): string {
   const idx = remotePath.lastIndexOf('/');
   return idx <= 0 ? '/' : remotePath.slice(0, idx);
+}
+
+function restoreStateEntry(state: State, snapshot: SnapshotMeta, file: SnapshotFileMeta): State {
+  if (file.sha256Original === null || file.sizeOriginal === null) {
+    throw new Error(`Cannot restore state metadata for tombstone entry: ${file.path}`);
+  }
+  return updateFileEntry(state, file.path, file.sha256Original, file.sizeOriginal, {
+    updatedAt: snapshot.createdAt,
+  });
 }
 
 /**
@@ -248,8 +268,13 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
   if (!target) {
     throw new Error(`Rollback target snapshot not found: ${options.snapshotId}.`);
   }
+  const initialState = options.state ?? { schema: 1, files: {} };
 
-  type Classified = { meta: { path: string; size: number }; remotePath: string };
+  type Classified = {
+    file: SnapshotFileMeta;
+    meta: { path: string; size: number };
+    remotePath: string;
+  };
   const uploadList: Classified[] = [];
   const deleteList: Classified[] = [];
   const skipped: RollbackFileResult[] = [];
@@ -273,6 +298,7 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       continue;
     }
     const entry = {
+      file,
       meta: { path: file.path, size },
       remotePath,
     };
@@ -297,12 +323,14 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       plannedDeletes,
       rolledBack: [],
       deleted: [],
+      nextState: initialState,
       skipped,
     };
   }
 
   const rolledBack: RollbackFileResult[] = [];
   const deleted: RollbackFileResult[] = [];
+  let nextState = initialState;
   // mkdir is per-directory cached so we don't redundantly call ensureDir
   // for every file under the same parent. basic-ftp's ensureDir is
   // tolerant of "already exists" but the round-trip cost adds up.
@@ -377,6 +405,7 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       size: entry.meta.size,
       status: 'rolled-back',
     });
+    nextState = restoreStateEntry(nextState, target, entry.file);
   }
 
   for (const entry of deleteList) {
@@ -399,6 +428,7 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       size: entry.meta.size,
       status: 'deleted',
     });
+    nextState = removeFileEntry(nextState, entry.meta.path);
   }
 
   // Sort rolledBack by path for deterministic output (matches `planned`).
@@ -412,6 +442,7 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
     plannedDeletes,
     rolledBack,
     deleted,
+    nextState,
     skipped,
   };
 }

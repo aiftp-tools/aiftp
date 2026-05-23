@@ -160,6 +160,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
     expect(result.dryRun).toBe(false);
     expect(result.snapshotId).toBe(targetSnap.id);
@@ -185,6 +186,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: true,
+      state: { schema: 1, files: {} },
     });
     expect(result.dryRun).toBe(true);
     expect(result.planned.sort()).toEqual(['about.html', 'index.html']);
@@ -217,6 +219,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: true,
+      state: { schema: 1, files: {} },
     });
 
     expect(dryRun.planned).toEqual([]);
@@ -230,6 +233,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
 
     expect(deleted).toEqual(['/public_html/new-page.html']);
@@ -242,6 +246,107 @@ describe('runRollback', () => {
       },
     ]);
     expect(executed.rolledBack).toEqual([]);
+  });
+
+  it('removes state entry after rolling back an added file', async () => {
+    const addedSnap = snap(
+      '2026-05-19T03:00:00.000Z-auto-state-add',
+      '2026-05-19T03:00:00.000Z',
+      'auto',
+      [{ path: 'new-page.html', operation: 'added' }],
+    );
+    const result = await runRollback({
+      snapshotId: addedSnap.id,
+      backupStore: makeStore([addedSnap], new Map([[addedSnap.id, new Map()]])),
+      uploader: {
+        upload: async () => {
+          throw new Error('upload must not be called for added rollback');
+        },
+        delete: async () => undefined,
+      },
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+      state: {
+        schema: 1,
+        files: {
+          'new-page.html': {
+            hash: 'pushed-hash',
+            size: 24,
+            updatedAt: '2026-05-19T03:01:00.000Z',
+          },
+        },
+      },
+    });
+
+    expect(result.nextState.files['new-page.html']).toBeUndefined();
+  });
+
+  it('restores modified state entry from snapshot metadata', async () => {
+    const modifiedSnap = snap(
+      '2026-05-19T04:00:00.000Z-auto-state-mod',
+      '2026-05-19T04:00:00.000Z',
+      'auto',
+      [{ path: 'index.html', operation: 'modified', size: 7 }],
+    );
+    const result = await runRollback({
+      snapshotId: modifiedSnap.id,
+      backupStore: makeStore(
+        [modifiedSnap],
+        new Map([[modifiedSnap.id, new Map([['index.html', Buffer.from('old-new')]])]]),
+      ),
+      uploader: {
+        upload: async () => undefined,
+      },
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+      state: {
+        schema: 1,
+        files: {
+          'index.html': {
+            hash: 'pushed-hash',
+            size: 99,
+            updatedAt: '2026-05-19T04:01:00.000Z',
+          },
+        },
+      },
+    });
+
+    expect(result.nextState.files['index.html']).toEqual({
+      hash: 'a'.repeat(64),
+      size: 7,
+      updatedAt: modifiedSnap.createdAt,
+    });
+  });
+
+  it('recreates removed state entry from snapshot metadata', async () => {
+    const removedSnap = snap(
+      '2026-05-19T05:00:00.000Z-auto-state-rem',
+      '2026-05-19T05:00:00.000Z',
+      'auto',
+      [{ path: 'deleted-page.html', operation: 'removed', size: 8 }],
+    );
+    const result = await runRollback({
+      snapshotId: removedSnap.id,
+      backupStore: makeStore(
+        [removedSnap],
+        new Map([[removedSnap.id, new Map([['deleted-page.html', Buffer.from('old-new!')]])]]),
+      ),
+      uploader: {
+        upload: async () => undefined,
+      },
+      remoteRoot: '/public_html',
+      excluder: createExcluder(),
+      dryRun: false,
+      state: { schema: 1, files: {} },
+    });
+
+    expect(result.nextState.files['deleted-page.html']).toEqual({
+      hash: 'a'.repeat(64),
+      size: 8,
+      updatedAt: removedSnap.createdAt,
+    });
   });
 
   it('restores removed snapshot entries by uploading their snapshot content', async () => {
@@ -269,6 +374,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
 
     expect(result.planned).toEqual(['deleted-page.html']);
@@ -313,6 +419,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
     // index.html OK, the two auth-bearing files MUST be in skipped with reason=hard-exclude
     expect(uploads).toEqual(['/public_html/index.html']);
@@ -351,6 +458,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
 
     expect(calls).toEqual([]);
@@ -418,6 +526,7 @@ describe('runRollback', () => {
         remoteRoot: '/public_html',
         excluder: createExcluder(),
         dryRun: false,
+        state: { schema: 1, files: {} },
       });
 
       expect(result.planned).toEqual(['assets/app.css', 'index.html']);
@@ -451,6 +560,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
 
     expect(result.deleted).toEqual([]);
@@ -492,6 +602,7 @@ describe('runRollback', () => {
         remoteRoot: '/public_html',
         excluder: createExcluder(),
         dryRun: false,
+        state: { schema: 1, files: {} },
       }),
     ).rejects.toThrow(/not found or permission denied/);
   });
@@ -513,6 +624,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: true,
+      state: { schema: 1, files: {} },
     });
     const second = await runRollback({
       snapshotId: targetSnap.id,
@@ -521,6 +633,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: true,
+      state: { schema: 1, files: {} },
     });
     expect(first.planned).toEqual(second.planned);
   });
@@ -554,6 +667,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
     // Every upload goes to a tmp path containing `.aiftp-rb-`, then is
     // renamed to the final path.
@@ -588,6 +702,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
     // Both files are under /public_html — mkdir should be called once.
     expect(mkdirCalls).toEqual(['/public_html']);
@@ -622,6 +737,7 @@ describe('runRollback', () => {
       remoteRoot: '/public_html',
       excluder: createExcluder(),
       dryRun: false,
+      state: { schema: 1, files: {} },
     });
     expect(result.rolledBack.map((r) => r.path)).toEqual([
       'a-first.html',
@@ -656,6 +772,7 @@ describe('runRollback', () => {
         remoteRoot: '/public_html',
         excluder: createExcluder(),
         dryRun: false,
+        state: { schema: 1, files: {} },
       }),
     ).rejects.toThrow(/rollback failed/i);
     // Orphan tmp from the failed second upload must have been unlinked.
