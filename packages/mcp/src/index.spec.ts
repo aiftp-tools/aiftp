@@ -1914,6 +1914,55 @@ describe('mcp', () => {
     expect(deletes).toEqual([]);
   });
 
+  it('aiftp_rollback_confirm persists rollback nextState to state.json', async () => {
+    await writeConfig();
+    const statePath = join(cwd, '.aiftp', 'state', 'production', 'state.json');
+    await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema: 1,
+        files: {
+          'index.html': {
+            hash: 'pushed-hash',
+            size: 99,
+            updatedAt: '2026-05-19T01:01:00.000Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+
+    await expect(readFile(statePath, 'utf8')).resolves.toBe(
+      `${JSON.stringify(
+        {
+          schema: 1,
+          files: {
+            'index.html': {
+              hash: 'sha256:index.html',
+              size: 12,
+              updatedAt: '2026-05-19T01:00:00.000Z',
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  });
+
   it('aiftp_rollback_confirm schema rejects acknowledge_deletions: false outright', async () => {
     await writeConfig();
     const result = await callAiftpTool(createAiftpMcp({ cwd }), 'aiftp_rollback_confirm', {

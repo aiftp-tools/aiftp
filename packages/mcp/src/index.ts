@@ -2007,6 +2007,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     snapshotId: target.id,
     backupStore: rollbackStore,
     uploader: { upload: async () => undefined },
+    state: await loadState(stateDir(app.cwd, profileName)),
     remoteRoot: profile.remote_root,
     excluder,
     dryRun: true,
@@ -2111,6 +2112,7 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
     snapshotId: plan.snapshotId,
     backupStore: rollbackStore,
     uploader: { upload: async () => undefined },
+    state: await loadState(stateDir(app.cwd, profileName)),
     remoteRoot: plan.remoteRoot,
     excluder,
     dryRun: true,
@@ -2167,10 +2169,12 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
       snapshotId: plan.snapshotId,
       backupStore: rollbackStore,
       uploader,
+      state: await loadState(stateDir(app.cwd, profileName)),
       remoteRoot: plan.remoteRoot,
       excluder,
       dryRun: false,
     });
+    await saveState(stateDir(app.cwd, profileName), result.nextState);
     await appendLogEntry(app.cwd, {
       at: new Date().toISOString(),
       event: 'rollback',
