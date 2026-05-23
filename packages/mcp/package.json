@@ -1,15 +1,25 @@
 {
   "name": "@aiftp-tools/mcp",
   "version": "0.10.0",
-  "private": true,
-  "description": "aiftp MCP server (stdio)",
+  "description": "aiftp MCP server (stdio) — AI-first FTP/FTPS deploy via Model Context Protocol",
   "license": "MIT",
+  "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
+  "homepage": "https://github.com/aiftp-tools/aiftp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiftp-tools/aiftp.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/aiftp-tools/aiftp/issues"
+  },
+  "keywords": ["ftp", "ftps", "deploy", "ai", "mcp", "claude", "cursor", "aiftp"],
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
   },
@@ -22,5 +32,11 @@
     "@aiftp-tools/core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
