@@ -556,6 +556,7 @@ async function defaultRunRollback(
   if (!profile) {
     throw new Error(`Profile not found: ${options.profile}`);
   }
+  const state = await loadState(stateDir(options.cwd, options.profile));
   const backupStore = await createDefaultBackupStore({
     cwd: options.cwd,
     profileName: options.profile,
@@ -612,6 +613,7 @@ async function defaultRunRollback(
       snapshotId: target.id,
       backupStore: rollbackStore,
       uploader,
+      state,
       remoteRoot: profile.remote_root,
       excluder: createExcluder({
         userPatterns: config.exclude.patterns,
@@ -2120,14 +2122,19 @@ export function createCli(options: CliOptions = {}): Command {
           writeDryRunPathSection(stdout, 'Uploads', result.planned);
           writeDryRunPathSection(stdout, 'Deletes', plannedDeletes);
         } else {
+          const deleted = result.deleted ?? [];
           stdout(
-            `Rollback to snapshot ${result.snapshotId}: ${result.rolledBack.length} file(s) uploaded.`,
+            `Rollback to snapshot ${result.snapshotId}: ${result.rolledBack.length} file(s) uploaded, ${deleted.length} file(s) deleted.`,
           );
           // Non-dry-run: show what WAS uploaded (rolledBack, sorted by
           // path so failures don't leave us reporting wrong file names).
           for (const r of result.rolledBack) {
             stdout(`  + ${r.path}`);
           }
+          for (const r of deleted) {
+            stdout(`  - ${r.path}`);
+          }
+          await saveState(stateDir(cwd, profileName), result.nextState);
         }
         if (result.skipped.length > 0) {
           stdout('');

@@ -1474,6 +1474,7 @@ describe('cli', () => {
         plannedDeletes: ['old.html'],
         rolledBack: [],
         deleted: [],
+        nextState: { schema: 1, files: {} },
         skipped: [
           {
             path: '.env',
@@ -1493,6 +1494,56 @@ describe('cli', () => {
     expect(out).toMatch(/old\.html/);
     expect(out).toMatch(/\.env/);
     expect(out).toMatch(/skipped|hard-exclude/i);
+  });
+
+  it('rollback --steps 1 real-run shows uploaded and deleted files, then persists state', async () => {
+    await writeConfig();
+    const nextState = {
+      schema: 1 as const,
+      files: {
+        'index.html': {
+          hash: 'a'.repeat(64),
+          size: 12,
+          updatedAt: '2026-05-19T01:00:00.000Z',
+        },
+      },
+    };
+    const runtime: CliRuntime = {
+      runRollback: async (options) => ({
+        dryRun: options.dryRun,
+        snapshotId: '2026-05-19T01:00:00.000Z-auto-bbb',
+        planned: ['index.html'],
+        plannedDeletes: ['old.html'],
+        rolledBack: [
+          {
+            path: 'index.html',
+            remotePath: '/public_html/index.html',
+            size: 12,
+            status: 'rolled-back',
+          },
+        ],
+        deleted: [
+          {
+            path: 'old.html',
+            remotePath: '/public_html/old.html',
+            size: 0,
+            status: 'deleted',
+          },
+        ],
+        nextState,
+        skipped: [],
+      }),
+    };
+
+    await parse(['rollback', '--steps', '1'], { runtime });
+
+    const out = stdout.join('\n');
+    expect(out).toMatch(/1 file\(s\) uploaded, 1 file\(s\) deleted/);
+    expect(out).toMatch(/\+ index\.html/);
+    expect(out).toMatch(/- old\.html/);
+    await expect(
+      readFile(join(cwd, '.aiftp', 'state', 'production', 'state.json'), 'utf8'),
+    ).resolves.toBe(`${JSON.stringify(nextState, null, 2)}\n`);
   });
 
   it('rollback refuses both --steps and --snapshot-id at the same time (mutual exclusion)', async () => {
