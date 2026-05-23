@@ -16,7 +16,7 @@ Release tags live in the GitHub repository:
 
 ---
 
-## [0.10.0] — TBD
+## [0.10.0] — 2026-05-23
 
 **Breaking release** — Snapshot manifest schema 1 → 2, remote delete/prune semantics, and MCP rollback confirmation contract change.
 
