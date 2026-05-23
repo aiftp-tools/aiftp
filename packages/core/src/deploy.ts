@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
-import type { AutoSnapshotInput, BackupStore, SnapshotMeta } from './backup/store.js';
+import type { AutoSnapshotInput, SnapshotMeta } from './backup/store.js';
 import { type Diff, computeDiff } from './diff.js';
 import type { Excluder } from './exclude.js';
 import { PreflightError, type PreflightReport } from './preflight.js';
@@ -37,6 +37,10 @@ export interface DeployLock {
   release(): Promise<void>;
 }
 
+export interface PushBackupStore {
+  createAutoSnapshot(input: AutoSnapshotInput): Promise<SnapshotMeta>;
+}
+
 export interface PushSafetyOptions {
   maxFilesPerPush?: number;
   maxTotalSizeBytes?: number;
@@ -47,7 +51,7 @@ export interface PushSafetyOptions {
 export type DeletionPolicy = 'never' | 'prune-with-confirm' | 'prune-auto';
 
 export interface PushOptions extends StatusOptions {
-  backupStore: BackupStore;
+  backupStore: PushBackupStore;
   uploader: DeployUploader;
   remoteRoot?: string;
   files?: readonly string[];

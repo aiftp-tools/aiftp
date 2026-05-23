@@ -140,6 +140,7 @@ export {
   type DeployUploader,
   DeployVerificationError,
   type DeletionPolicy,
+  type PushBackupStore,
   type PushOptions,
   type PushResult,
   type PushSafetyOptions,
