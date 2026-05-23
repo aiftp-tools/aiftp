@@ -385,6 +385,24 @@ function isPushBackupStore(
   return typeof store?.createAutoSnapshot === 'function';
 }
 
+function writeDryRunPathSection(
+  stdout: (message: string) => void,
+  title: string,
+  paths: readonly string[],
+): void {
+  if (paths.length === 0) {
+    return;
+  }
+  stdout(`  ${title}:`);
+  for (const path of paths.slice(0, 10)) {
+    stdout(`    - ${path}`);
+  }
+  const remaining = paths.length - 10;
+  if (remaining > 0) {
+    stdout(`  ... and ${remaining} more`);
+  }
+}
+
 async function createDefaultFtpClient(
   cwd: string,
   profileName: string,
@@ -2093,13 +2111,14 @@ export function createCli(options: CliOptions = {}): Command {
           runtime.runRollback ?? ((opts: CliRollbackOptions) => defaultRunRollback(opts, keychain));
         const result = await runner(cliOptions);
         if (result.dryRun) {
+          const plannedDeletes = result.plannedDeletes ?? [];
+          const deleteSummary =
+            plannedDeletes.length > 0 ? `, ${plannedDeletes.length} file(s) would be deleted` : '';
           stdout(
-            `Dry-run rollback to snapshot ${result.snapshotId}: ${result.planned.length} file(s) would be uploaded.`,
+            `Dry-run rollback to snapshot ${result.snapshotId}: ${result.planned.length} file(s) would be uploaded${deleteSummary}.`,
           );
-          // Dry-run: show what WOULD be uploaded (planned).
-          for (const planned of result.planned) {
-            stdout(`  + ${planned}`);
-          }
+          writeDryRunPathSection(stdout, 'Uploads', result.planned);
+          writeDryRunPathSection(stdout, 'Deletes', plannedDeletes);
         } else {
           stdout(
             `Rollback to snapshot ${result.snapshotId}: ${result.rolledBack.length} file(s) uploaded.`,

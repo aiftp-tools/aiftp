@@ -1471,7 +1471,9 @@ describe('cli', () => {
         dryRun: options.dryRun,
         snapshotId: '2026-05-19T01:00:00.000Z-auto-bbb',
         planned: ['index.html'],
+        plannedDeletes: ['old.html'],
         rolledBack: [],
+        deleted: [],
         skipped: [
           {
             path: '.env',
@@ -1487,6 +1489,8 @@ describe('cli', () => {
     const out = stdout.join('\n');
     expect(out).toMatch(/dry-run/i);
     expect(out).toMatch(/index\.html/);
+    expect(out).toMatch(/1 file\(s\) would be deleted/);
+    expect(out).toMatch(/old\.html/);
     expect(out).toMatch(/\.env/);
     expect(out).toMatch(/skipped|hard-exclude/i);
   });
