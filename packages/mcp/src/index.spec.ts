@@ -12,6 +12,17 @@ import {
   readAiftpResource,
 } from './index.js';
 
+function createPushResult(overrides?: Partial<PushResult>): PushResult {
+  return {
+    planned: [],
+    plannedDeletes: [],
+    uploaded: [],
+    deleted: [],
+    backupSnapshot: null,
+    ...overrides,
+  };
+}
+
 type TestSnapshotFile = Awaited<
   ReturnType<AiftpBackupStore['listSnapshots']>
 >[number]['files'][number];
@@ -167,14 +178,12 @@ describe('mcp', () => {
 
   it('aiftp_push supports dry-run and persists state only for real pushes', async () => {
     await writeConfig();
-    const pushResult: PushResult = {
+    const pushResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async () => pushResult,
     };
@@ -248,14 +257,12 @@ describe('mcp', () => {
 
   it('aiftp_push_prepare returns plan_id, diff_hash, confirm_token, and expected counts', async () => {
     await writeConfig();
-    const pushResult: PushResult = {
+    const pushResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html', 'about.html'], modified: [], removed: [], unchanged: [] },
       planned: ['about.html', 'index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async () => pushResult,
     };
@@ -274,15 +281,13 @@ describe('mcp', () => {
 
   it('aiftp_push_prepare evicts the oldest outstanding plan when the store reaches its cap', async () => {
     await writeConfig({ warnOnProdProfile: false });
-    const dryRunResult: PushResult = {
+    const dryRunResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
-    const realResult: PushResult = {
+    });
+    const realResult = createPushResult({
       ...dryRunResult,
       dryRun: false,
       uploaded: [
@@ -294,7 +299,7 @@ describe('mcp', () => {
           hash: 'h',
         },
       ],
-    };
+    });
     const app = createAiftpMcp({
       cwd,
       runtime: {
@@ -364,16 +369,13 @@ describe('mcp', () => {
 
   it('aiftp_push_prepare includes upload and delete preview', async () => {
     await writeConfig({ deletionPolicy: 'prune-auto' });
-    const pushResult: PushResult = {
+    const pushResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] },
       planned: ['index.html'],
       plannedDeletes: ['old.html'],
-      uploaded: [],
-      deleted: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async (opts) => {
         expect(opts.safety?.deletionPolicy).toBe('prune-auto');
@@ -394,15 +396,13 @@ describe('mcp', () => {
 
   it('aiftp_push_confirm requires matching plan_id, diff_hash, and confirm_token', async () => {
     await writeConfig();
-    const dryRunResult: PushResult = {
+    const dryRunResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
-    const realResult: PushResult = {
+    });
+    const realResult = createPushResult({
       ...dryRunResult,
       dryRun: false,
       uploaded: [
@@ -415,7 +415,7 @@ describe('mcp', () => {
         },
       ],
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async (opts) => (opts.dryRun ? dryRunResult : realResult),
       createBackupStore: async () => ({
@@ -493,7 +493,7 @@ describe('mcp', () => {
         calls.push({ dryRun: opts.dryRun });
         if (opts.dryRun) {
           dryRunCount += 1;
-          return {
+          return createPushResult({
             dryRun: true,
             diff:
               dryRunCount === 1
@@ -506,11 +506,8 @@ describe('mcp', () => {
                   },
             planned: dryRunCount === 1 ? ['index.html'] : ['changed.html'],
             plannedDeletes: dryRunCount === 1 ? ['old.html'] : ['extra.html', 'old.html'],
-            uploaded: [],
-            deleted: [],
-            backupSnapshot: null,
             nextState: { schema: 1, files: {} },
-          };
+          });
         }
         throw new Error('real mutation must not run after drift');
       },
@@ -542,16 +539,13 @@ describe('mcp', () => {
         calls.push({ dryRun: opts.dryRun });
         if (opts.dryRun) {
           dryRunCount += 1;
-          return {
+          return createPushResult({
             dryRun: true,
             diff: { added: ['index.html'], modified: [], removed: ['old.html'], unchanged: [] },
             planned: ['index.html'],
             plannedDeletes: dryRunCount === 1 ? ['old.html'] : ['extra.html', 'old.html'],
-            uploaded: [],
-            deleted: [],
-            backupSnapshot: null,
             nextState: { schema: 1, files: {} },
-          };
+          });
         }
         throw new Error('real mutation must not run after delete-only drift');
       },
@@ -576,16 +570,13 @@ describe('mcp', () => {
 
   it('aiftp_push_confirm requires acknowledge_deletions when deletes are planned', async () => {
     await writeConfig({ deletionPolicy: 'prune-auto', warnOnProdProfile: false });
-    const dryRunResult: PushResult = {
+    const dryRunResult = createPushResult({
       dryRun: true,
       diff: { added: [], modified: [], removed: ['old.html'], unchanged: [] },
       planned: [],
       plannedDeletes: ['old.html'],
-      uploaded: [],
-      deleted: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async (opts) => {
         if (opts.dryRun) return dryRunResult;
@@ -624,14 +615,12 @@ describe('mcp', () => {
 
   it('aiftp_push_confirm rejects a stale plan_id (already consumed)', async () => {
     await writeConfig();
-    const pushResult: PushResult = {
+    const pushResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const runtime: AiftpMcpRuntime = {
       runPush: async (opts) =>
         opts.dryRun
@@ -671,14 +660,12 @@ describe('mcp', () => {
 
   it('aiftp_push_prepare surfaces prod_profile_warning when the profile matches a prod pattern', async () => {
     await writeConfig();
-    const pushResult: PushResult = {
+    const pushResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const app = createAiftpMcp({ cwd, runtime: { runPush: async () => pushResult } });
     const parsed = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
@@ -710,14 +697,12 @@ describe('mcp', () => {
 
   it('aiftp_push_confirm refuses a prod-profile plan without acknowledge_production: true', async () => {
     await writeConfig();
-    const dryRunResult: PushResult = {
+    const dryRunResult = createPushResult({
       dryRun: true,
       diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
       planned: ['index.html'],
-      uploaded: [],
-      backupSnapshot: null,
       nextState: { schema: 1, files: {} },
-    };
+    });
     const app = createAiftpMcp({
       cwd,
       runtime: {
