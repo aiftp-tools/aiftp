@@ -1,6 +1,6 @@
 # Server compatibility matrix
 
-> Status as of v0.9.3. Last updated 2026-05-22.
+> Status as of v0.10.0 (release candidate). Last updated 2026-05-23.
 
 aiftp's safety story is only as good as how well it handles each
 real-world FTPS server's quirks. This page records what's actually been
@@ -123,8 +123,8 @@ Provider verification status against the
 | Provider | doctor | initial push | modify push | prune w/ confirm | rollback restore | rollback delete | hard-exclude | Notes |
 |---|---|---|---|---|---|---|---|---|
 | **ロリポップ！** (Light, trial) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 2026-05-23. Schema 2 tombstone snapshot (`files=N bytes=0`), `modified`/`removed` snapshots carry old remote content (`bytes>0`). Typed `DELETE` prompt fired. Rollback verified end-to-end via independent raw FTPS LIST (Python `ftplib` + Keychain decode). Two P1 issues surfaced during this run (CLI rollback real-run output missing `deleted` count; `state.json` not updated after rollback) and were fixed in v0.10.0 before tag (commits `a71e659` / `fa674f4` / `1794cfe`), then re-verified on the same Lolipop workspace. |
-| **さくらインターネット** (Standard, trial) | — | — | — | — | — | — | — | Target: before 2026-06-04 trial deadline. |
-| **エックスサーバー** (Standard, trial) | — | — | — | — | — | — | — | Target: before 2026-05-31 trial deadline. |
+| **さくらインターネット** (Standard, trial) | ✅ | ✅ | ✅ | ✅¹ | ✅ | ✅ | ✅ | 2026-05-23. doctor 11/2/0 (mlsd warn only). All 7 steps pass on `oliveferret65.sakura.ne.jp`. ¹ Step 4 prune validated via Step 6 rollback-delete code path (shares the same remote DELETE implementation). Pre-existing state.json drift from v0.9.2 testing (`test-v092.html`) detected but `deletion_policy="never"` makes it inert — does not block release. |
+| **エックスサーバー** (Standard, trial) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 2026-05-23. doctor 12/1/0 (mlsd warn only). All 7 steps pass on `sv17099.xserver.jp`, `remote_root = /aiftp.xsrv.jp/public_html/aiftp-test-v0100/`. Step 4 verified by cleaning up an unintended `.aiftp.toml.before-v0100` backup file (see F-X1 below). Hard-exclude (`wp-config.php`) verified absent from both upload and delete plans. v0.9.3 wildcard match handles `*.xserver.jp` → `sv<N>.xserver.jp` cleanly (no quirk needed). |
 
 ### Verification method
 
@@ -141,6 +141,42 @@ For each provider, Claude Lead walks 田中さん through `docs/v0.10.0-field-ve
 - Rollback to `09-52-58` snapshot: hello restored to 260 B (verified by raw FTPS LIST).
 - Rollback to `10-20-40` snapshot: `new-page-v0100.html` removed from remote (verified by raw FTPS LIST: `/test-v0100/` only contains `about-v0100.html` and `hello-v0100.html`).
 - Hard-exclude guard: a sentinel `wp-config.php` placed in the test directory was correctly excluded from both upload and delete planning.
+
+### Live trace artifact (Xserver, 2026-05-23)
+
+- Workspace: `~/aiftp-verify/xserver/`
+- `host = sv17099.xserver.jp`, `remote_root = /aiftp.xsrv.jp/public_html/aiftp-test-v0100/`
+- Snapshots created (4 total):
+  - `14-04-20-...-288f2b04` — initial push of 3 fixtures + 1 unintended `.aiftp.toml.before-v0100` (`files=4 bytes=0`, all tombstones)
+  - `14-17-10-...-a2a70213` — prune push removing `.aiftp.toml.before-v0100` (`files=1 bytes=1155`, pre-deletion content)
+  - `14-22-34-...-5999a38e` — modified push of `hello-v0100.html` (`files=1 bytes=157`, pre-modification content)
+  - `14-28-04-...-99431edd` — added push of `new-page-v0100.html` + re-modified `hello-v0100.html` (`files=2 bytes=157`)
+- Rollback to `14-22-34` snapshot: hello restored from 207 → 157 B (verified by `aiftp ls`).
+- Rollback to `14-28-04` snapshot: `new-page-v0100.html` deleted from remote, hello restored from 207 → 157 B (verified by `aiftp ls`).
+- Hard-exclude guard: `wp-config.php` sentinel correctly excluded from both upload and delete planning.
+
+### Live trace artifact (Sakura, 2026-05-23)
+
+- Workspace: `~/aiftp-verify/sakura/`
+- `host = oliveferret65.sakura.ne.jp`, `remote_root = /home/oliveferret65/www/aiftp-test-v0100/`
+- Snapshots created (3 new):
+  - `14-41-58-...-b90ff3dc` — initial push of 3 fixtures (`files=3 bytes=0`, all tombstones)
+  - `14-43-37-...-52806ade` — modified push of `hello-v0100.html` (`files=1 bytes=156`, pre-modification content)
+  - `14-46-21-...-c90de1cc` — added push of `new-page-v0100.html` + re-modified hello (`files=2 bytes=156`)
+- Rollback to `14-43-37` snapshot: hello restored from 209 → 156 B (verified by `aiftp ls`).
+- Rollback to `14-46-21` snapshot: `new-page-v0100.html` deleted from remote, hello restored from 209 → 156 B.
+- Hard-exclude guard: `wp-config.php` sentinel correctly excluded.
+- Pre-existing drift: state.json contained a stale `test-v092.html` entry from a v0.9.2 test that was manually deleted from remote. Reported as `removed` in every dry-run but `plannedDeletes` stays empty because `deletion_policy="never"`. Tracked separately (does not block v0.10.0).
+
+### Findings (Xserver / Sakura, 2026-05-23)
+
+| ID | Severity | Subject | Disposition |
+|---|---|---|---|
+| F-X1 | P3 | `DEFAULT_EXCLUDE_PATTERNS` only matches the literal filename `.aiftp.toml.bak`, not arbitrary suffixes such as `.aiftp.toml.before-v0100`. A backup file made with a custom suffix was uploaded to Xserver's `aiftp-test-v0100/` and had to be pruned out. | Add glob `.aiftp.toml*` to `DEFAULT_EXCLUDE_PATTERNS` in v0.10.1+. Does not block v0.10.0. |
+| F-X2 | docs | `local_root = "."` means anything under the working directory is in scope — moving a backup into a sibling subdirectory (`_archive-2026-05-22/`) does NOT exclude it. The workaround is to move it OUTSIDE the working directory entirely. | Add to `docs/v0.10.0-field-verification.md` Step 4 / cleanup notes. |
+| F-X3 | info | aiftp does **not** follow symlinks during push (safe-by-default behaviour). A symlink to a fixture in a sibling directory was silently skipped. | Document explicitly in `docs/spec.md` push section. |
+| F-X4 | info | Snapshot listing displays `bytes=0` for tombstone-only snapshots (the snapshot for "initial push of 3 added files" shows `files=3 bytes=0` because all entries are tombstones). Cosmetic only — `aiftp backup show` correctly reports per-file content. | Already tracked from Lolipop verification; UI improvement deferred. |
+| F-S1 | info | state.json drift from prior version testing surfaces as a phantom `removed` entry in every dry-run. Inert when `deletion_policy = "never"`; would attempt a remote delete under `prune-auto` / `prune-with-confirm`. | Recommend `aiftp init --reset-state` or equivalent for users upgrading from v0.9.x mid-test-cycle. |
 
 ## Generic / VPS
 
