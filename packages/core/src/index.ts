@@ -20,6 +20,7 @@ export {
   type BackupStoreOptions,
   type FileOperation,
   isValidSnapshotId,
+  type SnapshotCounts,
   type SnapshotFileMeta,
   type SnapshotId,
   type SnapshotMeta,
