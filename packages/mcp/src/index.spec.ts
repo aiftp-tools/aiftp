@@ -272,6 +272,96 @@ describe('mcp', () => {
     expect(parsed.profile).toBe('production');
   });
 
+  it('aiftp_push_prepare evicts the oldest outstanding plan when the store reaches its cap', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRunResult: PushResult = {
+      dryRun: true,
+      diff: { added: ['index.html'], modified: [], removed: [], unchanged: [] },
+      planned: ['index.html'],
+      uploaded: [],
+      backupSnapshot: null,
+      nextState: { schema: 1, files: {} },
+    };
+    const realResult: PushResult = {
+      ...dryRunResult,
+      dryRun: false,
+      uploaded: [
+        {
+          path: 'index.html',
+          localPath: 'idx',
+          remotePath: '/public_html/index.html',
+          size: 42,
+          hash: 'h',
+        },
+      ],
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) => (opts.dryRun ? dryRunResult : realResult),
+        createBackupStore: async () => ({
+          listSnapshots: async () => [],
+          verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+          prune: async () => [],
+          restoreFile: async () => Buffer.alloc(0),
+          createAutoSnapshot: async () => ({
+            id: 'stub-snap',
+            type: 'auto',
+            createdAt: '2026-05-19T00:00:00.000Z',
+            fileCount: 0,
+            totalBytes: 0,
+            files: [],
+          }),
+        }),
+      },
+    });
+    const prepared: Array<{
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+    }> = [];
+
+    for (let index = 0; index < 51; index += 1) {
+      prepared.push(
+        parseText(await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' })) as {
+          plan_id: string;
+          diff_hash: string;
+          confirm_token: string;
+        },
+      );
+    }
+
+    const evicted = prepared[0];
+    const evictedConfirm = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: evicted.plan_id,
+      diff_hash: evicted.diff_hash,
+      confirm_token: evicted.confirm_token,
+    });
+    expect(evictedConfirm.isError).toBe(true);
+    expect(JSON.stringify(evictedConfirm.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+
+    const retained = prepared.at(-1);
+    expect(retained).toBeDefined();
+    const retainedConfirm = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: retained?.plan_id,
+      diff_hash: retained?.diff_hash,
+      confirm_token: retained?.confirm_token,
+    });
+    if (retainedConfirm.isError) {
+      throw new Error(
+        `retained plan failed unexpectedly: ${JSON.stringify(retainedConfirm.content)}`,
+      );
+    }
+    expect(parseText(retainedConfirm)).toMatchObject({
+      ok: true,
+      result: {
+        dryRun: false,
+      },
+    });
+  });
+
   it('aiftp_push_prepare includes upload and delete preview', async () => {
     await writeConfig({ deletionPolicy: 'prune-auto' });
     const pushResult: PushResult = {

@@ -717,6 +717,7 @@ interface PreparedPushPlan {
 }
 
 const PLAN_TTL_MS = 5 * 60 * 1000;
+const PUSH_PLAN_STORE_LIMIT = 50;
 const planStore = new Map<string, PreparedPushPlan>();
 
 function pruneExpiredPlans(now: number): void {
@@ -873,6 +874,11 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     prodProfileWarning,
     createdAt: now,
   });
+  while (planStore.size > PUSH_PLAN_STORE_LIMIT) {
+    const oldest = planStore.keys().next().value;
+    if (oldest === undefined) break;
+    planStore.delete(oldest);
+  }
   return textResult({
     ok: true,
     profile: profileName,
