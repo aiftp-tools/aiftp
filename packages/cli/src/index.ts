@@ -10,6 +10,7 @@ import {
   FtpClient,
   FtpTlsError,
   type ProfileBlockFields,
+  type PushBackupStore,
   type PushOptions,
   type PushResult,
   type RollbackBackupStore,
@@ -76,6 +77,7 @@ export interface CliBackupStore {
   verify(id: string): Promise<VerifyResult>;
   prune(keepCount: number): Promise<string[]>;
   restoreFile(id: string, path: string): Promise<Buffer>;
+  createAutoSnapshot?: PushBackupStore['createAutoSnapshot'];
 }
 
 export interface CliContext {
@@ -369,12 +371,18 @@ function injectedRuntimeUploader(): DeployUploader {
   };
 }
 
-function dryRunBackupStore(): PushOptions['backupStore'] {
+function dryRunBackupStore(): PushBackupStore {
   return {
     createAutoSnapshot: async () => {
       throw new Error('Dry-run backup store must not create snapshots.');
     },
-  } as unknown as PushOptions['backupStore'];
+  };
+}
+
+function isPushBackupStore(
+  store: CliBackupStore | undefined,
+): store is CliBackupStore & PushBackupStore {
+  return typeof store?.createAutoSnapshot === 'function';
 }
 
 async function createDefaultFtpClient(
@@ -1210,6 +1218,9 @@ export function createCli(options: CliOptions = {}): Command {
           cwd,
           profileName: cmd.profile,
         });
+        const runtimePushBackupStore = isPushBackupStore(runtimeBackupStore)
+          ? runtimeBackupStore
+          : undefined;
         const runtimeUploader = await runtime.createUploader?.({
           cwd,
           profileName: cmd.profile,
@@ -1217,14 +1228,14 @@ export function createCli(options: CliOptions = {}): Command {
         const needsDefaultFtp =
           !runtime.runPush &&
           !cmd.dryRun &&
-          (runtimeBackupStore === undefined || runtimeUploader === undefined);
+          (runtimePushBackupStore === undefined || runtimeUploader === undefined);
         let sharedFtpClient: FtpClient | undefined;
         try {
           sharedFtpClient = needsDefaultFtp
             ? await createDefaultFtpClient(cwd, cmd.profile, keychain)
             : undefined;
           const backupStore =
-            runtimeBackupStore ??
+            runtimePushBackupStore ??
             (cmd.dryRun
               ? dryRunBackupStore()
               : await createDefaultBackupStore({
@@ -1244,7 +1255,7 @@ export function createCli(options: CliOptions = {}): Command {
           );
           const result = await (runtime.runPush ?? runPush)({
             ...context,
-            backupStore: backupStore as PushOptions['backupStore'],
+            backupStore,
             uploader: managedUploader.uploader,
             remoteRoot: profile.remote_root,
             files: cmd.only,

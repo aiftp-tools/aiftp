@@ -6,6 +6,7 @@ import {
   type DoctorReport,
   FtpClient,
   type ImportedProfile,
+  type PushBackupStore,
   type PushOptions,
   type PushResult,
   type RollbackBackupStore,
@@ -55,6 +56,7 @@ export interface AiftpBackupStore {
   verify(id: string): Promise<VerifyResult>;
   prune(keepCount: number): Promise<string[]>;
   restoreFile(id: string, path: string): Promise<Buffer>;
+  createAutoSnapshot?: PushBackupStore['createAutoSnapshot'];
 }
 
 export interface AiftpMcpContext {
@@ -558,12 +560,18 @@ async function backupStoreFor(app: AiftpMcpApp, profileName: string): Promise<Ai
   );
 }
 
-function dryRunBackupStore(): PushOptions['backupStore'] {
+function dryRunBackupStore(): PushBackupStore {
   return {
     createAutoSnapshot: async () => {
       throw new Error('Dry-run backup store must not create snapshots.');
     },
-  } as unknown as PushOptions['backupStore'];
+  };
+}
+
+function isPushBackupStore(
+  store: AiftpBackupStore | undefined,
+): store is AiftpBackupStore & PushBackupStore {
+  return typeof store?.createAutoSnapshot === 'function';
 }
 
 async function pushBackupStoreFor(
@@ -571,10 +579,10 @@ async function pushBackupStoreFor(
   profileName: string,
   dryRun: boolean,
   ftpClient?: FtpClient,
-  runtimeStore?: AiftpBackupStore,
-): Promise<PushOptions['backupStore']> {
+  runtimeStore?: PushBackupStore,
+): Promise<PushBackupStore> {
   if (runtimeStore) {
-    return runtimeStore as unknown as PushOptions['backupStore'];
+    return runtimeStore;
   }
   if (dryRun) {
     return dryRunBackupStore();
@@ -629,6 +637,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
     cwd: app.cwd,
     profileName,
   });
+  const runtimePushStore = isPushBackupStore(runtimeStore) ? runtimeStore : undefined;
   const runtimeUploader = await app.runtime.createUploader?.({
     cwd: app.cwd,
     profileName,
@@ -636,7 +645,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
   const needsDefaultFtp =
     !app.runtime.runPush &&
     !args.dry_run &&
-    (runtimeStore === undefined || runtimeUploader === undefined);
+    (runtimePushStore === undefined || runtimeUploader === undefined);
   const sharedFtpClient = needsDefaultFtp
     ? await createDefaultFtpClient(app.cwd, profileName)
     : undefined;
@@ -647,14 +656,14 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       profileName,
       args.dry_run,
       sharedFtpClient,
-      runtimeStore,
+      runtimePushStore,
     );
     const uploader =
       runtimeUploader ??
       (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
     return (app.runtime.runPush ?? runPush)({
       ...(await loadStatusContext(app.cwd, profileName, config)),
-      backupStore: backupStore as unknown as PushOptions['backupStore'],
+      backupStore,
       uploader,
       remoteRoot: profile.remote_root,
       files: args.files,
@@ -768,6 +777,7 @@ async function executePush(
     cwd: app.cwd,
     profileName: args.profile,
   });
+  const runtimePushStore = isPushBackupStore(runtimeStore) ? runtimeStore : undefined;
   const runtimeUploader = await app.runtime.createUploader?.({
     cwd: app.cwd,
     profileName: args.profile,
@@ -775,7 +785,7 @@ async function executePush(
   const needsDefaultFtp =
     !app.runtime.runPush &&
     !args.dry_run &&
-    (runtimeStore === undefined || runtimeUploader === undefined);
+    (runtimePushStore === undefined || runtimeUploader === undefined);
   const sharedFtpClient = needsDefaultFtp
     ? await createDefaultFtpClient(app.cwd, args.profile)
     : undefined;
@@ -785,14 +795,14 @@ async function executePush(
       args.profile,
       args.dry_run,
       sharedFtpClient,
-      runtimeStore,
+      runtimePushStore,
     );
     const uploader =
       runtimeUploader ??
       (sharedFtpClient ? uploaderFromClient(sharedFtpClient) : unavailableUploader());
     return await (app.runtime.runPush ?? runPush)({
       ...(await loadStatusContext(app.cwd, args.profile, config)),
-      backupStore: backupStore as unknown as PushOptions['backupStore'],
+      backupStore,
       uploader,
       remoteRoot: profile.remote_root,
       files: args.files ? [...args.files] : undefined,
