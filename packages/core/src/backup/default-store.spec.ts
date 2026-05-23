@@ -302,16 +302,14 @@ describe.sequential('createDefaultBackupStore FTP integration', () => {
         backupStore: firstStore,
         uploader,
       });
-      // v0.9.2: an added-only push now creates a (metadata-only)
-      // snapshot rather than returning null, so the operator can run
-      // `aiftp backup list` after every push. The snapshot contains
-      // zero files because there is no remote old version to back up
-      // for new files; v0.10.0 will redesign the snapshot to also
-      // record the path classification so `rollback` can `delete` the
-      // added files when invoked.
+      // v0.10.0: an added-only push records schema 2 tombstone
+      // entries for new remote files so rollback can delete them,
+      // while still keeping `aiftp backup list` available after
+      // every push.
       expect(first.backupSnapshot).not.toBeNull();
       expect(first.backupSnapshot?.type).toBe('auto');
-      expect(first.backupSnapshot?.fileCount).toBe(0);
+      expect(first.backupSnapshot?.fileCount).toBe(1);
+      expect(first.backupSnapshot?.counts).toEqual({ added: 1, modified: 0, removed: 0 });
 
       await writeFile(join(localRoot, 'index.html'), modifiedContent);
       const secondStore = await createDefaultBackupStore({
