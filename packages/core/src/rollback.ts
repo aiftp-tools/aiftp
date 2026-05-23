@@ -390,6 +390,8 @@ export async function runRollback(options: RollbackOptions): Promise<RollbackRes
       });
       continue;
     }
+    // FTP 550 "not found" is intentionally NOT swallowed — 550 can also
+    // mean permission denied on Sakura/Lolipop; surface to caller.
     await options.uploader.delete(entry.remotePath);
     deleted.push({
       path: entry.meta.path,
