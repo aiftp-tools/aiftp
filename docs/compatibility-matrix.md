@@ -107,6 +107,41 @@ returned `index.html` after the push. End-to-end loop confirmed.
   semantics handle the existing-dir case as a single cd. v0.2.5 also
   added `aiftp ls` for read-only server exploration.
 
+## v0.10.0 feature verification (2026-05-23)
+
+The v0.10.0 breaking release introduces:
+
+- Snapshot schema 2 (per-file `operation` field: `added` / `modified` / `removed`; `added` files stored as tombstones)
+- `[safety].deletion_policy` config (`never` default / `prune-auto` / `prune-with-confirm`)
+- `rollback` performs real remote `delete` for `added` tombstones in the target snapshot
+- MCP `aiftp_rollback_confirm` requires `acknowledge_deletions: true` when deletes are planned
+
+Provider verification status against the
+[`docs/v0.10.0-field-verification.md`](v0.10.0-field-verification.md)
+7-step plan:
+
+| Provider | doctor | initial push | modify push | prune w/ confirm | rollback restore | rollback delete | hard-exclude | Notes |
+|---|---|---|---|---|---|---|---|---|
+| **ロリポップ！** (Light, trial) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 2026-05-23. Schema 2 tombstone snapshot (`files=N bytes=0`), `modified`/`removed` snapshots carry old remote content (`bytes>0`). Typed `DELETE` prompt fired. Rollback verified end-to-end via independent raw FTPS LIST (Python `ftplib` + Keychain decode). Two P1 issues surfaced during this run (CLI rollback real-run output missing `deleted` count; `state.json` not updated after rollback) and were fixed in v0.10.0 before tag (commits `a71e659` / `fa674f4` / `1794cfe`), then re-verified on the same Lolipop workspace. |
+| **さくらインターネット** (Standard, trial) | — | — | — | — | — | — | — | Target: before 2026-06-04 trial deadline. |
+| **エックスサーバー** (Standard, trial) | — | — | — | — | — | — | — | Target: before 2026-05-31 trial deadline. |
+
+### Verification method
+
+For each provider, Claude Lead walks 田中さん through `docs/v0.10.0-field-verification.md` steps 1–7. The fixture directory is `~/aiftp-verify/<provider>-v0100/` with disposable `*-v0100.{html,css}` files and `remote_root = "/test-v0100/"` (NEVER the provider's `/public_html` root). Independent ground truth for remote state is captured via raw FTPS `LIST` (Python `ftplib.FTP_TLS`, password decoded from the aiftp-v1 wrapped Keychain entry), not via `aiftp status` (which can lag — see P1-B).
+
+### Live trace artifact (Lolipop, 2026-05-23)
+
+- Workspace: `~/aiftp-verify/lolipop-v0100/`
+- Snapshots created (4 total):
+  - `09-49-56-...-bbd36e98` — initial push of 3 fixtures (`files=3 bytes=0`, all tombstones)
+  - `09-52-58-...-1647ed4c` — modified push of `hello-v0100.html` (`files=1 bytes=260`, pre-modification content)
+  - `10-03-17-...-c24daf47` — prune push removing `styles-v0100.css` (`files=1 bytes=279`, pre-deletion content)
+  - `10-20-40-...-db89fc22` — added push of `new-page-v0100.html` (`files=1 bytes=0`, tombstone)
+- Rollback to `09-52-58` snapshot: hello restored to 260 B (verified by raw FTPS LIST).
+- Rollback to `10-20-40` snapshot: `new-page-v0100.html` removed from remote (verified by raw FTPS LIST: `/test-v0100/` only contains `about-v0100.html` and `hello-v0100.html`).
+- Hard-exclude guard: a sentinel `wp-config.php` placed in the test directory was correctly excluded from both upload and delete planning.
+
 ## Generic / VPS
 
 | Server | Notes | Status |
