@@ -155,7 +155,12 @@ interface InitAnswers {
 }
 
 function defaultPrompt(questions: PromptQuestion): Promise<Record<string, unknown>> {
-  return prompts(questions) as Promise<Record<string, unknown>>;
+  // v0.10.4 (Codex Phase 2 C2): onCancel returns false so prompts library does
+  // not exit() the process; missing fields surface as undefined and are caught
+  // by sanitizeFieldInput / parseSummaryChoice cancel handling downstream.
+  return prompts(questions, {
+    onCancel: () => false,
+  }) as Promise<Record<string, unknown>>;
 }
 
 function defaultKeychain(): CliKeychain {
@@ -263,6 +268,398 @@ function requirePort(value: unknown): number {
   return port;
 }
 
+// v0.10.4 (Codex Phase 1 review): trim whitespace + reject control chars on text/password fields.
+// Control chars (U+0000-U+001F) break TOML syntax and may corrupt keychain serialization.
+function sanitizeFieldInput(raw: unknown, fieldName: string): string {
+  if (typeof raw !== 'string') {
+    throw new Error(`${fieldName} must be a string`);
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${fieldName} is required (empty after trim)`);
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional TOML/keychain safety check
+  if (/[\u0000-\u001f]/u.test(trimmed)) {
+    throw new Error(`${fieldName} must not contain control characters or newlines`);
+  }
+  return trimmed;
+}
+
+type SummaryChoice =
+  | { kind: 'yes' }
+  | { kind: 'no' }
+  | { kind: 'edit'; fieldIndex: number }
+  | { kind: 'cancel' }
+  | { kind: 'invalid' };
+
+// v0.10.4 (Codex Phase 1 review #16): strict parsing for summary prompt input.
+// Rejects full-width digits, ambiguous numerics (01, 1abc, 1.5), and paste-with-junk.
+// Returns { kind: 'cancel' } for null/undefined (prompts onCancel signal) so the caller
+// can distinguish a user pressing Ctrl+C from a default "yes" Enter.
+function parseSummaryChoice(raw: unknown): SummaryChoice {
+  if (raw === null || raw === undefined) {
+    return { kind: 'cancel' };
+  }
+  const s = String(raw).trim();
+  if (s === '') return { kind: 'yes' };
+  const lower = s.toLowerCase();
+  if (lower === 'y' || lower === 'yes') return { kind: 'yes' };
+  if (lower === 'n' || lower === 'no') return { kind: 'no' };
+  if (/^[1-9]$|^10$/.test(s)) {
+    return { kind: 'edit', fieldIndex: Number.parseInt(s, 10) };
+  }
+  return { kind: 'invalid' };
+}
+
+export const __test__sanitizeFieldInput = sanitizeFieldInput;
+export const __test__parseSummaryChoice = parseSummaryChoice;
+
+// v0.10.4: ordered list of fields shown in `aiftp init` summary review (consent omitted).
+const INIT_SUMMARY_FIELDS = [
+  { key: 'profile', label: 'Profile name' },
+  { key: 'host', label: 'FTP host' },
+  { key: 'port', label: 'FTP port' },
+  { key: 'protocol', label: 'Protocol' },
+  { key: 'user', label: 'FTP user' },
+  { key: 'remoteRoot', label: 'Remote root' },
+  { key: 'localRoot', label: 'Local root' },
+  { key: 'keychainService', label: 'Keychain service' },
+  { key: 'serverKind', label: 'Server kind' },
+  { key: 'password', label: 'FTP password' },
+] as const;
+
+const MAX_INIT_EDIT_LOOPS = 10;
+const SUMMARY_VALUE_PREVIEW_LIMIT = 80;
+
+const SERVER_KIND_LABELS: Record<InitAnswers['serverKind'], string> = {
+  starserver: 'StarServer',
+  lolipop: 'Lolipop',
+  sakura: 'Sakura',
+  xserver: 'Xserver',
+  generic: 'Generic',
+};
+
+function formatInitSummaryValue(
+  answers: InitAnswers,
+  key: (typeof INIT_SUMMARY_FIELDS)[number]['key'],
+): string {
+  if (key === 'protocol') return answers.protocol === 'ftps' ? 'FTPS' : 'FTP';
+  if (key === 'serverKind') return SERVER_KIND_LABELS[answers.serverKind];
+  if (key === 'password') {
+    const len = answers.password.length;
+    return `${'•'.repeat(Math.min(len, 11))} (hidden, ${len} chars)`;
+  }
+  if (key === 'port') return String(answers.port);
+  return String(answers[key]);
+}
+
+function formatInitSummary(answers: InitAnswers): string {
+  const lines = ['', `Review your aiftp init answers (${answers.profile} profile):`, ''];
+  INIT_SUMMARY_FIELDS.forEach((field, idx) => {
+    const num = String(idx + 1).padStart(2, ' ');
+    let value = formatInitSummaryValue(answers, field.key);
+    if (value.length > SUMMARY_VALUE_PREVIEW_LIMIT) {
+      value = `${value.slice(0, SUMMARY_VALUE_PREVIEW_LIMIT - 3)}...`;
+    }
+    lines.push(`  ${num}. ${field.label.padEnd(20, ' ')}${value}`);
+  });
+  lines.push('');
+  return lines.join('\n');
+}
+
+async function editInitField(
+  current: InitAnswers,
+  fieldIdx: number,
+  prompt: CliPrompt,
+  stderr: (line: string) => void,
+): Promise<InitAnswers> {
+  const field = INIT_SUMMARY_FIELDS[fieldIdx];
+  if (!field) {
+    throw new Error(`internal: unknown field index ${fieldIdx}`);
+  }
+
+  const textValidate = (label: string) => (value: unknown) => {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      return `${label} is required`;
+    }
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional TOML/keychain safety check
+    if (/[\u0000-\u001f]/u.test(value)) {
+      return `${label} must not contain control characters or newlines`;
+    }
+    return true as const;
+  };
+
+  let question: PromptQuestion;
+  switch (field.key) {
+    case 'profile':
+      question = [
+        {
+          type: 'text',
+          name: 'profile',
+          message: 'Profile name',
+          initial: current.profile,
+          validate: textValidate('Profile name'),
+        },
+      ];
+      break;
+    case 'host':
+      question = [
+        {
+          type: 'text',
+          name: 'host',
+          message: 'FTP host',
+          initial: current.host,
+          validate: textValidate('FTP host'),
+        },
+      ];
+      break;
+    case 'port':
+      question = [
+        {
+          type: 'number',
+          name: 'port',
+          message: 'FTP port',
+          initial: current.port,
+          min: 1,
+          max: 65535,
+          validate: (value: unknown) => {
+            if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+              return 'FTP port must be an integer (e.g. 21 for FTP, 990 for FTPS implicit)';
+            }
+            if (value < 1 || value > 65535) {
+              return 'FTP port must be between 1 and 65535';
+            }
+            return true as const;
+          },
+        },
+      ];
+      break;
+    case 'protocol':
+      question = [
+        {
+          type: 'select',
+          name: 'protocol',
+          message: 'Protocol',
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'FTP', value: 'ftp' },
+          ],
+          initial: current.protocol === 'ftps' ? 0 : 1,
+        },
+      ];
+      break;
+    case 'user':
+      question = [
+        {
+          type: 'text',
+          name: 'user',
+          message: 'FTP user',
+          initial: current.user,
+          validate: textValidate('FTP user'),
+        },
+      ];
+      break;
+    case 'remoteRoot':
+      question = [
+        {
+          type: 'text',
+          name: 'remoteRoot',
+          message: 'Remote root',
+          initial: current.remoteRoot,
+          validate: textValidate('Remote root'),
+        },
+      ];
+      break;
+    case 'localRoot':
+      question = [
+        {
+          type: 'text',
+          name: 'localRoot',
+          message: 'Local root',
+          initial: current.localRoot,
+          validate: textValidate('Local root'),
+        },
+      ];
+      break;
+    case 'keychainService':
+      question = [
+        {
+          type: 'text',
+          name: 'keychainService',
+          message: 'Keychain service',
+          // v0.10.4 (Codex Phase 2 S1): default to aiftp:${profile} derived from
+          // the *current* profile name (per spec §4.4), not the previously-saved
+          // keychain service. Makes #8 obvious to re-default after #1 changed.
+          initial: `aiftp:${current.profile}`,
+          validate: textValidate('Keychain service'),
+        },
+      ];
+      break;
+    case 'serverKind': {
+      const skChoices = [
+        { title: 'StarServer', value: 'starserver' as const },
+        { title: 'Lolipop', value: 'lolipop' as const },
+        { title: 'Sakura', value: 'sakura' as const },
+        { title: 'Xserver', value: 'xserver' as const },
+        { title: 'Generic', value: 'generic' as const },
+      ];
+      question = [
+        {
+          type: 'select',
+          name: 'serverKind',
+          message: 'Server kind',
+          choices: skChoices,
+          initial: skChoices.findIndex((c) => c.value === current.serverKind),
+        },
+      ];
+      break;
+    }
+    case 'password':
+      question = [
+        {
+          type: 'password',
+          name: 'password',
+          message: 'FTP password',
+          validate: textValidate('FTP password'),
+        },
+      ];
+      break;
+  }
+
+  const result = await prompt(question);
+  const rawValue = result[field.key];
+
+  let nextValue: unknown;
+  if (field.key === 'port') {
+    nextValue = requirePort(rawValue);
+  } else if (field.key === 'protocol' || field.key === 'serverKind') {
+    nextValue = requireString(rawValue, field.key);
+  } else if (field.key === 'password') {
+    nextValue = requireString(rawValue, 'password');
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional TOML/keychain safety check
+    if (typeof nextValue === 'string' && /[\u0000-\u001f]/u.test(nextValue)) {
+      throw new Error('FTP password must not contain control characters or newlines');
+    }
+  } else {
+    nextValue = sanitizeFieldInput(rawValue, field.label);
+  }
+
+  // Post-validation: non-standard port confirmation (reused from v0.10.3)
+  // v0.10.4 (Codex Phase 2 S2): decline returns the unchanged answers so the
+  // summary loop re-displays — does NOT throw and abort the whole init.
+  if (field.key === 'port' && typeof nextValue === 'number') {
+    if (!isStandardFtpPort(nextValue, current.protocol)) {
+      const standardDesc = current.protocol === 'ftps' ? '21 or 990' : '21';
+      const confirmation = await prompt([
+        {
+          type: 'confirm',
+          name: 'confirmNonStandard',
+          message: `Non-standard ${current.protocol.toUpperCase()} port ${nextValue} (standard: ${standardDesc}). Continue?`,
+          initial: false,
+        },
+      ]);
+      if (confirmation.confirmNonStandard !== true) {
+        stderr(
+          `Non-standard port ${nextValue} was not confirmed; keeping previous port ${current.port}.\n`,
+        );
+        return current;
+      }
+    }
+  }
+
+  // v0.10.4 (Codex Phase 2 S3): protocol edit can also cause port to become
+  // non-standard (e.g. FTPS 990 → FTP makes 990 non-standard for plain FTP).
+  if (field.key === 'protocol') {
+    const newProtocol = nextValue as 'ftp' | 'ftps';
+    if (!isStandardFtpPort(current.port, newProtocol)) {
+      const standardDesc = newProtocol === 'ftps' ? '21 or 990' : '21';
+      const confirmation = await prompt([
+        {
+          type: 'confirm',
+          name: 'confirmNonStandard',
+          message: `Protocol change makes current port ${current.port} non-standard for ${newProtocol.toUpperCase()} (standard: ${standardDesc}). Continue?`,
+          initial: false,
+        },
+      ]);
+      if (confirmation.confirmNonStandard !== true) {
+        stderr(`Protocol change cancelled; keeping previous protocol ${current.protocol}.\n`);
+        return current;
+      }
+    }
+  }
+
+  // Post-validation: remote_root leading slash warning (mirrors existing init flow)
+  if (field.key === 'remoteRoot' && typeof nextValue === 'string' && nextValue.startsWith('/')) {
+    stderr(
+      `Warning: remote_root starts with "/" (${nextValue}). On shared hosts the actual upload root is often "/<your-domain>/public_html/..." or "/<your-user>/public_html/...". Confirm with your provider's FTP setup guide.\n`,
+    );
+  }
+
+  // Post-validation: starserver TLS hostname warning (mirrors existing init flow)
+  if (field.key === 'serverKind' && nextValue === 'starserver') {
+    stderr(
+      'Warning: server_kind = "starserver" — Star Server presents a *.star.ne.jp certificate for *.stars.ne.jp hostnames. aiftp will set [quirks].tls_check_hostname = false in your .aiftp.toml so the deploy works out of the box. The certificate chain itself is still verified.\n',
+    );
+  }
+
+  return { ...current, [field.key]: nextValue } as InitAnswers;
+}
+
+async function runInitSummaryReview(
+  initial: InitAnswers,
+  prompt: CliPrompt,
+  stderr: (line: string) => void,
+): Promise<InitAnswers> {
+  // Codex Should-add #24: non-TTY environment must fail clearly, not block on stdin.
+  // Codex Phase 2 C3: \`isTTY !== true\` catches both \`false\` and \`undefined\`
+  // (the latter is what Node returns when stdin is a pipe or redirected file).
+  if (process.stdin.isTTY !== true) {
+    throw new Error(
+      'aiftp init: non-interactive stdin not supported for summary review; re-run in a real terminal',
+    );
+  }
+
+  let answers = initial;
+  for (let loop = 0; loop < MAX_INIT_EDIT_LOOPS; loop += 1) {
+    stderr(formatInitSummary(answers));
+    const result = await prompt([
+      {
+        type: 'text',
+        name: 'choice',
+        message: 'Looks correct? [Y/n] or enter 1-10 to edit',
+        initial: '',
+      },
+    ]);
+
+    const choice = parseSummaryChoice(result.choice);
+    if (choice.kind === 'yes') return answers;
+    if (choice.kind === 'no') {
+      throw new Error('aiftp init: aborted by user at summary review');
+    }
+    if (choice.kind === 'cancel') {
+      throw new Error('aiftp init: cancelled at summary review (no changes made)');
+    }
+    if (choice.kind === 'invalid') {
+      stderr('Invalid input. Enter Y, n, or 1-10 (half-width digits).\n');
+      continue;
+    }
+
+    const oldProfile = answers.profile;
+    answers = await editInitField(answers, choice.fieldIndex - 1, prompt, stderr);
+    if (choice.fieldIndex === 1 && answers.profile !== oldProfile) {
+      stderr(
+        `Profile name changed from "${oldProfile}" to "${answers.profile}". Keychain service (#8) is NOT auto-updated; edit it separately if needed.\n`,
+      );
+    }
+  }
+  throw new Error(
+    `aiftp init: edit loop limit exceeded (${MAX_INIT_EDIT_LOOPS}); aborting to prevent runaway`,
+  );
+}
+
+export const __test__runInitSummaryReview = runInitSummaryReview;
+export const __test__formatInitSummary = formatInitSummary;
+
 function parseNonNegativeInteger(value: string, name: string): number {
   if (!/^\d+$/u.test(value)) {
     throw new Error(`${name} must be a non-negative integer`);
@@ -275,17 +672,25 @@ function parseNonNegativeInteger(value: string, name: string): number {
 }
 
 function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
+  // v0.10.4 (Codex Phase 2 C1): apply sanitizeFieldInput (trim + control-char reject)
+  // at the initial-prompt boundary, not just inside the summary review.
+  // Password keeps leading/trailing whitespace (can be intentional) but rejects control chars.
+  const pw = requireString(raw.password, 'password');
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional TOML/keychain safety check
+  if (/[\u0000-\u001f]/u.test(pw)) {
+    throw new Error('password must not contain control characters or newlines');
+  }
   return {
-    profile: requireString(raw.profile, 'profile'),
-    host: requireString(raw.host, 'host'),
+    profile: sanitizeFieldInput(raw.profile, 'profile'),
+    host: sanitizeFieldInput(raw.host, 'host'),
     port: requirePort(raw.port),
     protocol: requireString(raw.protocol, 'protocol') as InitAnswers['protocol'],
-    user: requireString(raw.user, 'user'),
-    remoteRoot: requireString(raw.remoteRoot, 'remoteRoot'),
-    localRoot: requireString(raw.localRoot, 'localRoot'),
-    keychainService: requireString(raw.keychainService, 'keychainService'),
+    user: sanitizeFieldInput(raw.user, 'user'),
+    remoteRoot: sanitizeFieldInput(raw.remoteRoot, 'remoteRoot'),
+    localRoot: sanitizeFieldInput(raw.localRoot, 'localRoot'),
+    keychainService: sanitizeFieldInput(raw.keychainService, 'keychainService'),
     serverKind: requireString(raw.serverKind, 'serverKind') as InitAnswers['serverKind'],
-    password: requireString(raw.password, 'password'),
+    password: pw,
     consent: requireBoolean(raw.consent, 'consent'),
   };
 }
@@ -1026,7 +1431,7 @@ export function createCli(options: CliOptions = {}): Command {
         return true;
       };
 
-      const answers = parseInitAnswers(
+      let answers = parseInitAnswers(
         await prompt([
           {
             type: 'text',
@@ -1137,6 +1542,9 @@ export function createCli(options: CliOptions = {}): Command {
           );
         }
       }
+
+      // v0.10.4 (#6/#7/#8 reflective patch, Codex Phase 1 review): summary review
+      answers = await runInitSummaryReview(answers, prompt, stderr);
 
       if (answers.remoteRoot.startsWith('/')) {
         stderr(

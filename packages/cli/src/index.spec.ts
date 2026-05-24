@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type PushResult, type StatusResult, loadConfig } from '@aiftp-tools/core';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   type CliBackupStore,
   type CliKeychain,
@@ -11,7 +11,19 @@ import {
   type CliRuntime,
   VERSION,
   createCli,
+  __test__parseSummaryChoice as parseSummaryChoice,
+  __test__sanitizeFieldInput as sanitizeFieldInput,
 } from './index.js';
+
+// v0.10.4: ensure process.stdin.isTTY is true so init summary review does not abort
+// during tests. Individual tests (e.g. #24 non-TTY) can override and restore via afterEach.
+const __originalIsTTY = process.stdin.isTTY;
+beforeAll(() => {
+  Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+});
+afterAll(() => {
+  Object.defineProperty(process.stdin, 'isTTY', { value: __originalIsTTY, configurable: true });
+});
 
 describe('cli', () => {
   let cwd: string;
@@ -34,7 +46,9 @@ describe('cli', () => {
   });
 
   function prompt(answers: Record<string, unknown>): CliPrompt {
-    return async () => answers;
+    // v0.10.4: default summary review choice to 'Y' so existing tests stay green.
+    // Existing tests don't pass `choice`; the init field prompts ignore it.
+    return async () => ('choice' in answers ? answers : { ...answers, choice: 'Y' });
   }
 
   function keychain(existing = new Set<string>()): CliKeychain {
@@ -418,7 +432,10 @@ describe('cli', () => {
     };
     const confirmOverwrite: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
-      return first?.name === 'overwriteBackupKey' ? { overwriteBackupKey: true } : answers;
+      if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: true };
+      // v0.10.4: summary review prompt
+      if (first?.name === 'choice') return { choice: 'Y' };
+      return answers;
     };
 
     await parse(['init', '--force'], {
@@ -1774,5 +1791,453 @@ describe('cli', () => {
 
     expect(started).toEqual([cwd]);
     expect(stdout).toEqual([]);
+  });
+});
+
+describe('sanitizeFieldInput (v0.10.4)', () => {
+  it('trims leading and trailing whitespace', () => {
+    expect(sanitizeFieldInput('  ftp.example.com  ', 'host')).toBe('ftp.example.com');
+    expect(sanitizeFieldInput('\tdeploy-user\t', 'user')).toBe('deploy-user');
+  });
+
+  it('rejects whitespace-only input', () => {
+    expect(() => sanitizeFieldInput('   ', 'host')).toThrow(/host is required/);
+    expect(() => sanitizeFieldInput('\t\n', 'host')).toThrow(/control characters|required/);
+  });
+
+  it('rejects control characters (newline, NUL, tab inside)', () => {
+    expect(() => sanitizeFieldInput('a\nb', 'host')).toThrow(/control characters/);
+    expect(() => sanitizeFieldInput('a\x00b', 'host')).toThrow(/control characters/);
+    expect(() => sanitizeFieldInput('a\rb', 'host')).toThrow(/control characters/);
+    expect(() => sanitizeFieldInput('a\x1bm', 'host')).toThrow(/control characters/); // ANSI ESC
+  });
+
+  it('accepts non-Latin input (Japanese, emoji)', () => {
+    expect(sanitizeFieldInput('本番', 'profile')).toBe('本番');
+    expect(sanitizeFieldInput('パス🔐word', 'password')).toBe('パス🔐word');
+  });
+
+  it('accepts very long strings (no truncation)', () => {
+    const longString = 'a'.repeat(50_000);
+    expect(sanitizeFieldInput(longString, 'profile')).toBe(longString);
+  });
+
+  it('throws TypeError-like for non-string input', () => {
+    expect(() => sanitizeFieldInput(42 as unknown as string, 'host')).toThrow(/must be a string/);
+    expect(() => sanitizeFieldInput(null as unknown as string, 'host')).toThrow(/must be a string/);
+    expect(() => sanitizeFieldInput(undefined as unknown as string, 'host')).toThrow(
+      /must be a string/,
+    );
+  });
+});
+
+describe('parseSummaryChoice (v0.10.4)', () => {
+  it('treats empty string and Enter as yes', () => {
+    expect(parseSummaryChoice('')).toEqual({ kind: 'yes' });
+    expect(parseSummaryChoice('  ')).toEqual({ kind: 'yes' });
+  });
+
+  it('accepts y / Y / yes / YES', () => {
+    expect(parseSummaryChoice('y')).toEqual({ kind: 'yes' });
+    expect(parseSummaryChoice('Y')).toEqual({ kind: 'yes' });
+    expect(parseSummaryChoice('yes')).toEqual({ kind: 'yes' });
+    expect(parseSummaryChoice('YES')).toEqual({ kind: 'yes' });
+  });
+
+  it('accepts n / N / no / NO as no', () => {
+    expect(parseSummaryChoice('n')).toEqual({ kind: 'no' });
+    expect(parseSummaryChoice('N')).toEqual({ kind: 'no' });
+    expect(parseSummaryChoice('no')).toEqual({ kind: 'no' });
+    expect(parseSummaryChoice('NO')).toEqual({ kind: 'no' });
+  });
+
+  it('accepts half-width digits 1-10 as edit', () => {
+    expect(parseSummaryChoice('1')).toEqual({ kind: 'edit', fieldIndex: 1 });
+    expect(parseSummaryChoice('5')).toEqual({ kind: 'edit', fieldIndex: 5 });
+    expect(parseSummaryChoice('10')).toEqual({ kind: 'edit', fieldIndex: 10 });
+  });
+
+  it('rejects full-width digits (Codex Critical #16)', () => {
+    expect(parseSummaryChoice('１')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('１０')).toEqual({ kind: 'invalid' });
+  });
+
+  it('rejects ambiguous numeric forms (Codex Critical #16)', () => {
+    expect(parseSummaryChoice('1abc')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('1.5')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('01')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('010')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('0')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('11')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('-1')).toEqual({ kind: 'invalid' });
+  });
+
+  it('handles paste-with-trailing-newline by trimming then parsing', () => {
+    expect(parseSummaryChoice('10\n')).toEqual({ kind: 'edit', fieldIndex: 10 });
+    expect(parseSummaryChoice('1\n')).toEqual({ kind: 'edit', fieldIndex: 1 });
+    expect(parseSummaryChoice('y\n')).toEqual({ kind: 'yes' });
+    expect(parseSummaryChoice('  y  ')).toEqual({ kind: 'yes' });
+  });
+
+  it('rejects input with internal whitespace (typo guard)', () => {
+    expect(parseSummaryChoice('1 5')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('1 0')).toEqual({ kind: 'invalid' });
+    expect(parseSummaryChoice('y e s')).toEqual({ kind: 'invalid' });
+  });
+
+  it('returns cancel for null / undefined (prompts cancel signal)', () => {
+    expect(parseSummaryChoice(null)).toEqual({ kind: 'cancel' });
+    expect(parseSummaryChoice(undefined)).toEqual({ kind: 'cancel' });
+  });
+});
+
+describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
+  const cwd = join(tmpdir(), `aiftp-cli-summary-test-${randomUUID()}`);
+  let stored: Array<{ service: string; account: string; password: string }>;
+  let stderrLines: string[];
+  let stdoutLines: string[];
+
+  beforeEach(async () => {
+    await mkdir(cwd, { recursive: true });
+    stored = [];
+    stderrLines = [];
+    stdoutLines = [];
+  });
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  const baseAnswers = {
+    profile: 'production',
+    host: 'ftp.example.com',
+    port: 21,
+    protocol: 'ftps',
+    user: 'deploy-user',
+    remoteRoot: '/public_html',
+    localRoot: '.',
+    keychainService: 'aiftp:production',
+    serverKind: 'generic',
+    password: 'secret-password',
+    consent: true,
+  } as const;
+
+  function keychainMock(existing = new Set<string>()): CliKeychain {
+    return {
+      setPassword: async (service, account, password) => {
+        stored.push({ service, account, password });
+        existing.add(`${service}:${account}`);
+      },
+      deletePassword: async (service, account) => {
+        existing.delete(`${service}:${account}`);
+      },
+      hasPassword: async (service, account) => existing.has(`${service}:${account}`),
+      getPassword: async (service, account) => {
+        if (service.endsWith(':backup-key')) {
+          return Buffer.alloc(32, 1).toString('base64');
+        }
+        if (!existing.has(`${service}:${account}`)) throw new Error('not found');
+        return 'mock-password';
+      },
+    };
+  }
+
+  function promptSeq(answers: Array<Record<string, unknown>>): CliPrompt {
+    let i = 0;
+    return async () => {
+      if (i >= answers.length) {
+        throw new Error(`promptSeq exhausted at call ${i + 1} (only ${answers.length} provided)`);
+      }
+      const a = answers[i] ?? {};
+      i += 1;
+      return a;
+    };
+  }
+
+  async function runInit(
+    prompt: CliPrompt,
+    existingKeychain = new Set<string>(),
+    args: string[] = ['init'],
+  ): Promise<{ error?: Error }> {
+    const command = createCli({
+      cwd,
+      prompt,
+      keychain: keychainMock(existingKeychain),
+      stdout: (line: string) => stdoutLines.push(line),
+      stderr: (line: string) => stderrLines.push(line),
+    });
+    try {
+      await command.parseAsync(['node', 'aiftp', ...args], { from: 'node' });
+      return {};
+    } catch (e) {
+      return { error: e instanceof Error ? e : new Error(String(e)) };
+    }
+  }
+
+  it('#1: continues on Y and writes .aiftp.toml', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: 'Y' }]));
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe('ftp.example.com');
+  });
+
+  it('#2: continues on empty Enter (treated as Y)', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: '' }]));
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe('ftp.example.com');
+  });
+
+  it('#3: aborts on n and does not write config/keychain', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: 'n' }]));
+    expect(error?.message).toMatch(/aborted by user at summary review/);
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('#4: edits single field then continues', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '6' }, { remoteRoot: '/var/www/html' }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.remote_root).toBe('/var/www/html');
+  });
+
+  it('#5: edits multiple fields then continues', async () => {
+    const { error } = await runInit(
+      promptSeq([
+        baseAnswers,
+        { choice: '6' },
+        { remoteRoot: '/htdocs' },
+        { choice: '5' },
+        { user: 'new-user' },
+        { choice: 'Y' },
+      ]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.user).toBe('new-user');
+    expect(config.profile.production?.remote_root).toBe('/htdocs');
+  });
+
+  it('#6: shows error on invalid string and continues loop', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: 'xyz' }, { choice: 'Y' }]));
+    expect(error).toBeUndefined();
+    expect(stderrLines.some((l) => /Invalid input/.test(l))).toBe(true);
+  });
+
+  it('#7: shows error on out-of-range number and continues loop', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: '99' }, { choice: 'Y' }]));
+    expect(error).toBeUndefined();
+    expect(stderrLines.some((l) => /Invalid input/.test(l))).toBe(true);
+  });
+
+  it('#8: aborts after MAX_INIT_EDIT_LOOPS (10) edit iterations', async () => {
+    const seq: Array<Record<string, unknown>> = [baseAnswers];
+    for (let i = 0; i < 10; i += 1) {
+      seq.push({ choice: '6' });
+      seq.push({ remoteRoot: `/path-${i}` });
+    }
+    seq.push({ choice: '6' });
+    const { error } = await runInit(promptSeq(seq));
+    expect(error?.message).toMatch(/edit loop limit exceeded/);
+  });
+
+  it('#9: edits password (#10) and saves new value to keychain', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '10' }, { password: 'new-secret' }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    expect(stored[0]?.password).toBe('new-secret');
+  });
+
+  it('#10: discards edits when aborted at summary', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '6' }, { remoteRoot: '/edited' }, { choice: 'n' }]),
+    );
+    expect(error?.message).toMatch(/aborted by user at summary review/);
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('#11: rejects empty edit value via sanitizeFieldInput', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '6' }, { remoteRoot: '   ' }, { choice: 'Y' }]),
+    );
+    expect(error?.message).toMatch(/Remote root is required/);
+  });
+
+  it('#12: warns when profile name changes (does NOT auto-sync keychainService)', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '1' }, { profile: 'staging' }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    expect(
+      stderrLines.some((l) => /Profile name changed from "production" to "staging"/.test(l)),
+    ).toBe(true);
+  });
+
+  it('#13: re-fires non-standard port confirmation when port is edited', async () => {
+    const { error } = await runInit(
+      promptSeq([
+        baseAnswers,
+        { choice: '3' },
+        { port: 8021 },
+        { confirmNonStandard: true },
+        { choice: 'Y' },
+      ]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.port).toBe(8021);
+  });
+
+  it('#14: cancels safely on null choice (prompts onCancel signal)', async () => {
+    const { error } = await runInit(promptSeq([baseAnswers, { choice: null }]));
+    expect(error?.message).toMatch(/cancelled at summary review/);
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+    expect(stored).toHaveLength(0);
+  });
+
+  it('#15: cancels mid-edit propagates correctly with no partial writes', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '6' }, { remoteRoot: null }, { choice: 'Y' }]),
+    );
+    expect(error?.message).toMatch(/must be a string|cancelled/);
+    expect(stored).toHaveLength(0);
+  });
+
+  it('#16: rejects 全角数字 (１０) and ambiguous numerics (01, 1abc)', async () => {
+    const { error } = await runInit(
+      promptSeq([
+        baseAnswers,
+        { choice: '１０' },
+        { choice: '01' },
+        { choice: '1abc' },
+        { choice: 'Y' },
+      ]),
+    );
+    expect(error).toBeUndefined();
+    expect(stderrLines.filter((l) => /Invalid input/.test(l)).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('#17: --force + existing keychain + actually edit keychainService preserves backup key', async () => {
+    await writeFile(
+      join(cwd, '.aiftp.toml'),
+      'log_level = "info"\n[profile.production]\nhost = "old.example.com"\nport = 21\nprotocol = "ftps"\nuser = "old"\nremote_root = "/old"\nlocal_root = "."\nkeychain_service = "aiftp:production"\nserver_kind = "generic"\n',
+    );
+    const existing = new Set(['aiftp:production:backup-key:production']);
+    // v0.10.4 (Codex Phase 2 S4): walk through edit #8 then confirm with Y;
+    // assert backup-key was NOT overwritten (only the FTP password is set).
+    let choiceCallNum = 0;
+    const customPrompt: CliPrompt = async (questions) => {
+      const first = Array.isArray(questions) ? questions[0] : questions;
+      if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: false };
+      if (first?.name === 'choice') {
+        choiceCallNum += 1;
+        if (choiceCallNum === 1) return { choice: '8' };
+        return { choice: 'Y' };
+      }
+      if (first?.name === 'keychainService') return { keychainService: 'aiftp:edited' };
+      return baseAnswers;
+    };
+    const { error } = await runInit(customPrompt, existing, ['init', '--force']);
+    expect(error).toBeUndefined();
+    expect(choiceCallNum).toBe(2);
+    // Old backup key entry (under previous keychain service) was NOT overwritten.
+    expect(stored.find((s) => s.service === 'aiftp:production:backup-key')).toBeUndefined();
+    // The renamed keychain service got its FTP password and a fresh backup key
+    // (this is expected: a new keychain identity gets its own encryption material).
+    expect(stored.find((s) => s.service === 'aiftp:edited')?.password).toBe('secret-password');
+  });
+
+  it('#18: profile rename produces desync warning, keychainService unchanged', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '1' }, { profile: 'staging' }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.staging).toBeDefined();
+    expect(config.profile.staging?.keychain_service).toBe('aiftp:production');
+    expect(stderrLines.some((l) => /NOT auto-updated/.test(l))).toBe(true);
+  });
+
+  it('#19: trims whitespace from edited field', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '2' }, { host: '  ftp.trimmed.com  ' }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe('ftp.trimmed.com');
+  });
+
+  it('#20: rejects whitespace-only edit value', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '2' }, { host: '   \t\t  ' }, { choice: 'Y' }]),
+    );
+    expect(error?.message).toMatch(/FTP host is required/);
+  });
+
+  it('#21: rejects control characters in edit value', async () => {
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '2' }, { host: 'ftp\nexample.com' }, { choice: 'Y' }]),
+    );
+    expect(error?.message).toMatch(/control characters/);
+  });
+
+  it('#22: handles very long strings without truncation in TOML', async () => {
+    const longHost = `${'a'.repeat(40_000)}.example.com`;
+    const { error } = await runInit(
+      promptSeq([baseAnswers, { choice: '2' }, { host: longHost }, { choice: 'Y' }]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe(longHost);
+  });
+
+  it('#23: round-trips non-Latin host + emoji password (profile is ASCII-only per TOML bare-key rule)', async () => {
+    const { error } = await runInit(
+      promptSeq([
+        baseAnswers,
+        { choice: '2' },
+        { host: 'ftp.例え.test' },
+        { choice: '10' },
+        { password: 'パス🔐word' },
+        { choice: 'Y' },
+      ]),
+    );
+    expect(error).toBeUndefined();
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.host).toBe('ftp.例え.test');
+    expect(stored[0]?.password).toBe('パス🔐word');
+  });
+
+  it('#24: aborts in non-TTY environment with explicit error', async () => {
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    try {
+      const { error } = await runInit(promptSeq([baseAnswers]));
+      expect(error?.message).toMatch(/non-interactive stdin not supported/);
+      expect(stored).toHaveLength(0);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
+  });
+
+  it('#25: aborting after multiple edits leaves zero side-effects', async () => {
+    const { error } = await runInit(
+      promptSeq([
+        baseAnswers,
+        { choice: '6' },
+        { remoteRoot: '/edited-1' },
+        { choice: '8' },
+        { keychainService: 'aiftp:edited' },
+        { choice: 'n' },
+      ]),
+    );
+    expect(error?.message).toMatch(/aborted by user at summary review/);
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+    expect(stored).toHaveLength(0);
   });
 });
