@@ -1,6 +1,6 @@
 {
   "name": "aiftp-monorepo",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "private": true,
   "description": "AI-first FTP/FTPS deploy tool \u2014 monorepo root",
   "license": "MIT",

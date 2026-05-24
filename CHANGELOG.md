@@ -12,7 +12,39 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-(Pending work for v0.10.1+.)
+(Pending work for v0.11+.)
+
+---
+
+## [0.10.1] — 2026-05-24
+
+**Patch release** — quick follow-ups from v0.10.0 field verification (Xserver, Sakura) and npm publish smoke test (Lolipop fresh init).
+
+### Fixed
+
+- **`aiftp init`** now provides a sensible default for the **Keychain service** prompt (`aiftp:<profile-name>`). Previously the prompt was empty, and pressing Enter silently advanced past the field; init then failed at the final step. ([#6 — F-X5](https://github.com/aiftp-tools/aiftp/issues/6))
+- **`aiftp init`** now validates required fields **per prompt** (host / user / remoteRoot / localRoot / keychainService / password). Empty input is rejected on the spot instead of letting all prompts complete and then aborting at validation. ([#7 — F-X6](https://github.com/aiftp-tools/aiftp/issues/7))
+
+### Changed
+
+- `DEFAULT_EXCLUDE_PATTERNS` now uses the glob `.aiftp.toml.*` instead of the literal `.aiftp.toml.bak`. This covers arbitrary backup suffixes (`.bak`, `.before-vXXX`, `.old`, …) and prevents accidental leakage of pre-upgrade config snapshots — observed on Xserver during v0.10.0 field verification. ([#3 — F-X1](https://github.com/aiftp-tools/aiftp/issues/3))
+
+### Documentation
+
+- `docs/v0.10.0-field-verification.md` §4/§6/§8 now explicitly call out that `local_root = "."` recurses into ALL subdirectories under the working directory, and that archive / scratch directories MUST live **outside** the working directory. ([#4 — F-X2](https://github.com/aiftp-tools/aiftp/issues/4))
+
+### npm registry
+
+All three packages are published under the `@aiftp-tools` scope:
+
+- [`@aiftp-tools/cli`](https://www.npmjs.com/package/@aiftp-tools/cli) (renamed from unscoped `aiftp` due to npm spam protection; bin name `aiftp` preserved)
+- [`@aiftp-tools/core`](https://www.npmjs.com/package/@aiftp-tools/core)
+- [`@aiftp-tools/mcp`](https://www.npmjs.com/package/@aiftp-tools/mcp)
+
+```bash
+npm install -g @aiftp-tools/cli
+aiftp --version  # → 0.10.1
+```
 
 ---
 
