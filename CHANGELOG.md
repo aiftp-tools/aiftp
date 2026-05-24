@@ -16,6 +16,22 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.10.2] — 2026-05-24
+
+**Patch release** — follow-up to v0.10.1 closing the same-day `aiftp init` UX gap.
+
+### Fixed
+
+- **`aiftp init`** now validates the **FTP port** prompt as well. The v0.10.1 fix (#7) added per-prompt validation only to `text` / `password` prompt types; the `number` type port prompt was left untouched, and in certain input sequences the `prompts` library returned `-Infinity` for it, causing init to fail at the end with `port must be an integer`. The port prompt now enforces `min: 1, max: 65535` with a descriptive `validate` callback. The terminal `parseInitAnswers` validator was also tightened with a dedicated `requirePort` helper that rejects out-of-range integers with an explicit error message (`port must be between 1 and 65535 (e.g. 21 for FTP, 990 for FTPS implicit)`). ([#8 — F-X7](https://github.com/aiftp-tools/aiftp/issues/8))
+
+### Tests
+
+- Two regression guards added in `packages/cli/src/index.spec.ts`:
+  - `init rejects -Infinity port`
+  - `init rejects port outside 1-65535 range`
+
+---
+
 ## [0.10.1] — 2026-05-24
 
 **Patch release** — quick follow-ups from v0.10.0 field verification (Xserver, Sakura) and npm publish smoke test (Lolipop fresh init).

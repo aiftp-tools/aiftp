@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/cli",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "AI-first FTP/FTPS deploy tool \u2014 CLI",
   "license": "MIT",
   "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
