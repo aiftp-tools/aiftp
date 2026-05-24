@@ -264,6 +264,94 @@ describe('cli', () => {
     ).rejects.toThrow('port must be an integer');
   });
 
+  it('init prompts to confirm non-standard FTPS port and proceeds when confirmed (v0.10.3)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 8021,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        confirmNonStandard: true,
+      }),
+    });
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.port).toBe(8021);
+  });
+
+  it('init aborts when non-standard port confirmation is declined (v0.10.3)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await expect(
+      parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: 8021,
+          protocol: 'ftps',
+          user: 'deploy-user',
+          remoteRoot: '/public_html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'secret-password',
+          consent: true,
+          confirmNonStandard: false,
+        }),
+      }),
+    ).rejects.toThrow(/non-standard.*port.*not confirmed/i);
+  });
+
+  it('init does not prompt for confirmation on standard FTPS port 990 (v0.10.3)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await parse(['init'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 990,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        // No confirmNonStandard — must not be needed
+      }),
+    });
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile.production?.port).toBe(990);
+  });
+
+  it('init prompts to confirm FTPS port 990 over plain FTP (only 21 is standard for FTP) (v0.10.3)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    await expect(
+      parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: 990,
+          protocol: 'ftp',
+          user: 'deploy-user',
+          remoteRoot: '/public_html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'secret-password',
+          consent: true,
+          confirmNonStandard: false,
+        }),
+      }),
+    ).rejects.toThrow(/non-standard FTP port 990/i);
+  });
+
   it('init rejects port outside 1-65535 range (F-X7)', async () => {
     await expect(
       parse(['init'], {

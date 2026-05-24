@@ -248,6 +248,13 @@ function requireNumber(value: unknown, name: string): number {
   return value;
 }
 
+function isStandardFtpPort(port: number, protocol: 'ftp' | 'ftps'): boolean {
+  if (protocol === 'ftps') {
+    return port === 21 || port === 990;
+  }
+  return port === 21;
+}
+
 function requirePort(value: unknown): number {
   const port = requireNumber(value, 'port');
   if (port < 1 || port > 65535) {
@@ -1112,6 +1119,23 @@ export function createCli(options: CliOptions = {}): Command {
 
       if (!answers.consent) {
         throw new Error('Explicit consent is required before initializing aiftp.');
+      }
+
+      if (!isStandardFtpPort(answers.port, answers.protocol)) {
+        const standardDesc = answers.protocol === 'ftps' ? '21 or 990' : '21';
+        const portConfirmation = await prompt([
+          {
+            type: 'confirm',
+            name: 'confirmNonStandard',
+            message: `Non-standard ${answers.protocol.toUpperCase()} port ${answers.port} (standard: ${standardDesc}). Continue?`,
+            initial: false,
+          },
+        ]);
+        if (portConfirmation.confirmNonStandard !== true) {
+          throw new Error(
+            `aborted: non-standard ${answers.protocol.toUpperCase()} port ${answers.port} was not confirmed`,
+          );
+        }
       }
 
       if (answers.remoteRoot.startsWith('/')) {
