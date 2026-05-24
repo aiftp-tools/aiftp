@@ -281,7 +281,7 @@ async function editSingleField(
 |---|---|---|---|
 | 14 | Cancel safety | Ctrl+C / stdin EOF / prompts cancel at summary | throw "cancelled at summary review"、.aiftp.toml + keychain + .gitignore **すべて未変更** |
 | 15 | Cancel during edit | 5 (remote_root) edit 中に Ctrl+C | 同上、edit 前の状態に戻らず full abort |
-| 16 | Strict choice parsing | `1abc` / `1.5` / `01` / `１０` (全角) / `10\n` (paste) → 全て invalid | "Invalid input" 表示、誤って違う field を edit しない |
+| 16 | Strict choice parsing | `1abc` / `1.5` / `01` / `１０` (全角) → invalid; `10\n` paste → trim 後 `10` accept (typo guard for paste) | "Invalid input" 表示、誤って違う field を edit しない |
 
 #### Should-add（Codex 指摘、必須、17-23）
 
@@ -293,7 +293,7 @@ async function editSingleField(
 | 20 | Whitespace-only reject | host を `"   "` のみで入力 | trim 後空 → validate reject → 再 prompt |
 | 21 | Control character reject | host/profile を `"a\nb"` / `"a\x00b"` / ANSI escape 含みで入力 | validate reject "must not contain control characters" |
 | 22 | Very long string | profile / host / password に 50k char | summary 表示が hang しない、TOML 書き込み成功、keychain に full length 保存 (password 長さ表示は実数値) |
-| 23 | Non-Latin input | profile=`"本番"` / host=日本語IDN風 / password=`"パス🔐word"` | round-trip 成立: prompts → summary → TOML → keychain で mojibake / truncation なし |
+| 23 | Non-Latin input | profile=ASCII (TOML bare-key 制約) / host=`"ftp.例え.test"` / password=`"パス🔐word"` | host + password で round-trip 成立。profile は v0.11 で quoted-key TOML 対応検討 |
 
 #### Should-add 追加（非 TTY、24-25）
 
@@ -309,6 +309,15 @@ async function editSingleField(
 - **採用方針**: 既存 `prompt(answers)` ヘルパーを拡張し、`choice` が answers に含まれない場合は **デフォルトで `'Y'` を返す** ようにする。既存テストは触らない
 - 新規テスト（13 cases）は `promptSequence([...])` ヘルパーを別途定義し、配列を順次返す mock を使う
 - これにより既存 74 test の修正は **0 件** で済む
+
+### 6.2.1 Mock の限界（Codex Phase 2 S5）
+
+`prompts` ライブラリの `validate` callback は production runtime でのみ走り、テスト mock では bypass される。つまり test #15 / #20 / #21 / #11 で「whitespace-only / control character / null edit value」が rejected されるのは、aiftp 側の `sanitizeFieldInput` 防衛層によるもの。**`prompts` の validate が「画面で再入力を促す」UX は単体テストで検証不能** (実機 smoke test or e2e 必要)。
+
+v0.11 input validation framework で `@inquirer/prompts` 等に置き換える際、validate callback の動作を仮想 TTY 経由で test 可能にする予定。それまでは:
+
+- 単体テストは aiftp 側の防衛層 (sanitizeFieldInput / parseInitAnswers / requirePort) を保証
+- 実機検証は `aiftp init` の smoke test で 田中さん or CI 実行
 
 ### 6.3 Coverage 目標
 
