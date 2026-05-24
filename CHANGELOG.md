@@ -16,6 +16,44 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.10.4] — 2026-05-25
+
+**Reflective patch release** — addresses 田中さんの 2026-05-24 review feedback ("ユーザは必ず入力ミスする前提で仕様を考える / 入力間違いの recovery path も仕様化する / 抜け落ちた点がないかテストする / Codex にダブルチェック").
+
+Implementation followed the brainstorming → spec → plan → TDD → Codex Phase 1/2 review → release flow. Spec doc lives at `docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md`.
+
+### Added
+
+- **`aiftp init` summary review** — after answering all prompts, a summary table now lists every captured value with a number, and the user can confirm with `Y`/Enter, abort with `n`, or enter `1-10` to edit a specific field in place. Edit loop is capped at 10 iterations to prevent runaway. The summary is the C-leg of the "三重防御 (A hint + B back-nav + C summary review)" plan; A and B are scheduled for the v0.11 input validation framework.
+- **Per-field sanitization at the initial-prompt boundary** (`sanitizeFieldInput`): all text fields are trimmed and rejected if they contain control characters (`U+0000`-`U+001F`) before the value reaches TOML / keychain. Password keeps leading/trailing whitespace (intentional) but rejects control characters.
+- **Strict summary-choice parsing** (`parseSummaryChoice`): rejects 全角数字 (`１０`), ambiguous numerics (`01`, `1abc`, `1.5`), and internal whitespace (`1 5`). Paste-with-trailing-newline is trimmed and accepted. `null` / `undefined` is treated as cancel (Ctrl+C / EOF), not as accept.
+- **Non-TTY guard** in `runInitSummaryReview` — `aiftp init < /dev/null` style invocations fail explicitly instead of blocking on stdin forever.
+- **`onCancel` callback** in `defaultPrompt` — real prompts library no longer auto-`process.exit()` on Ctrl+C; cancel is detected downstream.
+- **Non-standard port confirmation re-fires on protocol edit** — changing FTPS to FTP with port `990` still in the answers now prompts the user, instead of silently accepting an incompatible combination.
+- **Non-standard port decline returns to summary loop** instead of aborting the whole init — the user gets another chance.
+
+### Tests
+
+- **40 new tests** in `packages/cli/src/index.spec.ts`:
+  - 15 helper tests for `sanitizeFieldInput` / `parseSummaryChoice`
+  - 25 summary-review integration tests (Codex Phase 1 review reflected: cancel safety, strict choice parsing, --force collision, profile rename desync, whitespace normalization, control char reject, very long strings, non-Latin, non-TTY, abort side-effect ordering)
+
+### Process
+
+- **Codex Phase 1 review** (spec test list) — session `019e5895-3d1f-7103-850e-2de1da665313`, surfaced 12 missing edge cases (cancel safety, 全角数字, control chars, whitespace, non-TTY, etc.) which were incorporated into spec §6.1 #14-25.
+- **Codex Phase 2 review** (implementation vs spec) — session `019e5b56-c7bc-7c03-ba40-4cb625ff8673`, surfaced 3 Critical + 5 Should-fix items which were all addressed (C1 parseInitAnswers sanitization, C2 onCancel, C3 isTTY !== true, S1 keychain default, S2 port decline returns to loop, S3 protocol-port cross check, S4 test #17 strengthened, S5 mock limitation documented).
+- **Spec divergences resolved**:
+  - `10\n` paste: implementation trims-then-parses (more forgiving UX for paste); spec updated to match
+  - profile name with non-ASCII: TOML bare-key constraint forbids it; spec updated to test host/password for non-Latin instead. Quoted-key TOML support deferred to v0.11.
+
+### Quality gates
+
+- 630 tests passed / 3 skipped / 0 failed (+40 from v0.10.3)
+- Branches coverage 83.29% maintained; Statements 90.25%
+- biome lint clean; build clean
+
+---
+
 ## [0.10.3] — 2026-05-24
 
 **Quality patch** — reflective release closing the prompt-validation coverage gap surfaced by v0.10.1 / v0.10.2. 田中さんの指摘 ("port は標準ポート以外なら確認すべき / 非正常系のテストはどの程度か") への対応。

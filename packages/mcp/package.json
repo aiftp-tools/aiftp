@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/mcp",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "aiftp MCP server (stdio) — AI-first FTP/FTPS deploy via Model Context Protocol",
   "license": "MIT",
   "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
