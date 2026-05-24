@@ -40,8 +40,34 @@ describe('DEFAULT_EXCLUDE_PATTERNS (v0.9.4 expanded)', () => {
     expect(DEFAULT_EXCLUDE_PATTERNS).toContain('.aiftp.toml');
   });
 
+  it('keeps aiftp config backups out via glob (v0.10.1: .aiftp.toml.* covers .bak / .before-* / .old)', () => {
+    expect(DEFAULT_EXCLUDE_PATTERNS).toContain('.aiftp.toml.*');
+  });
+
   it('keeps .git out (v0.9.3 behaviour, must not regress)', () => {
     expect(DEFAULT_EXCLUDE_PATTERNS).toContain('.git/');
+  });
+});
+
+describe('Excluder: .aiftp.toml.* backup variants (v0.10.1)', () => {
+  it('excludes .aiftp.toml.bak (must not regress v0.9.x)', () => {
+    const ex = createExcluder();
+    expect(ex.shouldExclude('.aiftp.toml.bak').excluded).toBe(true);
+  });
+
+  it('excludes .aiftp.toml.before-v0100 (v0.10.1: arbitrary suffix from F-X1)', () => {
+    const ex = createExcluder();
+    expect(ex.shouldExclude('.aiftp.toml.before-v0100').excluded).toBe(true);
+  });
+
+  it('excludes .aiftp.toml.old', () => {
+    const ex = createExcluder();
+    expect(ex.shouldExclude('.aiftp.toml.old').excluded).toBe(true);
+  });
+
+  it('does NOT exclude .aiftp.toml-readme.md (extension-style suffix only, not dash-separated)', () => {
+    const ex = createExcluder();
+    expect(ex.shouldExclude('.aiftp.toml-readme.md').excluded).toBe(false);
   });
 });
 

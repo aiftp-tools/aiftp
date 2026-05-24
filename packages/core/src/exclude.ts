@@ -63,7 +63,7 @@ export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
   // --- aiftp's own files (must not deploy our state to the remote) ---
   '.aiftp/',
   '.aiftp.toml',
-  '.aiftp.toml.bak',
+  '.aiftp.toml.*',
 
   // --- VCS metadata ---
   '.git/',
