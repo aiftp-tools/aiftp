@@ -91,4 +91,51 @@ describe('encryption', () => {
     expect(() => encryptBuffer(Buffer.from('payload'), randomBytes(31))).toThrow(EncryptionError);
     expect(() => decryptBuffer(Buffer.alloc(0), randomBytes(33))).toThrow(EncryptionError);
   });
+
+  it('rejects empty buffer for decryption (v0.10.3 branch coverage)', () => {
+    expect(() => decryptBuffer(Buffer.alloc(0), generateKey())).toThrow(/too short|magic/i);
+  });
+
+  it('rejects payload too short for auth tag (v0.10.3 branch coverage)', () => {
+    const key = generateKey();
+    const AUTH_TAG_BYTES_LOCAL = 16;
+    const tooShort = Buffer.alloc(ENCRYPTED_FILE_HEADER_BYTES + AUTH_TAG_BYTES_LOCAL - 1);
+    expect(() => decryptBuffer(tooShort, key)).toThrow(EncryptionError);
+  });
+
+  it('rejects payload with invalid magic header (v0.10.3 branch coverage)', () => {
+    const key = generateKey();
+    const encrypted = encryptBuffer(Buffer.from('data'), key);
+    const tampered = Buffer.from(encrypted);
+    tampered.write('BADMAGIC', 0);
+    expect(() => decryptBuffer(tampered, key)).toThrow(/magic/i);
+  });
+
+  it('rejects payload with unsupported algorithm label (v0.10.3 branch coverage)', () => {
+    const key = generateKey();
+    const encrypted = encryptBuffer(Buffer.from('data'), key);
+    const tampered = Buffer.from(encrypted);
+    // Algorithm field starts after MAGIC (8B) + NONCE (12B)
+    tampered.write('AES-128-CBC\0\0\0\0\0', 20, 'ascii');
+    expect(() => decryptBuffer(tampered, key)).toThrow(/algorithm/i);
+  });
+
+  it('wraps crypto errors when auth tag is corrupted (v0.10.3 branch coverage)', () => {
+    const key = generateKey();
+    const encrypted = encryptBuffer(Buffer.from('payload'), key);
+    const tampered = Buffer.from(encrypted);
+    const lastIndex = tampered.length - 1;
+    const lastByte = tampered[lastIndex] ?? 0;
+    tampered[lastIndex] = lastByte ^ 0xff;
+    expect(() => decryptBuffer(tampered, key)).toThrow(EncryptionError);
+  });
+
+  it('rejects encrypted file shorter than header+tag (v0.10.3 branch coverage)', async () => {
+    const key = generateKey();
+    const tooShortPath = join(tempDir, 'too-short.enc');
+    await writeFile(tooShortPath, Buffer.alloc(8));
+    await expect(decryptFile(tooShortPath, join(tempDir, 'out'), key)).rejects.toThrow(
+      /too short/i,
+    );
+  });
 });
