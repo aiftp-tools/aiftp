@@ -1,5 +1,5 @@
 {
-  "name": "aiftp",
+  "name": "@aiftp-tools/cli",
   "version": "0.10.0",
   "description": "AI-first FTP/FTPS deploy tool \u2014 CLI",
   "license": "MIT",
