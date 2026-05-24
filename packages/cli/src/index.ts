@@ -1004,10 +1004,28 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
       }
 
+      const requireNonEmpty = (label: string) => (value: unknown) => {
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return `${label} is required`;
+        }
+        return true;
+      };
+
       const answers = parseInitAnswers(
         await prompt([
-          { type: 'text', name: 'profile', message: 'Profile name', initial: 'production' },
-          { type: 'text', name: 'host', message: 'FTP host' },
+          {
+            type: 'text',
+            name: 'profile',
+            message: 'Profile name',
+            initial: 'production',
+            validate: requireNonEmpty('Profile name'),
+          },
+          {
+            type: 'text',
+            name: 'host',
+            message: 'FTP host',
+            validate: requireNonEmpty('FTP host'),
+          },
           { type: 'number', name: 'port', message: 'FTP port', initial: 21 },
           {
             type: 'select',
@@ -1018,10 +1036,34 @@ export function createCli(options: CliOptions = {}): Command {
               { title: 'FTP', value: 'ftp' },
             ],
           },
-          { type: 'text', name: 'user', message: 'FTP user' },
-          { type: 'text', name: 'remoteRoot', message: 'Remote root', initial: '/public_html' },
-          { type: 'text', name: 'localRoot', message: 'Local root', initial: '.' },
-          { type: 'text', name: 'keychainService', message: 'Keychain service' },
+          {
+            type: 'text',
+            name: 'user',
+            message: 'FTP user',
+            validate: requireNonEmpty('FTP user'),
+          },
+          {
+            type: 'text',
+            name: 'remoteRoot',
+            message: 'Remote root',
+            initial: '/public_html',
+            validate: requireNonEmpty('Remote root'),
+          },
+          {
+            type: 'text',
+            name: 'localRoot',
+            message: 'Local root',
+            initial: '.',
+            validate: requireNonEmpty('Local root'),
+          },
+          {
+            type: 'text',
+            name: 'keychainService',
+            message: 'Keychain service',
+            initial: (_prev: unknown, values: { profile?: string }) =>
+              `aiftp:${values.profile && values.profile.length > 0 ? values.profile : 'production'}`,
+            validate: requireNonEmpty('Keychain service'),
+          },
           {
             type: 'select',
             name: 'serverKind',
@@ -1034,7 +1076,12 @@ export function createCli(options: CliOptions = {}): Command {
               { title: 'Generic', value: 'generic' },
             ],
           },
-          { type: 'password', name: 'password', message: 'FTP password' },
+          {
+            type: 'password',
+            name: 'password',
+            message: 'FTP password',
+            validate: requireNonEmpty('FTP password'),
+          },
           { type: 'confirm', name: 'consent', message: 'Store encrypted backups locally?' },
         ]),
       );
