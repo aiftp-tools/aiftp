@@ -248,6 +248,14 @@ function requireNumber(value: unknown, name: string): number {
   return value;
 }
 
+function requirePort(value: unknown): number {
+  const port = requireNumber(value, 'port');
+  if (port < 1 || port > 65535) {
+    throw new Error('port must be between 1 and 65535 (e.g. 21 for FTP, 990 for FTPS implicit)');
+  }
+  return port;
+}
+
 function parseNonNegativeInteger(value: string, name: string): number {
   if (!/^\d+$/u.test(value)) {
     throw new Error(`${name} must be a non-negative integer`);
@@ -263,7 +271,7 @@ function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
   return {
     profile: requireString(raw.profile, 'profile'),
     host: requireString(raw.host, 'host'),
-    port: requireNumber(raw.port, 'port'),
+    port: requirePort(raw.port),
     protocol: requireString(raw.protocol, 'protocol') as InitAnswers['protocol'],
     user: requireString(raw.user, 'user'),
     remoteRoot: requireString(raw.remoteRoot, 'remoteRoot'),
@@ -1026,7 +1034,23 @@ export function createCli(options: CliOptions = {}): Command {
             message: 'FTP host',
             validate: requireNonEmpty('FTP host'),
           },
-          { type: 'number', name: 'port', message: 'FTP port', initial: 21 },
+          {
+            type: 'number',
+            name: 'port',
+            message: 'FTP port',
+            initial: 21,
+            min: 1,
+            max: 65535,
+            validate: (value: unknown) => {
+              if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+                return 'FTP port must be an integer (e.g. 21 for FTP, 990 for FTPS implicit)';
+              }
+              if (value < 1 || value > 65535) {
+                return 'FTP port must be between 1 and 65535';
+              }
+              return true;
+            },
+          },
           {
             type: 'select',
             name: 'protocol',

@@ -244,6 +244,46 @@ describe('cli', () => {
     );
   });
 
+  it('init rejects -Infinity port (F-X7 / v0.10.2 regression guard)', async () => {
+    await expect(
+      parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: Number.NEGATIVE_INFINITY,
+          protocol: 'ftps',
+          user: 'deploy-user',
+          remoteRoot: '/public_html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'lolipop',
+          password: 'secret-password',
+          consent: true,
+        }),
+      }),
+    ).rejects.toThrow('port must be an integer');
+  });
+
+  it('init rejects port outside 1-65535 range (F-X7)', async () => {
+    await expect(
+      parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: 70000,
+          protocol: 'ftps',
+          user: 'deploy-user',
+          remoteRoot: '/public_html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'lolipop',
+          password: 'secret-password',
+          consent: true,
+        }),
+      }),
+    ).rejects.toThrow('port must be between 1 and 65535');
+  });
+
   it('init --force preserves an existing backup key by default', async () => {
     await writeConfig();
 
