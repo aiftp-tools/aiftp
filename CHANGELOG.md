@@ -16,6 +16,39 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.10.3] — 2026-05-24
+
+**Quality patch** — reflective release closing the prompt-validation coverage gap surfaced by v0.10.1 / v0.10.2. 田中さんの指摘 ("port は標準ポート以外なら確認すべき / 非正常系のテストはどの程度か") への対応。
+
+### Added
+
+- **`aiftp init`** now warns and asks for explicit confirmation when the FTP port is non-standard. Standard ports are `21` (FTP) and `21` or `990` (FTPS implicit); any other value triggers a `Non-standard FTPS port 8021 (standard: 21 or 990). Continue?` confirmation. Declining aborts init with `aborted: non-standard FTP/FTPS port N was not confirmed`. ([F-X8 / v0.10.3])
+
+### Tests
+
+- `packages/core/src/encryption.spec.ts`: +6 branch-coverage tests (empty buffer / payload too short / invalid magic / unsupported algorithm / corrupted auth tag / encrypted file too short). `encryption.ts` Branches coverage **61.53% → 83.87%** (+22.34 pp).
+- `packages/cli/src/index.spec.ts`: +4 init non-standard-port tests (confirm-yes / confirm-no / FTPS 990 standard / port 990 over plain FTP).
+
+### Quality gates (post-fix)
+
+| Metric | v0.10.2 | v0.10.3 |
+|---|---|---|
+| Statements coverage | 89.99% | **90.25%** |
+| Branches coverage | 82.81% | **83.29%** |
+| Functions coverage | 95.36% | **95.36%** |
+| Total tests | 580 | **590** (+10) |
+
+### Process improvements
+
+CLAUDE.md / memory.md に "prompt 実装時のチェックリスト" を追記する方針を確認:
+
+- [ ] 全 prompt 型 (`text` / `password` / `number` / `select` / `confirm`) を横断 review
+- [ ] 各型で空 / 不正値 / 境界値 (`Infinity`, `NaN`, 範囲外) を listing
+- [ ] Branches coverage が 80% 未満のファイルは PR ブロック対象
+- [ ] 非対話的 mock テストとは別に、実機 smoke test を CI 化 (next milestone)
+
+---
+
 ## [0.10.2] — 2026-05-24
 
 **Patch release** — follow-up to v0.10.1 closing the same-day `aiftp init` UX gap.
