@@ -58,7 +58,17 @@ export class PromptFlow {
         continue;
       }
 
-      answers[field.name] = value;
+      const sanitized = field.sanitize ? field.sanitize(value) : value;
+
+      if (field.validate) {
+        const verdict = field.validate(sanitized as never, answers);
+        if (verdict !== true) {
+          this.deps.stderr(`  ✗ ${verdict}`);
+          continue;
+        }
+      }
+
+      answers[field.name] = sanitized;
       cursor++;
     }
     return { kind: 'completed', answers };

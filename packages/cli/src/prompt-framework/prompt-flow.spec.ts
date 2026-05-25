@@ -138,4 +138,86 @@ describe('PromptFlow', () => {
       }
     });
   });
+
+  describe('sanitize and validate', () => {
+    it('applies field.sanitize before storing answer', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'host',
+          label: 'host',
+          type: 'text',
+          sanitize: (r) => String(r).trim().toLowerCase(),
+        },
+      ];
+      const prompt = vi.fn().mockResolvedValueOnce({ host: '  FTP.Example.COM  ' });
+      const result = await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(result).toEqual({ kind: 'completed', answers: { host: 'ftp.example.com' } });
+    });
+
+    it('rejects via validate(string) and re-prompts the same field', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'port',
+          label: 'port',
+          type: 'text',
+          validate: (v) => {
+            const n = Number(v);
+            return n >= 1 && n <= 65535 ? true : 'port must be 1-65535';
+          },
+        },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ port: '99999' })
+        .mockResolvedValueOnce({ port: '21' });
+      const result = await new PromptFlow(fields, { prompt, stderr }).run();
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('port must be 1-65535'))).toBe(true);
+      if (result.kind === 'completed') expect(result.answers.port).toBe('21');
+    });
+
+    it('does not run sanitize for the :back keyword (back must reach the navigator first)', async () => {
+      const sanitize = vi.fn().mockImplementation((raw) => String(raw).trim());
+      const fields: PromptField[] = [
+        { name: 'host', label: 'host', type: 'text', sanitize },
+        { name: 'user', label: 'user', type: 'text', sanitize },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: ':back' })
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: 'deploy' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      // sanitize ran for host×2 + user×1 = 3 times; :back skipped sanitize.
+      expect(sanitize).toHaveBeenCalledTimes(3);
+    });
+
+    it('passes prior answers to validate so cross-field rules can fire', async () => {
+      const fields: PromptField[] = [
+        { name: 'protocol', label: 'protocol', type: 'text' },
+        {
+          name: 'port',
+          label: 'port',
+          type: 'text',
+          validate: (v, answers) => {
+            if (answers.protocol === 'ftps' && Number(v) !== 990 && Number(v) !== 21) {
+              return 'FTPS standard port is 21 or 990';
+            }
+            return true;
+          },
+        },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ protocol: 'ftps' })
+        .mockResolvedValueOnce({ port: '8021' })
+        .mockResolvedValueOnce({ port: '990' });
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('FTPS standard port'))).toBe(true);
+    });
+  });
 });
