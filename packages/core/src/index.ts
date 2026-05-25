@@ -39,6 +39,7 @@ export {
   type HooksConfig,
   type LoadConfigOptions,
   type ProfileConfig,
+  type PreflightConfig,
   type QuirksConfig,
   type SafetyConfig,
   ConfigValidationError,
@@ -66,6 +67,14 @@ export {
 } from './diagnostics/ftp-probe.js';
 
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
+
+export {
+  getTemplate,
+  listTemplates,
+  type TemplateConfig,
+  type TemplateDefaults,
+  templateIds,
+} from './templates/index.js';
 
 export { isProdProfile } from './safety.js';
 

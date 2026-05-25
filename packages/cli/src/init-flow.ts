@@ -13,6 +13,7 @@
  *   keychainService, serverKind, password, consent
  */
 
+import { listTemplates } from '@aiftp-tools/core';
 import type { PromptField } from './prompt-framework/types.js';
 
 function requireNonEmpty(label: string): (value: unknown) => true | string {
@@ -31,7 +32,11 @@ function isStandardFtpPort(port: number, protocol: string): boolean {
 }
 
 export function buildInitFields(): PromptField[] {
-  return [
+  return buildInitFieldsWithTemplate(true);
+}
+
+export function buildInitFieldsWithTemplate(skipTemplate: boolean): PromptField[] {
+  const fields: PromptField[] = [
     {
       name: 'profile',
       label: 'Profile name',
@@ -146,6 +151,29 @@ export function buildInitFields(): PromptField[] {
       type: 'confirm',
       hint: '"y" を選ぶと .aiftp/backup/ に暗号化バックアップを取得します（push 前に自動）。',
     },
+  ];
+
+  if (skipTemplate) {
+    return fields;
+  }
+
+  return [
+    {
+      name: 'template-select',
+      label: 'Template',
+      type: 'select',
+      hint: 'サイト種別に合わせて .aiftp.toml の hard-exclude / safety / preflight 既定値を追加します。',
+      initial: 'none',
+      choices: [
+        ...listTemplates().map((template) => ({
+          title: template.id,
+          value: template.id,
+          description: template.description,
+        })),
+        { title: 'none', value: 'none', description: 'Blank init (advanced)' },
+      ],
+    },
+    ...fields,
   ];
 }
 

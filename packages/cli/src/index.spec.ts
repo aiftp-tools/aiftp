@@ -48,7 +48,8 @@ describe('cli', () => {
   function prompt(answers: Record<string, unknown>): CliPrompt {
     // v0.10.4: default summary review choice to 'Y' so existing tests stay green.
     // Existing tests don't pass `choice`; the init field prompts ignore it.
-    return async () => ('choice' in answers ? answers : { ...answers, choice: 'Y' });
+    return async () =>
+      'choice' in answers ? answers : { 'template-select': 'none', ...answers, choice: 'Y' };
   }
 
   function keychain(existing = new Set<string>()): CliKeychain {
@@ -206,6 +207,97 @@ describe('cli', () => {
     });
     const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
     expect(toml).not.toMatch(/tls_check_hostname = false/);
+  });
+
+  it('init --template wordpress-swell writes SWELL hard-excludes to .aiftp.toml', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'wordpress-swell'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[backup.hard_exclude]');
+    expect(toml).toContain('wp-content/themes/swell-child/node_modules/**');
+    expect(toml).toContain('wp-content/themes/swell-child/.cache/**');
+    expect(toml).toContain('wp-content/ai1wm-backups/**');
+    expect(toml).toContain('[safety]');
+    expect(toml).toContain('prod_profile_patterns = ["*prod*", "*www*", "*-live"]');
+    expect(toml).toContain('[preflight]');
+    expect(toml).toContain('php_lint = true');
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.backup.hard_exclude.additional_patterns).toEqual(
+      expect.arrayContaining(['wp-content/themes/swell-child/node_modules/**']),
+    );
+    expect(config.preflight.php_lint).toBe(true);
+  });
+
+  it('init --template list outputs 7 id-description lines to stderr', async () => {
+    await parse(['init', '--template', 'list']);
+
+    const lines = stderr.filter((line) => line.length > 0);
+    expect(lines).toHaveLength(7);
+    expect(lines).toEqual([
+      'wordpress-swell - WordPress with SWELL theme',
+      'wordpress-lightning - WordPress with LIGHTNING (Vektor) theme',
+      'wordpress-cocoon - WordPress with Cocoon theme',
+      'wordpress-standard - WordPress (theme-agnostic baseline)',
+      'static - Static site / Jamstack build output',
+      'laravel - Laravel on shared hosting',
+      'php-simple - Standalone PHP scripts (contact form, mini-API)',
+    ]);
+    expect(stdout).toEqual([]);
+  });
+
+  it('init --template invalid-name exits nonzero with unknown-template message', async () => {
+    await expect(parse(['init', '--template', 'invalid-name'])).rejects.toMatchObject({
+      exitCode: 1,
+      code: 'aiftp.unknown-template',
+    });
+    expect(stderr.join('\n')).toMatch(/unknown-template.*invalid-name/i);
+  });
+
+  it('init without --template starts prompt flow with template-select as the first field', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    const seenNames: string[] = [];
+    const answers = {
+      'template-select': 'none',
+      profile: 'production',
+      host: 'ftp.example.com',
+      port: 21,
+      protocol: 'ftps',
+      user: 'deploy-user',
+      remoteRoot: 'public_html',
+      localRoot: '.',
+      keychainService: 'aiftp:production',
+      serverKind: 'generic',
+      password: 'secret-password',
+      consent: true,
+      choice: 'Y',
+    };
+    const recordingPrompt: CliPrompt = async (questions) => {
+      const first = Array.isArray(questions) ? questions[0] : questions;
+      if (typeof first?.name === 'string') {
+        seenNames.push(first.name);
+      }
+      return answers;
+    };
+
+    await parse(['init'], { prompt: recordingPrompt });
+
+    expect(seenNames[0]).toBe('template-select');
   });
 
   it('init warns when remote_root starts with a leading "/" (shared-host gotcha)', async () => {
@@ -442,6 +534,7 @@ describe('cli', () => {
     };
     const confirmOverwrite: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
+      if (first?.name === 'template-select') return { 'template-select': 'none' };
       if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: true };
       // v0.10.4: summary review prompt
       if (first?.name === 'choice') return { choice: 'Y' };
@@ -1985,6 +2078,9 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
         !Array.isArray(question) && typeof question === 'object' && question !== null
           ? (question as { name?: string }).name
           : undefined;
+      if (askedName === 'template-select') {
+        return { 'template-select': 'none' };
+      }
       const fixtureHasFullInitBatch = INIT_FIELDS_V011.every((f) => f in fixture);
       const isInitFieldRequest =
         askedName !== undefined && (INIT_FIELDS_V011 as readonly string[]).includes(askedName);
@@ -2182,6 +2278,7 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
     let choiceCallNum = 0;
     const customPrompt: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
+      if (first?.name === 'template-select') return { 'template-select': 'none' };
       if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: false };
       if (first?.name === 'choice') {
         choiceCallNum += 1;

@@ -130,6 +130,13 @@ const walkSchema = z
   })
   .strict();
 
+const preflightSchema = z
+  .object({
+    php_lint: z.boolean().default(false),
+    json_check: z.boolean().default(false),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     schema: z.union([z.literal(SUPPORTED_SCHEMAS[0]), z.literal(SUPPORTED_SCHEMAS[1])]),
@@ -146,6 +153,7 @@ export const configSchema = z
     encoding: encodingSchema.prefault({}),
     quirks: quirksSchema.prefault({}),
     walk: walkSchema.prefault({}),
+    preflight: preflightSchema.prefault({}),
   })
   .strict();
 
@@ -159,6 +167,7 @@ export type HooksConfig = z.infer<typeof hooksSchema>;
 export type EncodingConfig = z.infer<typeof encodingSchema>;
 export type QuirksConfig = z.infer<typeof quirksSchema>;
 export type WalkConfig = z.infer<typeof walkSchema>;
+export type PreflightConfig = z.infer<typeof preflightSchema>;
 
 export interface LoadConfigOptions {
   autoMigrate?: boolean;

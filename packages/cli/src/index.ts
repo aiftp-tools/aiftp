@@ -19,6 +19,7 @@ import {
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
+  type TemplateConfig,
   VERSION,
   type VerifyResult,
   appendProfileBlock,
@@ -31,10 +32,12 @@ import {
   extractHookPaths,
   generateKey,
   getPassword,
+  getTemplate,
   hasPassword,
   isProdProfile,
   isValidProfileName,
   isValidSnapshotId,
+  listTemplates,
   loadConfig,
   loadState,
   migrateV1ToV2Source,
@@ -58,7 +61,7 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
-import { buildInitFields } from './init-flow.js';
+import { buildInitFieldsWithTemplate } from './init-flow.js';
 import { PromptFlow } from './prompt-framework/prompt-flow.js';
 
 export { VERSION };
@@ -128,6 +131,11 @@ export interface CliRollbackOptions {
   dryRun: boolean;
 }
 
+interface InitCommandOptions {
+  force?: boolean;
+  template?: string;
+}
+
 interface ManagedUploader {
   uploader: DeployUploader;
   close(): Promise<void>;
@@ -187,7 +195,13 @@ function quote(value: string): string {
   return JSON.stringify(value);
 }
 
-function renderConfig(answers: InitAnswers): string {
+function renderStringArray(values: readonly string[]): string {
+  return `[${values.map((value) => quote(value)).join(', ')}]`;
+}
+
+function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
+  const defaults = template?.defaults;
+  const localRoot = defaults?.localRoot ?? answers.localRoot;
   const lines: string[] = [
     'schema = 2',
     '',
@@ -197,11 +211,42 @@ function renderConfig(answers: InitAnswers): string {
     `protocol = ${quote(answers.protocol)}`,
     `user = ${quote(answers.user)}`,
     `remote_root = ${quote(answers.remoteRoot)}`,
-    `local_root = ${quote(answers.localRoot)}`,
+    `local_root = ${quote(localRoot)}`,
     `keychain_service = ${quote(answers.keychainService)}`,
     `server_kind = ${quote(answers.serverKind)}`,
     '',
   ];
+
+  if (defaults) {
+    if (defaults.excludeAdd.length > 0) {
+      lines.push(
+        '[backup.hard_exclude]',
+        `additional_patterns = ${renderStringArray(defaults.excludeAdd)}`,
+        '',
+      );
+    }
+
+    if (defaults.safetyProductionPatterns.length > 0) {
+      lines.push(
+        '[safety]',
+        `prod_profile_patterns = ${renderStringArray(defaults.safetyProductionPatterns)}`,
+        '',
+      );
+    }
+
+    if (defaults.preflightPhpLint !== undefined || defaults.preflightJsonCheck !== undefined) {
+      lines.push(
+        '[preflight]',
+        ...(defaults.preflightPhpLint !== undefined
+          ? [`php_lint = ${defaults.preflightPhpLint}`]
+          : []),
+        ...(defaults.preflightJsonCheck !== undefined
+          ? [`json_check = ${defaults.preflightJsonCheck}`]
+          : []),
+        '',
+      );
+    }
+  }
 
   if (answers.serverKind === 'starserver') {
     // Star Server presents `*.star.ne.jp` cert for `*.stars.ne.jp` hosts.
@@ -1420,7 +1465,25 @@ export function createCli(options: CliOptions = {}): Command {
     .command('init')
     .description('Create .aiftp.toml and register credentials')
     .option('-f, --force', 'overwrite an existing .aiftp.toml')
-    .action(async (cmd: { force?: boolean }) => {
+    .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
+    .action(async (cmd: InitCommandOptions) => {
+      if (cmd.template === 'list') {
+        for (const template of listTemplates()) {
+          stderr(`${template.id} - ${template.description}`);
+        }
+        return;
+      }
+
+      const template =
+        cmd.template === undefined || cmd.template.length === 0
+          ? undefined
+          : getTemplate(cmd.template);
+      if (cmd.template !== undefined && !template) {
+        const message = `unknown-template: ${cmd.template}. Run "aiftp init --template list" to see available templates.`;
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.unknown-template', message);
+      }
+
       const configPath = join(cwd, '.aiftp.toml');
       if ((await exists(configPath)) && !cmd.force) {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
@@ -1430,12 +1493,28 @@ export function createCli(options: CliOptions = {}): Command {
       // input hints (A) and :back navigation (B) on top of the existing
       // v0.10.4 summary review (C). Field definitions live in init-flow.ts
       // so they can be reused / extended for templates (v0.11 Pillar β).
-      const flowResult = await new PromptFlow(buildInitFields(), {
+      const flowResult = await new PromptFlow(buildInitFieldsWithTemplate(template !== undefined), {
         prompt: (question) => prompt(question as PromptQuestion),
         stderr,
       }).run();
       if (flowResult.kind === 'cancelled') {
         throw new Error('aborted: init cancelled');
+      }
+      const selectedTemplateId = flowResult.answers['template-select'];
+      const selectedTemplate =
+        template ??
+        (typeof selectedTemplateId === 'string' && selectedTemplateId !== 'none'
+          ? getTemplate(selectedTemplateId)
+          : undefined);
+      if (
+        template === undefined &&
+        typeof selectedTemplateId === 'string' &&
+        selectedTemplateId !== 'none' &&
+        selectedTemplate === undefined
+      ) {
+        const message = `unknown-template: ${selectedTemplateId}. Run "aiftp init --template list" to see available templates.`;
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.unknown-template', message);
       }
       let answers = parseInitAnswers(flowResult.answers);
 
@@ -1475,7 +1554,10 @@ export function createCli(options: CliOptions = {}): Command {
         );
       }
 
-      await writeFile(configPath, renderConfig(answers), { encoding: 'utf8', mode: 0o600 });
+      await writeFile(configPath, renderConfig(answers, selectedTemplate), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
       await ensureGitignore(cwd);
       await keychain.setPassword(answers.keychainService, answers.user, answers.password);
       const backupKeyEntryService = backupKeyService(answers.keychainService);
