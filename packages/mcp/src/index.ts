@@ -23,6 +23,7 @@ import {
   hasPassword,
   isProdProfile,
   isValidSnapshotId,
+  listTemplates,
   loadConfig,
   loadState,
   migrateV1ToV2Source,
@@ -107,6 +108,7 @@ export type AiftpToolName =
   | 'aiftp_log'
   | 'aiftp_list_remote'
   | 'aiftp_profile_list'
+  | 'aiftp_init_template_list'
   | 'aiftp_profile_current'
   | 'aiftp_profile_test'
   | 'aiftp_config_migrate'
@@ -347,6 +349,7 @@ const toolSchemas = {
   aiftp_log: logSchema,
   aiftp_list_remote: listRemoteSchema,
   aiftp_profile_list: noArgsSchema,
+  aiftp_init_template_list: noArgsSchema,
   aiftp_profile_current: noArgsSchema,
   aiftp_profile_test: profileSchema,
   aiftp_config_migrate: noArgsSchema,
@@ -380,6 +383,8 @@ const toolDescriptions = {
   aiftp_list_remote: 'List a remote directory through the configured runtime.',
   aiftp_profile_list:
     'List profiles from .aiftp.toml as redacted summaries: name, protocol, server_kind, credentialsStatus (present/missing/unknown), isDefault. Host / user / remote_root / keychain_service are NEVER surfaced (mirrors aiftp://config redaction policy). Read-only.',
+  aiftp_init_template_list:
+    'List available .aiftp.toml templates for `aiftp init --template <name>`. Read-only.',
   aiftp_profile_current:
     'Return the resolved default profile name (AIFTP_PROFILE env > .aiftp/state file > single-profile fallback), or null when ambiguous. Read-only.',
   aiftp_profile_test:
@@ -1231,6 +1236,26 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     });
   }
   return textResult({ ok: true, profiles, default: defaultName });
+}
+
+async function handleInitTemplateList(
+  _app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const payload = listTemplates().map(({ id, description, longDescription }) => ({
+    id,
+    description,
+    longDescription,
+  }));
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
 }
 
 async function handleProfileCurrent(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -2215,6 +2240,7 @@ const handlers = {
   aiftp_log: handleLog,
   aiftp_list_remote: handleListRemote,
   aiftp_profile_list: handleProfileList,
+  aiftp_init_template_list: handleInitTemplateList,
   aiftp_profile_current: handleProfileCurrent,
   aiftp_profile_test: handleProfileTest,
   aiftp_config_migrate: handleConfigMigrate,
