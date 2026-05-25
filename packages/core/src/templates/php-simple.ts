@@ -19,7 +19,7 @@ export const phpSimpleTemplate: TemplateConfig = {
       'node_modules/**',
       'vendor/**',
     ],
-    safetyProductionPatterns: ['*prod*', '*www*', '*-live'],
+    safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
     preflightPhpLint: true,
   },
 };

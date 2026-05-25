@@ -22,7 +22,7 @@ export const laravelTemplate: TemplateConfig = {
       'node_modules/**',
       'tests/**',
     ],
-    safetyProductionPatterns: ['*prod*', '*www*', '*-live'],
+    safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
     preflightPhpLint: true,
   },
 };

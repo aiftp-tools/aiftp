@@ -81,11 +81,20 @@ describe('template registry', () => {
     expect(s?.defaults.preflightPhpLint).toBeUndefined();
   });
 
-  it('all templates mark *prod* / *www* / *-live as production', () => {
+  it('all templates mark main* / *prod* / *www* / *-live as production', () => {
     for (const t of listTemplates()) {
       expect(t.defaults.safetyProductionPatterns).toEqual(
-        expect.arrayContaining(['*prod*', '*www*', '*-live']),
+        expect.arrayContaining(['main*', '*prod*', '*www*', '*-live']),
       );
+    }
+  });
+
+  it('every template includes main* as the first production pattern', () => {
+    // Regression: the v0.11 config schema default `prod_profile_patterns =
+    // ["main*"]` would be replaced (not merged) when a template was applied,
+    // silently removing the production gate from the `main` profile.
+    for (const t of listTemplates()) {
+      expect(t.defaults.safetyProductionPatterns?.[0], `${t.id} starts with main*`).toBe('main*');
     }
   });
 

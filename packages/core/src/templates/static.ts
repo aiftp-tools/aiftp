@@ -18,6 +18,6 @@ export const staticTemplate: TemplateConfig = {
       '.parcel-cache/**',
       '.vite/**',
     ],
-    safetyProductionPatterns: ['*prod*', '*www*', '*-live'],
+    safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
   },
 };

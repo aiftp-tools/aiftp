@@ -1,5 +1,6 @@
+import { getTemplate } from '@aiftp-tools/core';
 import { describe, expect, it } from 'vitest';
-import { buildInitFields, isStandardFtpPort } from './init-flow.ts';
+import { buildInitFields, buildInitFieldsWithTemplate, isStandardFtpPort } from './init-flow.ts';
 
 describe('buildInitFields', () => {
   const fields = buildInitFields();
@@ -102,5 +103,54 @@ describe('isStandardFtpPort', () => {
   it('unknown protocol falls back to ftp behavior (port 21)', () => {
     expect(isStandardFtpPort(21, 'gopher')).toBe(true);
     expect(isStandardFtpPort(8021, 'gopher')).toBe(false);
+  });
+});
+
+describe('buildInitFieldsWithTemplate — localRoot initial', () => {
+  // Regression: v0.11 Pillar β review Phase 2-1. The previous implementation
+  // had `localRoot.initial = '.'` for all templates, and renderConfig silently
+  // overwrote the user's answer with `template.defaults.localRoot`. The screen
+  // value and the TOML on disk diverged. Fix: the field's initial picks up
+  // the template default so the user sees and confirms the same value that
+  // ends up in .aiftp.toml.
+
+  function localRootField(fields: ReturnType<typeof buildInitFieldsWithTemplate>) {
+    const field = fields.find((f) => f.name === 'localRoot');
+    if (!field) throw new Error('localRoot field missing');
+    return field;
+  }
+
+  function resolveInitial(initial: unknown, answers: Record<string, unknown>): unknown {
+    return typeof initial === 'function' ? initial(answers) : initial;
+  }
+
+  it('uses template default "dist" when --template static is prefilled', () => {
+    const fields = buildInitFieldsWithTemplate(true, getTemplate('static'));
+    expect(resolveInitial(localRootField(fields).initial, {})).toBe('dist');
+  });
+
+  it('uses template default "public" when --template laravel is prefilled', () => {
+    const fields = buildInitFieldsWithTemplate(true, getTemplate('laravel'));
+    expect(resolveInitial(localRootField(fields).initial, {})).toBe('public');
+  });
+
+  it('reads template-select answer to derive localRoot initial (no flag)', () => {
+    const fields = buildInitFieldsWithTemplate(false);
+    expect(resolveInitial(localRootField(fields).initial, { 'template-select': 'static' })).toBe(
+      'dist',
+    );
+    expect(resolveInitial(localRootField(fields).initial, { 'template-select': 'laravel' })).toBe(
+      'public',
+    );
+  });
+
+  it('falls back to "." when no template is selected', () => {
+    const fields = buildInitFieldsWithTemplate(false);
+    expect(resolveInitial(localRootField(fields).initial, { 'template-select': 'none' })).toBe('.');
+    expect(resolveInitial(localRootField(fields).initial, {})).toBe('.');
+  });
+
+  it('buildInitFields() backward-compat returns "." for localRoot initial', () => {
+    expect(resolveInitial(localRootField(buildInitFields()).initial, {})).toBe('.');
   });
 });

@@ -21,7 +21,7 @@ export const wordpressStandardTemplate: TemplateConfig = {
       'wp-content/updraft/**',
       'wp-content/debug.log',
     ],
-    safetyProductionPatterns: ['*prod*', '*www*', '*-live'],
+    safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
     preflightPhpLint: true,
   },
 };

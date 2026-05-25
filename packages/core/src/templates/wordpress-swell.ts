@@ -23,7 +23,7 @@ export const wordpressSwellTemplate: TemplateConfig = {
       'wp-content/ai1wm-backups/**',
       'wp-content/updraft/**',
     ],
-    safetyProductionPatterns: ['*prod*', '*www*', '*-live'],
+    safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
     preflightPhpLint: true,
   },
 };

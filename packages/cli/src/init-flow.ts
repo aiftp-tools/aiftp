@@ -13,7 +13,7 @@
  *   keychainService, serverKind, password, consent
  */
 
-import { listTemplates } from '@aiftp-tools/core';
+import { type TemplateConfig, getTemplate, listTemplates } from '@aiftp-tools/core';
 import type { PromptField } from './prompt-framework/types.js';
 
 function requireNonEmpty(label: string): (value: unknown) => true | string {
@@ -35,7 +35,36 @@ export function buildInitFields(): PromptField[] {
   return buildInitFieldsWithTemplate(true);
 }
 
-export function buildInitFieldsWithTemplate(skipTemplate: boolean): PromptField[] {
+/**
+ * Resolves the localRoot initial value from either an explicit `--template`
+ * flag (prefilledTemplate) or the in-flow `template-select` answer. The
+ * v0.11 Pillar β review caught a Phase 2-1 regression where the prior code
+ * forced `localRoot.initial = '.'` and renderConfig silently overwrote the
+ * user's answer with `template.defaults.localRoot` — the screen value and
+ * the TOML on disk diverged. Now the field's initial reflects the template
+ * default so the user sees, edits, and confirms the final value.
+ */
+function resolveLocalRootInitial(
+  answers: Record<string, unknown>,
+  prefilledTemplate: TemplateConfig | undefined,
+): string {
+  if (prefilledTemplate) {
+    return prefilledTemplate.defaults.localRoot ?? '.';
+  }
+  const selected = answers['template-select'];
+  if (typeof selected === 'string' && selected.length > 0 && selected !== 'none') {
+    const tpl = getTemplate(selected);
+    if (tpl?.defaults.localRoot) {
+      return tpl.defaults.localRoot;
+    }
+  }
+  return '.';
+}
+
+export function buildInitFieldsWithTemplate(
+  skipTemplate: boolean,
+  prefilledTemplate?: TemplateConfig,
+): PromptField[] {
   const fields: PromptField[] = [
     {
       name: 'profile',
@@ -105,9 +134,10 @@ export function buildInitFieldsWithTemplate(skipTemplate: boolean): PromptField[
       name: 'localRoot',
       label: 'Local root',
       type: 'text',
-      hint: 'デプロイ元のローカルディレクトリ（プロジェクト直下からの相対 or 絶対）。',
+      hint: 'デプロイ元のローカルディレクトリ（プロジェクト直下からの相対 or 絶対）。テンプレ選択時はそのデフォルト値を初期値に。',
       example: '.',
-      initial: '.',
+      initial: (answers: Record<string, unknown>) =>
+        resolveLocalRootInitial(answers, prefilledTemplate),
       validate: requireNonEmpty('Local root'),
     },
     {

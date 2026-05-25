@@ -234,7 +234,7 @@ describe('cli', () => {
     expect(toml).toContain('wp-content/themes/swell-child/.cache/**');
     expect(toml).toContain('wp-content/ai1wm-backups/**');
     expect(toml).toContain('[safety]');
-    expect(toml).toContain('prod_profile_patterns = ["*prod*", "*www*", "*-live"]');
+    expect(toml).toContain('prod_profile_patterns = ["main*", "*prod*", "*www*", "*-live"]');
     expect(toml).toContain('[preflight]');
     expect(toml).toContain('php_lint = true');
     const config = await loadConfig(join(cwd, '.aiftp.toml'));
@@ -242,6 +242,56 @@ describe('cli', () => {
       expect.arrayContaining(['wp-content/themes/swell-child/node_modules/**']),
     );
     expect(config.preflight.php_lint).toBe(true);
+  });
+
+  it('init --template static respects user-edited local_root (Phase 2-1 regression)', async () => {
+    // The user's localRoot answer must win over the template default. The
+    // previous implementation silently rewrote `local_root` to "dist" even
+    // when the operator typed "build" in the summary review.
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'static'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: 'build',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('local_root = "build"');
+    expect(toml).not.toMatch(/local_root = "dist"/);
+  });
+
+  it('init --template static writes local_root = "dist" when user accepts initial', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'static'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: 'dist',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('local_root = "dist"');
   });
 
   it('init --template list outputs 7 id-description lines to stderr', async () => {

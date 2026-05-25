@@ -201,7 +201,10 @@ function renderStringArray(values: readonly string[]): string {
 
 function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
   const defaults = template?.defaults;
-  const localRoot = defaults?.localRoot ?? answers.localRoot;
+  // v0.11 Pillar β review Phase 2-1: the user's localRoot answer always wins.
+  // The template default is wired into init-flow.ts as the field's initial
+  // so the operator sees and confirms it; any edit must reach the TOML
+  // unchanged.
   const lines: string[] = [
     'schema = 2',
     '',
@@ -211,7 +214,7 @@ function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
     `protocol = ${quote(answers.protocol)}`,
     `user = ${quote(answers.user)}`,
     `remote_root = ${quote(answers.remoteRoot)}`,
-    `local_root = ${quote(localRoot)}`,
+    `local_root = ${quote(answers.localRoot)}`,
     `keychain_service = ${quote(answers.keychainService)}`,
     `server_kind = ${quote(answers.serverKind)}`,
     '',
@@ -1493,10 +1496,13 @@ export function createCli(options: CliOptions = {}): Command {
       // input hints (A) and :back navigation (B) on top of the existing
       // v0.10.4 summary review (C). Field definitions live in init-flow.ts
       // so they can be reused / extended for templates (v0.11 Pillar β).
-      const flowResult = await new PromptFlow(buildInitFieldsWithTemplate(template !== undefined), {
-        prompt: (question) => prompt(question as PromptQuestion),
-        stderr,
-      }).run();
+      const flowResult = await new PromptFlow(
+        buildInitFieldsWithTemplate(template !== undefined, template),
+        {
+          prompt: (question) => prompt(question as PromptQuestion),
+          stderr,
+        },
+      ).run();
       if (flowResult.kind === 'cancelled') {
         throw new Error('aborted: init cancelled');
       }
