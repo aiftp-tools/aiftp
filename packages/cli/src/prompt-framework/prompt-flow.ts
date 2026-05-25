@@ -1,4 +1,4 @@
-import type { FlowResult, PromptField } from './types.ts';
+import { BACK_KEYWORD, type FlowResult, type PromptField } from './types.ts';
 
 /**
  * Minimal abstraction over the `prompts` library so PromptFlow can be
@@ -26,14 +26,40 @@ export class PromptFlow {
 
   async run(): Promise<FlowResult> {
     const answers: Record<string, unknown> = {};
-    for (const field of this.fields) {
+    let cursor = 0;
+    while (cursor < this.fields.length) {
+      const field = this.fields[cursor];
       this.printHint(field);
       const raw = await this.deps.prompt({
         name: field.name,
         type: field.type,
         message: field.label,
       });
-      answers[field.name] = raw[field.name];
+      const value = raw[field.name];
+
+      // Cancel signal — `prompts` returns null or omits the key when the
+      // user hits Ctrl+C / EOF (after our defaultPrompt's onCancel hook
+      // suppresses the auto-exit). Either shape means cancel.
+      if (value === null || value === undefined) return { kind: 'cancelled' };
+
+      // B (戻りナビ) — reserved ASCII `:back` keyword. Checked BEFORE
+      // sanitize so a field-level `sanitize` cannot accidentally swallow
+      // the navigation signal. Full-width `：ｂａｃｋ` is intentionally
+      // *not* treated as back — it falls through to normal storage.
+      if (value === BACK_KEYWORD) {
+        if (cursor === 0) {
+          this.deps.stderr('  ↩ もう戻れません（1問目です）');
+        } else {
+          // Drop the answer recorded for the field we are stepping back
+          // *into*, so the user re-enters it on the next prompt.
+          delete answers[this.fields[cursor - 1].name];
+          cursor--;
+        }
+        continue;
+      }
+
+      answers[field.name] = value;
+      cursor++;
     }
     return { kind: 'completed', answers };
   }

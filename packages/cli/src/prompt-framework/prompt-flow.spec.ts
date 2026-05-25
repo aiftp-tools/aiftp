@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PromptFlow } from './prompt-flow.ts';
-import type { PromptField } from './types.ts';
+import { BACK_KEYWORD, type PromptField } from './types.ts';
 
 describe('PromptFlow', () => {
   it('runs a single field and returns the answer', async () => {
@@ -71,6 +71,71 @@ describe('PromptFlow', () => {
       const calls = stderr.mock.calls.map((c) => c[0] as string);
       expect(calls.some((m) => m.includes('💡'))).toBe(false);
       expect(calls.some((m) => m.includes('例: .'))).toBe(true);
+    });
+  });
+
+  describe('B: :back navigation', () => {
+    it(':back keyword moves cursor to the previous field and re-prompts it', async () => {
+      const fields: PromptField[] = [
+        { name: 'host', label: 'host', type: 'text' },
+        { name: 'user', label: 'user', type: 'text' },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: BACK_KEYWORD })
+        .mockResolvedValueOnce({ host: 'ftp.example2.com' })
+        .mockResolvedValueOnce({ user: 'deploy' });
+      const result = await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(result).toEqual({
+        kind: 'completed',
+        answers: { host: 'ftp.example2.com', user: 'deploy' },
+      });
+      expect(prompt).toHaveBeenCalledTimes(4);
+    });
+
+    it(':back on the first field stays put and warns the user', async () => {
+      const fields: PromptField[] = [{ name: 'host', label: 'host', type: 'text' }];
+      const stderr = vi.fn();
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ host: BACK_KEYWORD })
+        .mockResolvedValueOnce({ host: 'ftp.example.com' });
+      const result = await new PromptFlow(fields, { prompt, stderr }).run();
+      expect(result.kind).toBe('completed');
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('もう戻れません'))).toBe(true);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns cancelled when prompt returns null (Ctrl+C / EOF signal)', async () => {
+      const fields: PromptField[] = [{ name: 'host', label: 'host', type: 'text' }];
+      const prompt = vi.fn().mockResolvedValueOnce({ host: null });
+      const result = await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(result).toEqual({ kind: 'cancelled' });
+    });
+
+    it('returns cancelled when prompt returns undefined for the field', async () => {
+      const fields: PromptField[] = [{ name: 'host', label: 'host', type: 'text' }];
+      const prompt = vi.fn().mockResolvedValueOnce({});
+      const result = await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(result).toEqual({ kind: 'cancelled' });
+    });
+
+    it('treats full-width :back (：ｂａｃｋ) as a normal string, not a back command', async () => {
+      const fields: PromptField[] = [
+        { name: 'host', label: 'host', type: 'text' },
+        { name: 'user', label: 'user', type: 'text' },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: '：ｂａｃｋ' });
+      const result = await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(result.kind).toBe('completed');
+      if (result.kind === 'completed') {
+        expect(result.answers.user).toBe('：ｂａｃｋ');
+      }
     });
   });
 });
