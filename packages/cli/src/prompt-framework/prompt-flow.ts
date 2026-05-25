@@ -33,6 +33,11 @@ export class PromptFlow {
     const answers: Record<string, unknown> = {};
     let cursor = 0;
     let iterations = 0;
+    // S1 (Phase 1 review): track the cursor that last received a hint
+    // print so that validate re-prompt loops don't spam the hint again.
+    // When the cursor moves (advance or :back) the next arrival is fresh
+    // and the hint prints once more.
+    let lastHintedCursor = -1;
     while (cursor < this.fields.length) {
       if (++iterations > PromptFlow.MAX_ITERATIONS) {
         this.deps.stderr(`  ✗ 入力 ${PromptFlow.MAX_ITERATIONS} 回を超えました — 強制終了します`);
@@ -40,7 +45,10 @@ export class PromptFlow {
       }
       const field = this.fields[cursor];
       if (!field) break; // unreachable — while condition guards this, but TS strict-mode needs it.
-      this.printHint(field);
+      if (cursor !== lastHintedCursor) {
+        this.printHint(field);
+        lastHintedCursor = cursor;
+      }
       const raw = await this.deps.prompt(this.buildQuestion(field, answers));
       const value = raw[field.name];
 

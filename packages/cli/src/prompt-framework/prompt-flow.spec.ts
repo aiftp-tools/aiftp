@@ -278,6 +278,55 @@ describe('PromptFlow', () => {
       expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ min: 1, max: 65535 }));
     });
 
+    it('hint is shown once per fresh field arrival, suppressed on validate re-prompt', async () => {
+      // S1 (Phase 1 self-review): printHint should not spam stderr when
+      // the same field is re-prompted due to a validate failure. The user
+      // already saw the hint; repeating it on every reject is noise.
+      const fields: PromptField[] = [
+        {
+          name: 'port',
+          label: 'port',
+          type: 'text',
+          hint: '標準: 21 (FTP), 990 (FTPS implicit)',
+          validate: (v) => (v === '21' ? true : 'port must be 21 for this test'),
+        },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ port: '99999' }) // first attempt: reject
+        .mockResolvedValueOnce({ port: '50000' }) // second attempt: reject
+        .mockResolvedValueOnce({ port: '21' }); // third attempt: accept
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      const hintMessages = stderr.mock.calls
+        .map((c) => c[0] as string)
+        .filter((m) => m.includes('💡'));
+      expect(hintMessages).toHaveLength(1);
+    });
+
+    it('hint is re-shown after :back navigation returns to a previously-seen field', async () => {
+      // The reverse of the above: when the cursor *leaves* a field
+      // (advance or back), the next arrival at that field is a fresh
+      // arrival and the hint should print again.
+      const fields: PromptField[] = [
+        { name: 'host', label: 'host', type: 'text', hint: 'enter host' },
+        { name: 'user', label: 'user', type: 'text', hint: 'enter user' },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: BACK_KEYWORD }) // back to host
+        .mockResolvedValueOnce({ host: 'ftp.example.com' })
+        .mockResolvedValueOnce({ user: 'deploy' });
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      const hostHints = stderr.mock.calls
+        .map((c) => c[0] as string)
+        .filter((m) => m.includes('enter host'));
+      // host visited twice (initial + after :back) → hint shown twice
+      expect(hostHints).toHaveLength(2);
+    });
+
     it('aborts with cancelled after 100 iterations to prevent runaway loops', async () => {
       const fields: PromptField[] = [
         {
