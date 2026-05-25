@@ -24,17 +24,23 @@ export class PromptFlow {
     private readonly deps: PromptFlowDeps,
   ) {}
 
+  /** Hard cap on total prompt iterations — guards against pathological
+   * validate functions or back-loop oscillation. 100 is generous: a
+   * fresh init has 9 fields, so a user could re-enter every field 10×. */
+  private static readonly MAX_ITERATIONS = 100;
+
   async run(): Promise<FlowResult> {
     const answers: Record<string, unknown> = {};
     let cursor = 0;
+    let iterations = 0;
     while (cursor < this.fields.length) {
+      if (++iterations > PromptFlow.MAX_ITERATIONS) {
+        this.deps.stderr(`  ✗ 入力 ${PromptFlow.MAX_ITERATIONS} 回を超えました — 強制終了します`);
+        return { kind: 'cancelled' };
+      }
       const field = this.fields[cursor];
       this.printHint(field);
-      const raw = await this.deps.prompt({
-        name: field.name,
-        type: field.type,
-        message: field.label,
-      });
+      const raw = await this.deps.prompt(this.buildQuestion(field, answers));
       const value = raw[field.name];
 
       // Cancel signal — `prompts` returns null or omits the key when the
@@ -82,5 +88,31 @@ export class PromptFlow {
   private printHint(field: PromptField): void {
     if (field.hint) this.deps.stderr(`  💡 ${field.hint}`);
     if (field.example) this.deps.stderr(`  例: ${field.example}`);
+  }
+
+  /**
+   * Build the `prompts` library question object for a field, forwarding
+   * select choices, number bounds, and the (possibly answer-dependent)
+   * initial value.
+   */
+  private buildQuestion(
+    field: PromptField,
+    answers: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const question: Record<string, unknown> = {
+      name: field.name,
+      type: field.type,
+      message: field.label,
+    };
+    if (field.choices) question.choices = field.choices;
+    if (field.min !== undefined) question.min = field.min;
+    if (field.max !== undefined) question.max = field.max;
+    if (field.initial !== undefined) {
+      question.initial =
+        typeof field.initial === 'function'
+          ? (field.initial as (a: Record<string, unknown>) => unknown)(answers)
+          : field.initial;
+    }
+    return question;
   }
 }

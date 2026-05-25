@@ -220,4 +220,81 @@ describe('PromptFlow', () => {
       expect(calls.some((m) => m.includes('FTPS standard port'))).toBe(true);
     });
   });
+
+  describe('edge cases', () => {
+    it('forwards select.choices and the initial value to the prompt library', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'protocol',
+          label: 'protocol',
+          type: 'select',
+          initial: 'ftps',
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'FTP', value: 'ftp' },
+            { title: 'SFTP', value: 'sftp' },
+          ],
+        },
+      ];
+      const prompt = vi.fn().mockResolvedValueOnce({ protocol: 'ftps' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'protocol',
+          type: 'select',
+          message: 'protocol',
+          choices: fields[0].choices,
+          initial: 'ftps',
+        }),
+      );
+    });
+
+    it('resolves function-form initial with prior answers', async () => {
+      const fields: PromptField[] = [
+        { name: 'profile', label: 'profile', type: 'text' },
+        {
+          name: 'keychainService',
+          label: 'keychainService',
+          type: 'text',
+          initial: (answers) => `aiftp:${String(answers.profile ?? 'default')}`,
+        },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ profile: 'production' })
+        .mockResolvedValueOnce({ keychainService: 'aiftp:production' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenLastCalledWith(
+        expect.objectContaining({ initial: 'aiftp:production' }),
+      );
+    });
+
+    it('forwards number bounds (min/max) to the prompt library', async () => {
+      const fields: PromptField[] = [
+        { name: 'port', label: 'port', type: 'number', min: 1, max: 65535 },
+      ];
+      const prompt = vi.fn().mockResolvedValueOnce({ port: 21 });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ min: 1, max: 65535 }));
+    });
+
+    it('aborts with cancelled after 100 iterations to prevent runaway loops', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'host',
+          label: 'host',
+          type: 'text',
+          // Always invalid — induces an infinite re-prompt without the cap.
+          validate: () => 'always invalid',
+        },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi.fn().mockResolvedValue({ host: 'anything' });
+      const result = await new PromptFlow(fields, { prompt, stderr }).run();
+      expect(result).toEqual({ kind: 'cancelled' });
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('100'))).toBe(true);
+      expect(prompt).toHaveBeenCalledTimes(100);
+    });
+  });
 });
