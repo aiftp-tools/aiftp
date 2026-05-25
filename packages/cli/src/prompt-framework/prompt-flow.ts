@@ -1,4 +1,4 @@
-import { BACK_KEYWORD, type FlowResult, type PromptField } from './types.ts';
+import { BACK_KEYWORD, type FlowResult, type PromptField } from './types.js';
 
 /**
  * Minimal abstraction over the `prompts` library so PromptFlow can be
@@ -39,6 +39,7 @@ export class PromptFlow {
         return { kind: 'cancelled' };
       }
       const field = this.fields[cursor];
+      if (!field) break; // unreachable — while condition guards this, but TS strict-mode needs it.
       this.printHint(field);
       const raw = await this.deps.prompt(this.buildQuestion(field, answers));
       const value = raw[field.name];
@@ -58,7 +59,8 @@ export class PromptFlow {
         } else {
           // Drop the answer recorded for the field we are stepping back
           // *into*, so the user re-enters it on the next prompt.
-          delete answers[this.fields[cursor - 1].name];
+          const previousField = this.fields[cursor - 1];
+          if (previousField) delete answers[previousField.name];
           cursor--;
         }
         continue;

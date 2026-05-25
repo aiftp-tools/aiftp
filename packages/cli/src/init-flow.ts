@@ -13,7 +13,7 @@
  *   keychainService, serverKind, password, consent
  */
 
-import type { PromptField } from './prompt-framework/types.ts';
+import type { PromptField } from './prompt-framework/types.js';
 
 function requireNonEmpty(label: string): (value: unknown) => true | string {
   return (value: unknown): true | string => {
@@ -111,7 +111,7 @@ export function buildInitFields(): PromptField[] {
       type: 'text',
       hint: 'OS Keychain での識別子。プロファイル名から自動生成されます。',
       example: 'aiftp:production',
-      initial: (answers) => {
+      initial: (answers: Record<string, unknown>) => {
         const profile =
           typeof answers.profile === 'string' && answers.profile.length > 0
             ? answers.profile

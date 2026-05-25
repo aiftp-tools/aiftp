@@ -58,6 +58,8 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
+import { buildInitFields } from './init-flow.js';
+import { PromptFlow } from './prompt-framework/prompt-flow.js';
 
 export { VERSION };
 
@@ -1424,103 +1426,18 @@ export function createCli(options: CliOptions = {}): Command {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
       }
 
-      const requireNonEmpty = (label: string) => (value: unknown) => {
-        if (typeof value !== 'string' || value.trim().length === 0) {
-          return `${label} is required`;
-        }
-        return true;
-      };
-
-      let answers = parseInitAnswers(
-        await prompt([
-          {
-            type: 'text',
-            name: 'profile',
-            message: 'Profile name',
-            initial: 'production',
-            validate: requireNonEmpty('Profile name'),
-          },
-          {
-            type: 'text',
-            name: 'host',
-            message: 'FTP host',
-            validate: requireNonEmpty('FTP host'),
-          },
-          {
-            type: 'number',
-            name: 'port',
-            message: 'FTP port',
-            initial: 21,
-            min: 1,
-            max: 65535,
-            validate: (value: unknown) => {
-              if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
-                return 'FTP port must be an integer (e.g. 21 for FTP, 990 for FTPS implicit)';
-              }
-              if (value < 1 || value > 65535) {
-                return 'FTP port must be between 1 and 65535';
-              }
-              return true;
-            },
-          },
-          {
-            type: 'select',
-            name: 'protocol',
-            message: 'Protocol',
-            choices: [
-              { title: 'FTPS', value: 'ftps' },
-              { title: 'FTP', value: 'ftp' },
-            ],
-          },
-          {
-            type: 'text',
-            name: 'user',
-            message: 'FTP user',
-            validate: requireNonEmpty('FTP user'),
-          },
-          {
-            type: 'text',
-            name: 'remoteRoot',
-            message: 'Remote root',
-            initial: '/public_html',
-            validate: requireNonEmpty('Remote root'),
-          },
-          {
-            type: 'text',
-            name: 'localRoot',
-            message: 'Local root',
-            initial: '.',
-            validate: requireNonEmpty('Local root'),
-          },
-          {
-            type: 'text',
-            name: 'keychainService',
-            message: 'Keychain service',
-            initial: (_prev: unknown, values: { profile?: string }) =>
-              `aiftp:${values.profile && values.profile.length > 0 ? values.profile : 'production'}`,
-            validate: requireNonEmpty('Keychain service'),
-          },
-          {
-            type: 'select',
-            name: 'serverKind',
-            message: 'Server kind',
-            choices: [
-              { title: 'StarServer', value: 'starserver' },
-              { title: 'Lolipop', value: 'lolipop' },
-              { title: 'Sakura', value: 'sakura' },
-              { title: 'Xserver', value: 'xserver' },
-              { title: 'Generic', value: 'generic' },
-            ],
-          },
-          {
-            type: 'password',
-            name: 'password',
-            message: 'FTP password',
-            validate: requireNonEmpty('FTP password'),
-          },
-          { type: 'confirm', name: 'consent', message: 'Store encrypted backups locally?' },
-        ]),
-      );
+      // v0.11 Pillar α: init prompts now go through PromptFlow, which adds
+      // input hints (A) and :back navigation (B) on top of the existing
+      // v0.10.4 summary review (C). Field definitions live in init-flow.ts
+      // so they can be reused / extended for templates (v0.11 Pillar β).
+      const flowResult = await new PromptFlow(buildInitFields(), {
+        prompt: (question) => prompt(question as PromptQuestion),
+        stderr,
+      }).run();
+      if (flowResult.kind === 'cancelled') {
+        throw new Error('aborted: init cancelled');
+      }
+      let answers = parseInitAnswers(flowResult.answers);
 
       if (!answers.consent) {
         throw new Error('Explicit consent is required before initializing aiftp.');

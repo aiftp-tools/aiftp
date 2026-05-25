@@ -259,6 +259,11 @@ describe('cli', () => {
   });
 
   it('init rejects -Infinity port (F-X7 / v0.10.2 regression guard)', async () => {
+    // v0.11 (Pillar α): PromptFlow.validate rejects -Infinity at the prompt
+    // boundary and re-prompts. A stuck mock that returns the same invalid
+    // value forever trips the 100-iteration safety cap and surfaces as
+    // "init cancelled" — preserving the original guarantee that the bad
+    // port never reaches parseInitAnswers or the keychain.
     await expect(
       parse(['init'], {
         prompt: prompt({
@@ -275,7 +280,7 @@ describe('cli', () => {
           consent: true,
         }),
       }),
-    ).rejects.toThrow('port must be an integer');
+    ).rejects.toThrow(/init cancelled/);
   });
 
   it('init prompts to confirm non-standard FTPS port and proceeds when confirmed (v0.10.3)', async () => {
@@ -367,6 +372,11 @@ describe('cli', () => {
   });
 
   it('init rejects port outside 1-65535 range (F-X7)', async () => {
+    // v0.11 (Pillar α): out-of-range ports are rejected at the PromptFlow
+    // validate boundary; a stuck mock returning 70000 forever trips the
+    // 100-iteration cap and surfaces as "init cancelled". The guarantee
+    // that the bad port never reaches parseInitAnswers or the keychain
+    // is preserved.
     await expect(
       parse(['init'], {
         prompt: prompt({
@@ -383,7 +393,7 @@ describe('cli', () => {
           consent: true,
         }),
       }),
-    ).rejects.toThrow('port must be between 1 and 65535');
+    ).rejects.toThrow(/init cancelled/);
   });
 
   it('init --force preserves an existing backup key by default', async () => {
@@ -1942,15 +1952,54 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
     };
   }
 
+  // v0.11 (Pillar α): the init prompt path now runs through PromptFlow,
+  // which asks one field at a time. Legacy fixtures still pass a single
+  // baseAnswers object containing all 11 init fields, so we expand it on
+  // the fly — serve the next requested field from the same fixture, and
+  // advance to the next fixture only after all 11 init fields have been
+  // consumed.
+  const INIT_FIELDS_V011 = [
+    'profile',
+    'host',
+    'port',
+    'protocol',
+    'user',
+    'remoteRoot',
+    'localRoot',
+    'keychainService',
+    'serverKind',
+    'password',
+    'consent',
+  ] as const;
+
   function promptSeq(answers: Array<Record<string, unknown>>): CliPrompt {
     let i = 0;
-    return async () => {
+    let initBatchConsumed = new Set<string>();
+    return async (question: unknown) => {
       if (i >= answers.length) {
         throw new Error(`promptSeq exhausted at call ${i + 1} (only ${answers.length} provided)`);
       }
-      const a = answers[i] ?? {};
+      const fixture = answers[i] ?? {};
+
+      const askedName =
+        !Array.isArray(question) && typeof question === 'object' && question !== null
+          ? (question as { name?: string }).name
+          : undefined;
+      const fixtureHasFullInitBatch = INIT_FIELDS_V011.every((f) => f in fixture);
+      const isInitFieldRequest =
+        askedName !== undefined && (INIT_FIELDS_V011 as readonly string[]).includes(askedName);
+
+      if (fixtureHasFullInitBatch && isInitFieldRequest && !initBatchConsumed.has(askedName)) {
+        initBatchConsumed.add(askedName);
+        if (initBatchConsumed.size >= INIT_FIELDS_V011.length) {
+          i += 1;
+          initBatchConsumed = new Set<string>();
+        }
+        return { [askedName]: fixture[askedName] };
+      }
+
       i += 1;
-      return a;
+      return fixture;
     };
   }
 
