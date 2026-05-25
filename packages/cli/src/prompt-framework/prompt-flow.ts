@@ -27,6 +27,7 @@ export class PromptFlow {
   async run(): Promise<FlowResult> {
     const answers: Record<string, unknown> = {};
     for (const field of this.fields) {
+      this.printHint(field);
       const raw = await this.deps.prompt({
         name: field.name,
         type: field.type,
@@ -35,5 +36,15 @@ export class PromptFlow {
       answers[field.name] = raw[field.name];
     }
     return { kind: 'completed', answers };
+  }
+
+  /**
+   * A (input hint): print field-specific guidance to stderr before each prompt.
+   * Helps the user pick a sensible value *before* having to commit to one,
+   * upgrading v0.10.3's post-hoc port confirmation into a pre-prompt nudge.
+   */
+  private printHint(field: PromptField): void {
+    if (field.hint) this.deps.stderr(`  💡 ${field.hint}`);
+    if (field.example) this.deps.stderr(`  例: ${field.example}`);
   }
 }

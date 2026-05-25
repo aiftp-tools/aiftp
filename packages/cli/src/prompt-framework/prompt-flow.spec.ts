@@ -33,4 +33,44 @@ describe('PromptFlow', () => {
     });
     expect(prompt).toHaveBeenCalledTimes(2);
   });
+
+  describe('A: input hint display', () => {
+    it('prints hint and example to stderr before prompting', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'port',
+          label: 'FTP port',
+          type: 'number',
+          hint: '標準: 21 (FTP), 990 (FTPS implicit)。それ以外は確認画面が出ます。',
+          example: '21',
+        },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi.fn().mockResolvedValueOnce({ port: 21 });
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('💡') && m.includes('標準: 21'))).toBe(true);
+      expect(calls.some((m) => m.includes('例: 21'))).toBe(true);
+    });
+
+    it('skips hint when neither hint nor example is defined', async () => {
+      const fields: PromptField[] = [{ name: 'user', label: 'FTP user', type: 'text' }];
+      const stderr = vi.fn();
+      const prompt = vi.fn().mockResolvedValueOnce({ user: 'deploy' });
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      expect(stderr).not.toHaveBeenCalled();
+    });
+
+    it('prints example only when hint is undefined', async () => {
+      const fields: PromptField[] = [
+        { name: 'localRoot', label: 'Local root', type: 'text', example: '.' },
+      ];
+      const stderr = vi.fn();
+      const prompt = vi.fn().mockResolvedValueOnce({ localRoot: '.' });
+      await new PromptFlow(fields, { prompt, stderr }).run();
+      const calls = stderr.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((m) => m.includes('💡'))).toBe(false);
+      expect(calls.some((m) => m.includes('例: .'))).toBe(true);
+    });
+  });
 });
