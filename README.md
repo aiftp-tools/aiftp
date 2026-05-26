@@ -316,6 +316,19 @@ pnpm typecheck
 pnpm lint
 ```
 
+## Security limitations (v0.11)
+
+**Known limitation — SFTP host key verification is NOT enforced in v0.11.** `SftpClient.connect()` accepts any host key the server presents on the first connection, and does NOT pin / compare against a `known_hosts` file. This means a man-in-the-middle attacker on the path between the client and the SFTP server could intercept the connection and capture password authentication credentials or operate as a signing oracle for SSH key authentication.
+
+**Risk mitigation in v0.11**:
+- Run aiftp on a trusted network path (the same posture you would use for FTPS without TLS pinning).
+- Prefer SSH key authentication over password authentication when possible (an attacker who intercepts the SFTP transport still cannot extract the private key, only obtain signed challenges).
+- Verify the server's host key fingerprint out-of-band against the hosting provider's documentation before the first connection.
+
+**Planned in v0.12**: `.aiftp/known_hosts` Trust-On-First-Use (TOFU) pinning with explicit prompt on host key change. Tracked in: [docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md) (Finding 3).
+
+Other security boundaries (encryption at rest, hard-exclude of secret files, prepare→confirm 2-step gate, Keychain-only credential storage, profile name + remote_root + ssh_key_path traversal rejection) are all enforced in v0.11.
+
 ## Status / roadmap
 
 | | |

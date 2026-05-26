@@ -79,6 +79,17 @@ Release tags live in the GitHub repository:
 - SFTP 鍵 permission gate: world/group-readable な秘密鍵は connect 前に拒否。
 - HIGH 1 fix: テンプレ適用時に `safety.prod_profile_patterns` の default `main*` が消失するバグを修正。`main` プロファイルでも production type-to-confirm gate が外れない。
 - HIGH 2 fix: `static` / `laravel` テンプレで summary review でユーザーが確認した `localRoot` 値が render 時に template default で上書きされるバグを修正。ユーザー編集値が常に最優先。
+- **Codex セキュリティ専用 review (v0.11.0 release 直前)** で発見した CWE-22/94/200/295/367/732/664/400/527 系を release blocker として全 fix:
+  - **CWE-22/94**: profile 名の TOML key injection — schema + init parse + FileZilla importer の 3 層で `isValidProfileName` を強制。`[profile."../tmp"]` が `.aiftp/state` / `.aiftp/backups` 外への path traversal にならない。
+  - **CWE-22**: `remote_root` / FileZilla `<RemoteDir>` の `..` segment / backslash / control char / `//` empty segment を拒否（`assertSafeRemotePath`）。
+  - **CWE-22/367**: `ssh_key_path` の `..` segment を tilde 展開前にも拒否（`safeExpandLocalPath`）。さらに `lstatSync` で symlink を refuse し、stat-then-read の TOCTOU window を縮小。
+  - **CWE-200/732**: MCP FileZilla import の confirm tempfile が `mode: 0o600` を明示。post-rename `.aiftp.toml` が umask 起因で world-readable にならない。
+
+### Known security limitations (v0.11)
+
+- **CWE-295: SFTP host key verification は v0.11 では実装されない**。`SftpClient.connect()` は known_hosts / TOFU pinning を行わず、初回接続時のサーバ提示 host key を盲目的に受理する。経路上の MITM 攻撃で password / 鍵 signing oracle が悪用される可能性。`aiftp doctor` の `sftp-handshake` check は `warn` 状態を返し続け、毎回 limitation をログに出す。 v0.12 で `.aiftp/known_hosts` TOFU pinning を実装予定（[review log](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md) Finding 3）。
+- **CWE-664: SFTP upload が atomic rename ではない** — 接続断で remote に partial file が残る。v0.11.1 で `.aiftp-tmp-<uuid>` 経由の atomic rename を実装予定（同 Finding 7）。
+- **CWE-400: FileZilla XML parser の `processEntities: true`** — entity expansion 系 DoS の理論的耐性が低い。fast-xml-parser@5.8.0 では既知 CVE なし。v0.11.1 で `processEntities: false` + 入力サイズ上限を予定（同 Finding 6）。
 
 ### Deferred (v0.11.x へ繰越)
 

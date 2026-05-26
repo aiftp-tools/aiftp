@@ -246,10 +246,19 @@ function sftpResults(profile: ProfileConfig, probe: SftpProbeResult): CheckResul
   out.push({
     id: 'sftp-handshake',
     title: 'SFTP handshake',
-    status: probe.handshakeOk ? 'pass' : 'fail',
+    status: probe.handshakeOk ? 'warn' : 'fail',
+    // v0.11 security review (CWE-295) — `pass` would imply we verified
+    // the server's identity. We did not (no known_hosts / TOFU in
+    // v0.11). Downgrade to `warn` so the operator sees the limitation
+    // every time `aiftp doctor` runs and is reminded to verify the
+    // host key out-of-band. Will become `pass` in v0.12 once TOFU
+    // pinning lands.
     message: probe.handshakeOk
-      ? 'SSH transport + SFTP subsystem ready.'
+      ? 'SSH transport + SFTP subsystem ready. NOTE: host key was not verified against known_hosts (v0.11 limitation — see README "Security limitations").'
       : (probe.errorMessage ?? 'SFTP connect failed.'),
+    recommendation: probe.handshakeOk
+      ? 'Verify the server host key fingerprint with your hosting provider before trusting this connection on an untrusted network. v0.12 will add automatic TOFU pinning.'
+      : undefined,
   });
   out.push({
     id: 'sftp-remote-root',

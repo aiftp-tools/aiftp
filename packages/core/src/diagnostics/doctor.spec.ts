@@ -367,21 +367,25 @@ describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
     };
   }
 
-  it('emits the 4 SFTP checks (all pass) when probeSftp reports happy path', async () => {
+  it('emits the 4 SFTP checks (handshake = warn, others = pass) when probeSftp reports happy path', async () => {
+    // v0.11 security review: `sftp-handshake` reports `warn` (not `pass`)
+    // on success because the host key was not verified against
+    // known_hosts. The warning surfaces the v0.11 limitation every
+    // time `aiftp doctor` runs. v0.12 will upgrade this to `pass`
+    // once TOFU pinning lands.
     const report = await runDoctor(sftpHappyDeps(), { profile: 'production' });
     const ids = report.results.map((r) => r.id);
     expect(ids).toContain('ssh-port-reachable');
     expect(ids).toContain('ssh-key-permissions');
     expect(ids).toContain('sftp-handshake');
     expect(ids).toContain('sftp-remote-root');
-    for (const id of [
-      'ssh-port-reachable',
-      'ssh-key-permissions',
-      'sftp-handshake',
-      'sftp-remote-root',
-    ]) {
+    for (const id of ['ssh-port-reachable', 'ssh-key-permissions', 'sftp-remote-root']) {
       expect(report.results.find((r) => r.id === id)?.status, id).toBe('pass');
     }
+    const handshake = report.results.find((r) => r.id === 'sftp-handshake');
+    expect(handshake?.status).toBe('warn');
+    expect(handshake?.message).toMatch(/host key.*not verified|known_hosts/i);
+    expect(handshake?.recommendation).toMatch(/fingerprint|TOFU|v0\.12/i);
   });
 
   it('marks ftp-* checks as skip on a sftp profile', async () => {
