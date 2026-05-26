@@ -1377,7 +1377,7 @@ describe('cli', () => {
     expect(config.profile.production?.user).toBe('overwriter');
   });
 
-  it('import filezilla skips SFTP entries with a warning (aiftp does not yet support SFTP)', async () => {
+  it('import filezilla imports SFTP entries (Protocol=1) as protocol="sftp" with port 22 (v0.11 Pillar γ)', async () => {
     await writeConfig();
     const xml = [
       '<?xml version="1.0"?>',
@@ -1397,11 +1397,14 @@ describe('cli', () => {
 
     await parse(['import', 'filezilla', xmlPath]);
 
-    const out = stdout.join('\n');
-    expect(out).toMatch(/sftp.*not supported|skipped.*SFTP/i);
-    // No profile was written.
     const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
-    expect(toml).not.toContain('sftp-box');
+    expect(toml).toContain('[profile.sftp-box]');
+    expect(toml).toContain('protocol = "sftp"');
+    expect(toml).toContain('port = 22');
+    expect(toml).toContain('host = "sftp.example.com"');
+    // ftps_mode is FTPS-only and must NOT appear on an SFTP profile.
+    const sftpBlockMatch = toml.match(/\[profile\.sftp-box\][\s\S]*?(?=\[profile\.|$)/u);
+    expect(sftpBlockMatch?.[0]).not.toMatch(/ftps_mode/);
   });
 
   it('import filezilla refuses to write master-password-encrypted entries and warns the operator', async () => {

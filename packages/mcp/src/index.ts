@@ -1644,13 +1644,16 @@ function renderImportedProfileBlock(
   profile: ImportedProfile,
   keychainService: string,
 ): { name: string; block: string } {
-  const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+  const aiftpProtocol =
+    profile.protocol === 'ftp' ? 'ftp' : profile.protocol === 'sftp' ? 'sftp' : 'ftps';
   const ftpsMode = profile.protocol.startsWith('ftps_')
     ? profile.protocol === 'ftps_explicit'
       ? 'explicit'
       : 'implicit'
     : undefined;
-  const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+  const port =
+    profile.port ||
+    (profile.protocol === 'sftp' ? 22 : profile.protocol === 'ftps_implicit' ? 990 : 21);
   const lines: string[] = [
     `[profile.${profile.name}]`,
     `host = ${JSON.stringify(profile.host)}`,
@@ -1730,10 +1733,6 @@ async function handleImportFilezillaPrepare(
       password_kind: passwordKind,
       warnings: profile.warnings,
     });
-    if (profile.protocol === 'sftp') {
-      skipped.push({ name: profile.name, reason: 'SFTP not supported by aiftp; skipped' });
-      continue;
-    }
     if (passwordKind === 'master-encrypted') {
       skipped.push({
         name: profile.name,

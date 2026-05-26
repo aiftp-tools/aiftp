@@ -1439,13 +1439,6 @@ async function runImportApply(options: RunImportApplyOptions): Promise<void> {
   const skipped: Array<{ name: string; reason: string }> = [];
 
   for (const profile of result.profiles) {
-    if (profile.protocol === 'sftp') {
-      skipped.push({
-        name: profile.name,
-        reason: `SFTP not supported by aiftp; skipped ${profile.name}`,
-      });
-      continue;
-    }
     if (profile.password.kind === 'master-encrypted') {
       skipped.push({
         name: profile.name,
@@ -1462,13 +1455,16 @@ async function runImportApply(options: RunImportApplyOptions): Promise<void> {
       continue;
     }
 
-    const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+    const aiftpProtocol =
+      profile.protocol === 'ftp' ? 'ftp' : profile.protocol === 'sftp' ? 'sftp' : 'ftps';
     const ftpsMode = profile.protocol.startsWith('ftps_')
       ? profile.protocol === 'ftps_explicit'
         ? 'explicit'
         : 'implicit'
       : undefined;
-    const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+    const port =
+      profile.port ||
+      (profile.protocol === 'sftp' ? 22 : profile.protocol === 'ftps_implicit' ? 990 : 21);
     const keychainService = `${keychainPrefix}:${profile.name}`;
     const lines: string[] = [
       '',
