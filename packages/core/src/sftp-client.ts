@@ -12,6 +12,7 @@
  * 'unknown'.
  */
 
+import { readFileSync, statSync } from 'node:fs';
 import Sftp from 'ssh2-sftp-client';
 import type { ListEntry, UploadResult } from './ftp-client.js';
 
@@ -19,7 +20,22 @@ export interface SftpClientOptions {
   host: string;
   port?: number;
   user: string;
-  password: string;
+  /**
+   * Password authentication. Ignored when `sshKeyPath` is set.
+   * Either `password` or `sshKeyPath` must be provided.
+   */
+  password?: string;
+  /**
+   * Path to an SSH private key file (OpenSSH or PEM). Required mode is
+   * 0o600 or 0o400 — the connect call refuses to load a key that is
+   * group- or world-readable, matching the well-known `ssh` client
+   * policy. Takes precedence over `password`.
+   */
+  sshKeyPath?: string;
+  /**
+   * Passphrase for `sshKeyPath` if the key is encrypted at rest.
+   */
+  sshKeyPassphrase?: string;
   /**
    * Socket-level timeout in milliseconds for individual SFTP operations.
    * Defaults to 60_000 (60s) — mirrors FtpClient.
@@ -38,6 +54,22 @@ function mapType(t: string): ListEntry['type'] {
   if (t === 'd') return 'directory';
   if (t === '-') return 'file';
   return 'unknown';
+}
+
+/**
+ * Read an SSH private key from disk after verifying that its UNIX mode
+ * is 0o600 or 0o400. This mirrors `ssh(1)`'s refusal to use a private
+ * key that is group- or world-readable. Throws on bad permissions or
+ * missing file (the underlying ENOENT propagates).
+ */
+function loadSshKey(path: string): Buffer {
+  const mode = statSync(path).mode & 0o777;
+  if (mode !== 0o600 && mode !== 0o400) {
+    throw new Error(
+      `SftpClient: SSH key permissions must be 0o600 or 0o400, got 0o${mode.toString(8).padStart(3, '0')} (${path}). Run \`chmod 600 ${path}\` to fix.`,
+    );
+  }
+  return readFileSync(path);
 }
 
 /**
@@ -60,15 +92,37 @@ export class SftpClient {
   }
 
   async connect(): Promise<void> {
+    const config = this.buildConnectConfig();
     const sftp = new Sftp();
-    await sftp.connect({
+    await sftp.connect(config);
+    this.client = sftp;
+  }
+
+  /**
+   * Assemble the ssh2-sftp-client connect options from SftpClientOptions.
+   * Performs the SSH key permission check up front so an over-permissive
+   * file aborts before any network I/O. Throws when neither password nor
+   * sshKeyPath is provided.
+   */
+  private buildConnectConfig(): Sftp.ConnectOptions {
+    const config: Sftp.ConnectOptions = {
       host: this.options.host,
       port: this.options.port ?? DEFAULT_PORT,
       username: this.options.user,
-      password: this.options.password,
       readyTimeout: this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    });
-    this.client = sftp;
+    };
+    if (this.options.sshKeyPath) {
+      config.privateKey = loadSshKey(this.options.sshKeyPath);
+      if (this.options.sshKeyPassphrase) {
+        config.passphrase = this.options.sshKeyPassphrase;
+      }
+      return config;
+    }
+    if (this.options.password) {
+      config.password = this.options.password;
+      return config;
+    }
+    throw new Error('SftpClient: either password or sshKeyPath must be provided');
   }
 
   async disconnect(): Promise<void> {

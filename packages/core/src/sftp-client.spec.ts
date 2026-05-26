@@ -8,8 +8,11 @@
  * the remaining methods land in Task 22.
  */
 
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type * as Sftp from 'ssh2-sftp-client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ssh2-sftp-client surfaces a default-export class. We capture the mock
 // instances so each test can pre-program return values and assert calls.
@@ -300,6 +303,7 @@ describe('SftpClient — Task 22 full interface', () => {
     'exists',
     'rename',
     'mkdir',
+    'list',
   ] as const)('%s throws when not connected', async (method) => {
     const { SftpClient } = await loadSftpClient();
     const client = new SftpClient({ host: 'h', user: 'u', password: 'p' });
@@ -313,8 +317,126 @@ describe('SftpClient — Task 22 full interface', () => {
       exists: ['/remote'],
       rename: ['/src', '/dest'],
       mkdir: ['/remote'],
+      list: ['/remote'],
     };
     // biome-ignore lint/suspicious/noExplicitAny: guard test
     await expect((client as any)[method](...args[method])).rejects.toThrow(/not connected/i);
+  });
+});
+
+describe('SftpClient — Task 23 SSH key authentication', () => {
+  let tmpDir: string;
+  let keyPath: string;
+  const KEY_CONTENT = Buffer.from(
+    '-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-bytes\n-----END OPENSSH PRIVATE KEY-----\n',
+  );
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'aiftp-sftp-key-'));
+    keyPath = join(tmpDir, 'id_ed25519');
+    writeFileSync(keyPath, KEY_CONTENT);
+    chmodSync(keyPath, 0o600);
+  });
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    mockInstances.length = 0;
+    chmodSync(keyPath, 0o600);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('connects with privateKey when sshKeyPath is provided', async () => {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: keyPath,
+    });
+    await client.connect();
+
+    const connectOpts = mockInstances[0].connect.mock.calls[0][0] as Sftp.ConnectOptions;
+    expect(connectOpts.username).toBe('deploy');
+    expect(Buffer.isBuffer(connectOpts.privateKey)).toBe(true);
+    expect((connectOpts.privateKey as Buffer).equals(KEY_CONTENT)).toBe(true);
+    expect(connectOpts.password).toBeUndefined();
+    await client.disconnect();
+  });
+
+  it('forwards passphrase to ssh2-sftp-client when set', async () => {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: keyPath,
+      sshKeyPassphrase: 'unlock-it',
+    });
+    await client.connect();
+
+    const connectOpts = mockInstances[0].connect.mock.calls[0][0] as Sftp.ConnectOptions;
+    expect(connectOpts.passphrase).toBe('unlock-it');
+    await client.disconnect();
+  });
+
+  it('prefers sshKeyPath over password when both are set', async () => {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: keyPath,
+      password: 'ignored',
+    });
+    await client.connect();
+
+    const connectOpts = mockInstances[0].connect.mock.calls[0][0] as Sftp.ConnectOptions;
+    expect(connectOpts.password).toBeUndefined();
+    expect(connectOpts.privateKey).toBeDefined();
+    await client.disconnect();
+  });
+
+  it('rejects when SSH key file permissions are >600 (world/group readable)', async () => {
+    chmodSync(keyPath, 0o644);
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: keyPath,
+    });
+    await expect(client.connect()).rejects.toThrow(/permissions/i);
+    expect(mockInstances).toHaveLength(0);
+  });
+
+  it('accepts SSH key file with 0o400 permissions', async () => {
+    chmodSync(keyPath, 0o400);
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: keyPath,
+    });
+    await expect(client.connect()).resolves.toBeUndefined();
+    await client.disconnect();
+  });
+
+  it('rejects when neither password nor sshKeyPath is provided', async () => {
+    const { SftpClient } = await loadSftpClient();
+    // biome-ignore lint/suspicious/noExplicitAny: deliberately omitting auth
+    const client = new SftpClient({ host: 'sftp.example.com', user: 'u' } as any);
+    await expect(client.connect()).rejects.toThrow(/password.*sshKeyPath|sshKeyPath.*password/i);
+  });
+
+  it('rejects when sshKeyPath points at a missing file', async () => {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'deploy',
+      sshKeyPath: join(tmpDir, 'does-not-exist'),
+    });
+    await expect(client.connect()).rejects.toThrow(/no such file|ENOENT/i);
   });
 });
