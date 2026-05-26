@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/core",
-  "version": "0.10.4",
+  "version": "0.11.0",
   "description": "aiftp core engine: config, diff, deploy, backup, keychain",
   "license": "MIT",
   "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
@@ -36,11 +36,13 @@
     "fast-xml-parser": "^5.8.0",
     "iconv-lite": "0.7.2",
     "picomatch": "^4.0.4",
+    "ssh2-sftp-client": "^12.1.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/iarna__toml": "^2.0.5",
     "@types/picomatch": "^4.0.3",
+    "@types/ssh2-sftp-client": "^9.0.6",
     "ftp-srv": "^4.6.3"
   },
   "engines": {

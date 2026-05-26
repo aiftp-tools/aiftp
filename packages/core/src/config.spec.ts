@@ -81,6 +81,15 @@ describe('config: loadConfig', () => {
     expect(cfg.profile.production?.server_kind).toBe('lolipop');
   });
 
+  it('accepts protocol = "sftp" and a ssh_key_path field (v0.11 Pillar γ)', async () => {
+    const cfg = await loadConfig(fixture('with-sftp.toml'));
+    expect(cfg.profile.production?.protocol).toBe('sftp');
+    expect(cfg.profile.production?.ssh_key_path).toBe('~/.ssh/id_ed25519');
+    // sftp profiles should still satisfy the rest of the profile shape
+    expect(cfg.profile.production?.host).toBe('vps.example.com');
+    expect(cfg.profile.production?.port).toBe(22);
+  });
+
   it('throws ConfigError when file does not exist', async () => {
     await expect(loadConfig(fixture('does-not-exist.toml'))).rejects.toBeInstanceOf(ConfigError);
   });

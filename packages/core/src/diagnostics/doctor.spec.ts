@@ -345,6 +345,143 @@ describe('runDoctor: FTPS probe checks', () => {
   });
 });
 
+describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
+  function sftpHappyDeps(): DoctorDeps {
+    return {
+      readConfig: async () =>
+        makeConfig({
+          protocol: 'sftp',
+          port: 22,
+          ssh_key_path: '~/.ssh/id_ed25519',
+        }),
+      readGitignore: async () => '.aiftp/\n',
+      hasKeychainEntry: async () => true,
+      probeNetwork: async () => ({ dnsOk: true, tcpOk: true, addresses: ['203.0.113.5'] }),
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: true,
+        keyMode: '0o600',
+        handshakeOk: true,
+        remoteRootOk: true,
+      }),
+    };
+  }
+
+  it('emits the 4 SFTP checks (handshake = warn, others = pass) when probeSftp reports happy path', async () => {
+    // v0.11 security review: `sftp-handshake` reports `warn` (not `pass`)
+    // on success because the host key was not verified against
+    // known_hosts. The warning surfaces the v0.11 limitation every
+    // time `aiftp doctor` runs. v0.12 will upgrade this to `pass`
+    // once TOFU pinning lands.
+    const report = await runDoctor(sftpHappyDeps(), { profile: 'production' });
+    const ids = report.results.map((r) => r.id);
+    expect(ids).toContain('ssh-port-reachable');
+    expect(ids).toContain('ssh-key-permissions');
+    expect(ids).toContain('sftp-handshake');
+    expect(ids).toContain('sftp-remote-root');
+    for (const id of ['ssh-port-reachable', 'ssh-key-permissions', 'sftp-remote-root']) {
+      expect(report.results.find((r) => r.id === id)?.status, id).toBe('pass');
+    }
+    const handshake = report.results.find((r) => r.id === 'sftp-handshake');
+    expect(handshake?.status).toBe('warn');
+    expect(handshake?.message).toMatch(/host key.*not verified|known_hosts/i);
+    expect(handshake?.recommendation).toMatch(/fingerprint|TOFU|v0\.12/i);
+  });
+
+  it('marks ftp-* checks as skip on a sftp profile', async () => {
+    const report = await runDoctor(sftpHappyDeps(), { profile: 'production' });
+    for (const id of ['ftps-handshake', 'ftp-auth', 'ftps-cert', 'pasv', 'mlsd', 'size']) {
+      const result = report.results.find((r) => r.id === id);
+      expect(result?.status, id).toBe('skip');
+    }
+  });
+
+  it('marks sftp-* checks as skip on a ftp/ftps profile', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    for (const id of [
+      'ssh-port-reachable',
+      'ssh-key-permissions',
+      'sftp-handshake',
+      'sftp-remote-root',
+    ]) {
+      expect(report.results.find((r) => r.id === id)?.status, id).toBe('skip');
+    }
+  });
+
+  it('reports ssh-key-permissions skip when ssh_key_path is unset (password auth)', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      readConfig: async () => makeConfig({ protocol: 'sftp', port: 22 }), // no ssh_key_path
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: null,
+        handshakeOk: true,
+        remoteRootOk: true,
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    const keyCheck = report.results.find((r) => r.id === 'ssh-key-permissions');
+    expect(keyCheck?.status).toBe('skip');
+    expect(keyCheck?.message).toMatch(/password auth|ssh_key_path is not set/i);
+  });
+
+  it('reports ssh-key-permissions fail and skips handshake when key is world-readable', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: false,
+        keyMode: '0o644',
+        handshakeOk: false,
+        remoteRootOk: false,
+        errorMessage: 'Refusing to use over-permissive SSH key.',
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    expect(report.results.find((r) => r.id === 'ssh-key-permissions')?.status).toBe('fail');
+    expect(report.results.find((r) => r.id === 'sftp-handshake')?.status).toBe('fail');
+    expect(report.ok).toBe(false);
+  });
+
+  it('reports sftp-remote-root skip when the handshake itself failed', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: true,
+        keyMode: '0o600',
+        handshakeOk: false,
+        remoteRootOk: false,
+        errorMessage: 'auth rejected',
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    expect(report.results.find((r) => r.id === 'sftp-handshake')?.status).toBe('fail');
+    expect(report.results.find((r) => r.id === 'sftp-remote-root')?.status).toBe('skip');
+  });
+
+  it('emits unavailable sftp results when no probeSftp is wired', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      probeSftp: undefined,
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+    for (const id of [
+      'ssh-port-reachable',
+      'ssh-key-permissions',
+      'sftp-handshake',
+      'sftp-remote-root',
+    ]) {
+      const result = report.results.find((r) => r.id === id);
+      expect(result?.status, id).toBe('skip');
+      expect(result?.message, id).toMatch(/probe is not available/i);
+    }
+  });
+});
+
 describe('runDoctor: report shape', () => {
   it('summary counts equal the number of results bucketed by status', async () => {
     const report = await runDoctor(happyDeps(), { profile: 'production' });

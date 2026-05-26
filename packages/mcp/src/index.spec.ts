@@ -759,6 +759,27 @@ describe('mcp', () => {
     expect(entry.keychain_service).toBeUndefined();
   });
 
+  it('exposes aiftp_init_template_list read-only tool', () => {
+    const app = createAiftpMcp({ cwd });
+
+    expect(app.tools).toContain('aiftp_init_template_list');
+  });
+
+  it('aiftp_init_template_list returns 7 templates', async () => {
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_init_template_list', {});
+    const parsed = parseText(result) as Array<Record<string, unknown>>;
+
+    expect(parsed).toHaveLength(7);
+    for (const template of parsed) {
+      expect(template).toEqual({
+        id: expect.any(String),
+        description: expect.any(String),
+        longDescription: expect.any(String),
+      });
+    }
+  });
+
   it('aiftp_profile_current resolves the default and reports its name (or null when ambiguous)', async () => {
     await writeConfig();
     const app = createAiftpMcp({ cwd });

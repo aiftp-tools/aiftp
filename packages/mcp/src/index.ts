@@ -2,9 +2,9 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  type DeployClient,
   type DeployUploader,
   type DoctorReport,
-  FtpClient,
   type ImportedProfile,
   type PushBackupStore,
   type PushOptions,
@@ -16,13 +16,16 @@ import {
   type StatusResult,
   VERSION,
   type VerifyResult,
+  buildDeployClientOptions,
   checkAll,
   createDefaultBackupStore,
+  createDeployClient,
   createExcluder,
   getPassword,
   hasPassword,
   isProdProfile,
   isValidSnapshotId,
+  listTemplates,
   loadConfig,
   loadState,
   migrateV1ToV2Source,
@@ -107,6 +110,7 @@ export type AiftpToolName =
   | 'aiftp_log'
   | 'aiftp_list_remote'
   | 'aiftp_profile_list'
+  | 'aiftp_init_template_list'
   | 'aiftp_profile_current'
   | 'aiftp_profile_test'
   | 'aiftp_config_migrate'
@@ -347,6 +351,7 @@ const toolSchemas = {
   aiftp_log: logSchema,
   aiftp_list_remote: listRemoteSchema,
   aiftp_profile_list: noArgsSchema,
+  aiftp_init_template_list: noArgsSchema,
   aiftp_profile_current: noArgsSchema,
   aiftp_profile_test: profileSchema,
   aiftp_config_migrate: noArgsSchema,
@@ -380,6 +385,8 @@ const toolDescriptions = {
   aiftp_list_remote: 'List a remote directory through the configured runtime.',
   aiftp_profile_list:
     'List profiles from .aiftp.toml as redacted summaries: name, protocol, server_kind, credentialsStatus (present/missing/unknown), isDefault. Host / user / remote_root / keychain_service are NEVER surfaced (mirrors aiftp://config redaction policy). Read-only.',
+  aiftp_init_template_list:
+    'List available .aiftp.toml templates for `aiftp init --template <name>`. Read-only.',
   aiftp_profile_current:
     'Return the resolved default profile name (AIFTP_PROFILE env > .aiftp/state file > single-profile fallback), or null when ambiguous. Read-only.',
   aiftp_profile_test:
@@ -522,29 +529,19 @@ function unavailableUploader(): DeployUploader {
   };
 }
 
-async function createDefaultFtpClient(cwd: string, profileName: string): Promise<FtpClient> {
+async function createDefaultFtpClient(cwd: string, profileName: string): Promise<DeployClient> {
   const config = await loadConfigForMcp(cwd);
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = new FtpClient({
-    host: profile.host,
-    port: profile.port,
-    user: profile.user,
-    password: await getPassword(profile.keychain_service, profile.user),
-    protocol: profile.protocol,
-    requireTls: config.safety.require_tls,
-    verifyCertificate: config.safety.verify_certificate,
-    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
-    timeoutMs: config.connection.timeout_ms,
-    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
-  });
+  const password = await getPassword(profile.keychain_service, profile.user);
+  const client = createDeployClient(buildDeployClientOptions({ profile, config, password }));
   await client.connect();
   return client;
 }
 
-function uploaderFromClient(client: FtpClient): DeployUploader {
+function uploaderFromClient(client: DeployClient): DeployUploader {
   return {
     upload: (localPath, remotePath) => client.upload(localPath, remotePath),
     delete: (remotePath) => client.delete(remotePath),
@@ -578,7 +575,7 @@ async function pushBackupStoreFor(
   app: AiftpMcpApp,
   profileName: string,
   dryRun: boolean,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
   runtimeStore?: PushBackupStore,
 ): Promise<PushBackupStore> {
   if (runtimeStore) {
@@ -1233,6 +1230,26 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   return textResult({ ok: true, profiles, default: defaultName });
 }
 
+async function handleInitTemplateList(
+  _app: AiftpMcpApp,
+  rawArgs: unknown,
+): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const payload = listTemplates().map(({ id, description, longDescription }) => ({
+    id,
+    description,
+    longDescription,
+  }));
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}
+
 async function handleProfileCurrent(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   noArgsSchema.parse(rawArgs ?? {});
   const config = await loadConfigForMcp(app.cwd);
@@ -1618,13 +1635,16 @@ function renderImportedProfileBlock(
   profile: ImportedProfile,
   keychainService: string,
 ): { name: string; block: string } {
-  const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+  const aiftpProtocol =
+    profile.protocol === 'ftp' ? 'ftp' : profile.protocol === 'sftp' ? 'sftp' : 'ftps';
   const ftpsMode = profile.protocol.startsWith('ftps_')
     ? profile.protocol === 'ftps_explicit'
       ? 'explicit'
       : 'implicit'
     : undefined;
-  const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+  const port =
+    profile.port ||
+    (profile.protocol === 'sftp' ? 22 : profile.protocol === 'ftps_implicit' ? 990 : 21);
   const lines: string[] = [
     `[profile.${profile.name}]`,
     `host = ${JSON.stringify(profile.host)}`,
@@ -1704,10 +1724,6 @@ async function handleImportFilezillaPrepare(
       password_kind: passwordKind,
       warnings: profile.warnings,
     });
-    if (profile.protocol === 'sftp') {
-      skipped.push({ name: profile.name, reason: 'SFTP not supported by aiftp; skipped' });
-      continue;
-    }
     if (passwordKind === 'master-encrypted') {
       skipped.push({
         name: profile.name,
@@ -1862,7 +1878,12 @@ async function handleImportFilezillaConfirm(
   // see either the old inode or the new inode, never an intermediate
   // partial buffer.
   const tmpPath = `${tomlPath}.tmp.${process.pid}.${Date.now()}`;
-  await writeFile(tmpPath, source, 'utf8');
+  // v0.11 security review (CWE-200/732): tempfile mode must be 0o600
+  // so the post-rename .aiftp.toml is NOT world-readable. Without the
+  // explicit mode, umask default (typically 0o644) makes profile
+  // metadata visible to other local users between the rename and any
+  // later chmod. The matching config_migrate path already uses 0o600.
+  await writeFile(tmpPath, source, { encoding: 'utf8', mode: 0o600 });
   await rename(tmpPath, tomlPath);
 
   // The MCP server intentionally does not touch the Keychain — passwords
@@ -2139,7 +2160,7 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   // localPath when the runtime didn't expose `uploadBuffer`. Now we use
   // a dedicated `createRollbackUploader` hook. Default to FtpClient
   // when no hook is wired.
-  let sharedFtp: FtpClient | undefined;
+  let sharedFtp: DeployClient | undefined;
   const uploader: RollbackUploader =
     (await app.runtime.createRollbackUploader?.({
       cwd: app.cwd,
@@ -2215,6 +2236,7 @@ const handlers = {
   aiftp_log: handleLog,
   aiftp_list_remote: handleListRemote,
   aiftp_profile_list: handleProfileList,
+  aiftp_init_template_list: handleInitTemplateList,
   aiftp_profile_current: handleProfileCurrent,
   aiftp_profile_test: handleProfileTest,
   aiftp_config_migrate: handleConfigMigrate,

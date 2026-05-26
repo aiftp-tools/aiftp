@@ -3,6 +3,7 @@ import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises
 import { createConnection } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  type DeployClient,
   type DeployUploader,
   type DoctorReport,
   type ExportProfile,
@@ -16,25 +17,32 @@ import {
   type RollbackBackupStore,
   type RollbackResult,
   type RollbackUploader,
+  SftpClient,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
+  type TemplateConfig,
   VERSION,
   type VerifyResult,
   appendProfileBlock,
+  assertSafeRemotePath,
   backupKeyService,
+  buildDeployClientOptions,
   checkAll,
   createDefaultBackupStore,
+  createDeployClient,
   createExcluder,
   createWatchDebouncer,
   deletePassword,
   extractHookPaths,
   generateKey,
   getPassword,
+  getTemplate,
   hasPassword,
   isProdProfile,
   isValidProfileName,
   isValidSnapshotId,
+  listTemplates,
   loadConfig,
   loadState,
   migrateV1ToV2Source,
@@ -51,6 +59,7 @@ import {
   runPush,
   runRollback,
   runStatus,
+  safeExpandLocalPath,
   saveDefaultProfile,
   saveState,
   setPassword,
@@ -58,6 +67,8 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
+import { buildInitFieldsWithTemplate } from './init-flow.js';
+import { PromptFlow } from './prompt-framework/prompt-flow.js';
 
 export { VERSION };
 
@@ -126,6 +137,11 @@ export interface CliRollbackOptions {
   dryRun: boolean;
 }
 
+interface InitCommandOptions {
+  force?: boolean;
+  template?: string;
+}
+
 interface ManagedUploader {
   uploader: DeployUploader;
   close(): Promise<void>;
@@ -144,7 +160,7 @@ interface InitAnswers {
   profile: string;
   host: string;
   port: number;
-  protocol: 'ftp' | 'ftps';
+  protocol: 'ftp' | 'ftps' | 'sftp';
   user: string;
   remoteRoot: string;
   localRoot: string;
@@ -185,7 +201,16 @@ function quote(value: string): string {
   return JSON.stringify(value);
 }
 
-function renderConfig(answers: InitAnswers): string {
+function renderStringArray(values: readonly string[]): string {
+  return `[${values.map((value) => quote(value)).join(', ')}]`;
+}
+
+function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
+  const defaults = template?.defaults;
+  // v0.11 Pillar β review Phase 2-1: the user's localRoot answer always wins.
+  // The template default is wired into init-flow.ts as the field's initial
+  // so the operator sees and confirms it; any edit must reach the TOML
+  // unchanged.
   const lines: string[] = [
     'schema = 2',
     '',
@@ -200,6 +225,37 @@ function renderConfig(answers: InitAnswers): string {
     `server_kind = ${quote(answers.serverKind)}`,
     '',
   ];
+
+  if (defaults) {
+    if (defaults.excludeAdd.length > 0) {
+      lines.push(
+        '[backup.hard_exclude]',
+        `additional_patterns = ${renderStringArray(defaults.excludeAdd)}`,
+        '',
+      );
+    }
+
+    if (defaults.safetyProductionPatterns.length > 0) {
+      lines.push(
+        '[safety]',
+        `prod_profile_patterns = ${renderStringArray(defaults.safetyProductionPatterns)}`,
+        '',
+      );
+    }
+
+    if (defaults.preflightPhpLint !== undefined || defaults.preflightJsonCheck !== undefined) {
+      lines.push(
+        '[preflight]',
+        ...(defaults.preflightPhpLint !== undefined
+          ? [`php_lint = ${defaults.preflightPhpLint}`]
+          : []),
+        ...(defaults.preflightJsonCheck !== undefined
+          ? [`json_check = ${defaults.preflightJsonCheck}`]
+          : []),
+        '',
+      );
+    }
+  }
 
   if (answers.serverKind === 'starserver') {
     // Star Server presents `*.star.ne.jp` cert for `*.stars.ne.jp` hosts.
@@ -253,7 +309,10 @@ function requireNumber(value: unknown, name: string): number {
   return value;
 }
 
-function isStandardFtpPort(port: number, protocol: 'ftp' | 'ftps'): boolean {
+function isStandardFtpPort(port: number, protocol: 'ftp' | 'ftps' | 'sftp'): boolean {
+  if (protocol === 'sftp') {
+    return port === 22;
+  }
   if (protocol === 'ftps') {
     return port === 21 || port === 990;
   }
@@ -343,7 +402,11 @@ function formatInitSummaryValue(
   answers: InitAnswers,
   key: (typeof INIT_SUMMARY_FIELDS)[number]['key'],
 ): string {
-  if (key === 'protocol') return answers.protocol === 'ftps' ? 'FTPS' : 'FTP';
+  if (key === 'protocol') {
+    if (answers.protocol === 'ftps') return 'FTPS';
+    if (answers.protocol === 'sftp') return 'SFTP';
+    return 'FTP';
+  }
   if (key === 'serverKind') return SERVER_KIND_LABELS[answers.serverKind];
   if (key === 'password') {
     const len = answers.password.length;
@@ -442,9 +505,13 @@ async function editInitField(
           message: 'Protocol',
           choices: [
             { title: 'FTPS', value: 'ftps' },
+            { title: 'SFTP', value: 'sftp' },
             { title: 'FTP', value: 'ftp' },
           ],
-          initial: current.protocol === 'ftps' ? 0 : 1,
+          // v0.11 Pillar γ Codex Phase 1-2: edit-prompt's initial index
+          // matches the choices ordering above (FTPS=0, SFTP=1, FTP=2)
+          // so reselecting SFTP from the summary edit lands on SFTP.
+          initial: current.protocol === 'ftps' ? 0 : current.protocol === 'sftp' ? 1 : 2,
         },
       ];
       break;
@@ -680,13 +747,27 @@ function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
   if (/[\u0000-\u001f]/u.test(pw)) {
     throw new Error('password must not contain control characters or newlines');
   }
+  // v0.11 security review (CWE-22/94): profile names must round-trip
+  // safely through TOML table headers AND through stateDir() / backupRoot()
+  // path joins. Reject anything that does not match the canonical
+  // lowercase-alphanum-hyphen pattern before we even write the file.
+  const profileName = sanitizeFieldInput(raw.profile, 'profile');
+  if (!isValidProfileName(profileName)) {
+    throw new Error(
+      `Invalid profile name "${profileName}": must match [a-z0-9](-?[a-z0-9])*. Path traversal / TOML key injection characters are not allowed.`,
+    );
+  }
+  // remote_root must also be guarded against `..` segments here so a
+  // malicious initial-prompt answer cannot land in .aiftp.toml.
+  const remoteRoot = sanitizeFieldInput(raw.remoteRoot, 'remoteRoot');
+  assertSafeRemotePath(remoteRoot, 'remoteRoot');
   return {
-    profile: sanitizeFieldInput(raw.profile, 'profile'),
+    profile: profileName,
     host: sanitizeFieldInput(raw.host, 'host'),
     port: requirePort(raw.port),
     protocol: requireString(raw.protocol, 'protocol') as InitAnswers['protocol'],
     user: sanitizeFieldInput(raw.user, 'user'),
-    remoteRoot: sanitizeFieldInput(raw.remoteRoot, 'remoteRoot'),
+    remoteRoot,
     localRoot: sanitizeFieldInput(raw.localRoot, 'localRoot'),
     keychainService: sanitizeFieldInput(raw.keychainService, 'keychainService'),
     serverKind: requireString(raw.serverKind, 'serverKind') as InitAnswers['serverKind'],
@@ -827,29 +908,19 @@ async function createDefaultFtpClient(
   cwd: string,
   profileName: string,
   keychain: CliKeychain,
-): Promise<FtpClient> {
+): Promise<DeployClient> {
   const config = await loadConfig(join(cwd, '.aiftp.toml'));
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = new FtpClient({
-    host: profile.host,
-    port: profile.port,
-    user: profile.user,
-    password: await keychain.getPassword(profile.keychain_service, profile.user),
-    protocol: profile.protocol,
-    requireTls: config.safety.require_tls,
-    verifyCertificate: config.safety.verify_certificate,
-    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
-    timeoutMs: config.connection.timeout_ms,
-    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
-  });
+  const password = await keychain.getPassword(profile.keychain_service, profile.user);
+  const client = createDeployClient(buildDeployClientOptions({ profile, config, password }));
   await client.connect();
   return client;
 }
 
-function managedUploaderFromClient(client: FtpClient): ManagedUploader {
+function managedUploaderFromClient(client: DeployClient): ManagedUploader {
   return {
     uploader: {
       upload: (localPath, remotePath) => client.upload(localPath, remotePath),
@@ -865,7 +936,7 @@ async function createDefaultManagedUploader(
   cwd: string,
   profileName: string,
   keychain: CliKeychain,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
 ): Promise<ManagedUploader> {
   if (ftpClient) {
     return managedUploaderFromClient(ftpClient);
@@ -881,7 +952,7 @@ async function resolveManagedUploader(
   dryRun: boolean | undefined,
   keychain: CliKeychain,
   runtime: CliRuntime,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
   runtimeUploader?: DeployUploader,
 ): Promise<ManagedUploader> {
   if (runtimeUploader) {
@@ -993,7 +1064,7 @@ async function defaultRunRollback(
   // Build the uploader — dry-run gets a stub so we don't open an FTP
   // socket needlessly. Real rollback uses the FtpClient's buffer +
   // rename API so each file is written atomically (Codex BLOCK fix).
-  let ftpClient: FtpClient | undefined;
+  let ftpClient: DeployClient | undefined;
   const uploader: RollbackUploader = options.dryRun
     ? {
         upload: async () => {
@@ -1095,6 +1166,14 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         // *post-connect* cert CN / altName vs requested host comparison,
         // so a mismatch is still surfaced as a warning even when the
         // hostname check itself is suppressed.
+        //
+        // v0.11 Pillar γ: this probe is FTP/FTPS-specific (basic-ftp +
+        // RFC959 reply codes). SFTP profiles are routed through
+        // `probeSftp` below by doctor.ts; this callback never sees a
+        // sftp profile in practice. Asserted for safety.
+        if (profile.protocol === 'sftp') {
+          throw new Error('probeFtps: SFTP profile reached the FTPS probe (should be impossible)');
+        }
         const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
         // v0.9.2 patch: pipe basic-ftp verbose log to stderr so the
         // operator can see *why* a handshake/login failed instead of
@@ -1170,6 +1249,112 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
             mlsdSupported: false,
             sizeSupported: false,
             remoteRootCwdOk: false,
+          };
+        } finally {
+          await client.disconnect().catch(() => undefined);
+        }
+      },
+      probeSftp: async (profile, password) => {
+        // v0.11 Pillar γ: parallel to probeFtps but uses SftpClient. Emits
+        // the 4 SFTP checks (port-reachable / key-perms / handshake /
+        // remote-root). Network reachability was already established by
+        // the upstream `tcp` check so portReachable just mirrors that
+        // here; the doctor consumer uses it for the `ssh-port-reachable`
+        // line.
+        const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
+        const tcpOk = await probeTcp(profile.host, profile.port).catch(() => false);
+        let keyPermissionsOk: boolean | null = null;
+        let keyMode: string | undefined;
+        if (profile.ssh_key_path) {
+          try {
+            const { lstatSync, statSync } = await import('node:fs');
+            // v0.11 Pillar γ Codex Phase 1-3 + security review Phase 4:
+            // - safeExpandLocalPath: tilde expansion + `..` rejection
+            //   so doctor matches SftpClient.connect() behaviour.
+            // - lstat: refuse symbolic links to mirror the
+            //   loadSshKey() TOCTOU guard.
+            const resolved = safeExpandLocalPath(profile.ssh_key_path, 'ssh_key_path');
+            if (lstatSync(resolved).isSymbolicLink()) {
+              keyPermissionsOk = false;
+              keyMode = 'symlink';
+            } else if (process.platform === 'win32') {
+              // Windows: NTFS does not honour POSIX `chmod` bits, so the
+              // mode bits we read back are not meaningful. Skip the check
+              // (matches SftpClient.loadSshKey() behaviour) and surface
+              // the platform note via keyMode.
+              keyPermissionsOk = null;
+              keyMode = 'windows-acl';
+            } else {
+              const mode = statSync(resolved).mode & 0o777;
+              keyMode = `0o${mode.toString(8).padStart(3, '0')}`;
+              keyPermissionsOk = mode === 0o600 || mode === 0o400;
+            }
+          } catch (error: unknown) {
+            keyPermissionsOk = false;
+            keyMode = error instanceof Error ? error.message : 'unknown';
+          }
+        }
+        if (!tcpOk) {
+          return {
+            portReachable: false,
+            keyPermissionsOk,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: `TCP ${profile.host}:${profile.port} did not respond.`,
+          };
+        }
+        if (keyPermissionsOk === false) {
+          // Refuse to attempt the handshake when the key file has bad
+          // permissions; SftpClient.connect() would throw anyway and we
+          // want a clear `ssh-key-permissions: fail` line rather than a
+          // misleading `sftp-handshake: fail`.
+          return {
+            portReachable: true,
+            keyPermissionsOk: false,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: 'Refusing to use over-permissive SSH key.',
+          };
+        }
+        const client = new SftpClient({
+          host: profile.host,
+          port: profile.port,
+          user: profile.user,
+          password: password || undefined,
+          sshKeyPath: profile.ssh_key_path,
+          timeoutMs: probeConfig?.connection.timeout_ms,
+        });
+        try {
+          await client.connect();
+          try {
+            await client.list(profile.remote_root);
+            return {
+              portReachable: true,
+              keyPermissionsOk,
+              keyMode,
+              handshakeOk: true,
+              remoteRootOk: true,
+            };
+          } catch (error: unknown) {
+            return {
+              portReachable: true,
+              keyPermissionsOk,
+              keyMode,
+              handshakeOk: true,
+              remoteRootOk: false,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            };
+          }
+        } catch (error: unknown) {
+          return {
+            portReachable: true,
+            keyPermissionsOk,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: error instanceof Error ? error.message : String(error),
           };
         } finally {
           await client.disconnect().catch(() => undefined);
@@ -1290,13 +1475,6 @@ async function runImportApply(options: RunImportApplyOptions): Promise<void> {
   const skipped: Array<{ name: string; reason: string }> = [];
 
   for (const profile of result.profiles) {
-    if (profile.protocol === 'sftp') {
-      skipped.push({
-        name: profile.name,
-        reason: `SFTP not supported by aiftp; skipped ${profile.name}`,
-      });
-      continue;
-    }
     if (profile.password.kind === 'master-encrypted') {
       skipped.push({
         name: profile.name,
@@ -1313,13 +1491,16 @@ async function runImportApply(options: RunImportApplyOptions): Promise<void> {
       continue;
     }
 
-    const aiftpProtocol = profile.protocol === 'ftp' ? 'ftp' : 'ftps';
+    const aiftpProtocol =
+      profile.protocol === 'ftp' ? 'ftp' : profile.protocol === 'sftp' ? 'sftp' : 'ftps';
     const ftpsMode = profile.protocol.startsWith('ftps_')
       ? profile.protocol === 'ftps_explicit'
         ? 'explicit'
         : 'implicit'
       : undefined;
-    const port = profile.port || (profile.protocol === 'ftps_implicit' ? 990 : 21);
+    const port =
+      profile.port ||
+      (profile.protocol === 'sftp' ? 22 : profile.protocol === 'ftps_implicit' ? 990 : 21);
     const keychainService = `${keychainPrefix}:${profile.name}`;
     const lines: string[] = [
       '',
@@ -1418,109 +1599,61 @@ export function createCli(options: CliOptions = {}): Command {
     .command('init')
     .description('Create .aiftp.toml and register credentials')
     .option('-f, --force', 'overwrite an existing .aiftp.toml')
-    .action(async (cmd: { force?: boolean }) => {
+    .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
+    .action(async (cmd: InitCommandOptions) => {
+      if (cmd.template === 'list') {
+        for (const template of listTemplates()) {
+          stderr(`${template.id} - ${template.description}`);
+        }
+        return;
+      }
+
+      const template =
+        cmd.template === undefined || cmd.template.length === 0
+          ? undefined
+          : getTemplate(cmd.template);
+      if (cmd.template !== undefined && !template) {
+        const message = `unknown-template: ${cmd.template}. Run "aiftp init --template list" to see available templates.`;
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.unknown-template', message);
+      }
+
       const configPath = join(cwd, '.aiftp.toml');
       if ((await exists(configPath)) && !cmd.force) {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
       }
 
-      const requireNonEmpty = (label: string) => (value: unknown) => {
-        if (typeof value !== 'string' || value.trim().length === 0) {
-          return `${label} is required`;
-        }
-        return true;
-      };
-
-      let answers = parseInitAnswers(
-        await prompt([
-          {
-            type: 'text',
-            name: 'profile',
-            message: 'Profile name',
-            initial: 'production',
-            validate: requireNonEmpty('Profile name'),
-          },
-          {
-            type: 'text',
-            name: 'host',
-            message: 'FTP host',
-            validate: requireNonEmpty('FTP host'),
-          },
-          {
-            type: 'number',
-            name: 'port',
-            message: 'FTP port',
-            initial: 21,
-            min: 1,
-            max: 65535,
-            validate: (value: unknown) => {
-              if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
-                return 'FTP port must be an integer (e.g. 21 for FTP, 990 for FTPS implicit)';
-              }
-              if (value < 1 || value > 65535) {
-                return 'FTP port must be between 1 and 65535';
-              }
-              return true;
-            },
-          },
-          {
-            type: 'select',
-            name: 'protocol',
-            message: 'Protocol',
-            choices: [
-              { title: 'FTPS', value: 'ftps' },
-              { title: 'FTP', value: 'ftp' },
-            ],
-          },
-          {
-            type: 'text',
-            name: 'user',
-            message: 'FTP user',
-            validate: requireNonEmpty('FTP user'),
-          },
-          {
-            type: 'text',
-            name: 'remoteRoot',
-            message: 'Remote root',
-            initial: '/public_html',
-            validate: requireNonEmpty('Remote root'),
-          },
-          {
-            type: 'text',
-            name: 'localRoot',
-            message: 'Local root',
-            initial: '.',
-            validate: requireNonEmpty('Local root'),
-          },
-          {
-            type: 'text',
-            name: 'keychainService',
-            message: 'Keychain service',
-            initial: (_prev: unknown, values: { profile?: string }) =>
-              `aiftp:${values.profile && values.profile.length > 0 ? values.profile : 'production'}`,
-            validate: requireNonEmpty('Keychain service'),
-          },
-          {
-            type: 'select',
-            name: 'serverKind',
-            message: 'Server kind',
-            choices: [
-              { title: 'StarServer', value: 'starserver' },
-              { title: 'Lolipop', value: 'lolipop' },
-              { title: 'Sakura', value: 'sakura' },
-              { title: 'Xserver', value: 'xserver' },
-              { title: 'Generic', value: 'generic' },
-            ],
-          },
-          {
-            type: 'password',
-            name: 'password',
-            message: 'FTP password',
-            validate: requireNonEmpty('FTP password'),
-          },
-          { type: 'confirm', name: 'consent', message: 'Store encrypted backups locally?' },
-        ]),
-      );
+      // v0.11 Pillar α: init prompts now go through PromptFlow, which adds
+      // input hints (A) and :back navigation (B) on top of the existing
+      // v0.10.4 summary review (C). Field definitions live in init-flow.ts
+      // so they can be reused / extended for templates (v0.11 Pillar β).
+      const flowResult = await new PromptFlow(
+        buildInitFieldsWithTemplate(template !== undefined, template),
+        {
+          prompt: (question) => prompt(question as PromptQuestion),
+          stderr,
+        },
+      ).run();
+      if (flowResult.kind === 'cancelled') {
+        throw new Error('aborted: init cancelled');
+      }
+      const selectedTemplateId = flowResult.answers['template-select'];
+      const selectedTemplate =
+        template ??
+        (typeof selectedTemplateId === 'string' && selectedTemplateId !== 'none'
+          ? getTemplate(selectedTemplateId)
+          : undefined);
+      if (
+        template === undefined &&
+        typeof selectedTemplateId === 'string' &&
+        selectedTemplateId !== 'none' &&
+        selectedTemplate === undefined
+      ) {
+        const message = `unknown-template: ${selectedTemplateId}. Run "aiftp init --template list" to see available templates.`;
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.unknown-template', message);
+      }
+      let answers = parseInitAnswers(flowResult.answers);
 
       if (!answers.consent) {
         throw new Error('Explicit consent is required before initializing aiftp.');
@@ -1558,7 +1691,10 @@ export function createCli(options: CliOptions = {}): Command {
         );
       }
 
-      await writeFile(configPath, renderConfig(answers), { encoding: 'utf8', mode: 0o600 });
+      await writeFile(configPath, renderConfig(answers, selectedTemplate), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
       await ensureGitignore(cwd);
       await keychain.setPassword(answers.keychainService, answers.user, answers.password);
       const backupKeyEntryService = backupKeyService(answers.keychainService);
@@ -1752,7 +1888,7 @@ export function createCli(options: CliOptions = {}): Command {
           !runtime.runPush &&
           !cmd.dryRun &&
           (runtimePushBackupStore === undefined || runtimeUploader === undefined);
-        let sharedFtpClient: FtpClient | undefined;
+        let sharedFtpClient: DeployClient | undefined;
         try {
           sharedFtpClient = needsDefaultFtp
             ? await createDefaultFtpClient(cwd, cmd.profile, keychain)
@@ -2126,7 +2262,7 @@ export function createCli(options: CliOptions = {}): Command {
       const fields: ProfileBlockFields = {
         host: requireString(raw.host, 'host'),
         port: requireNumber(raw.port, 'port'),
-        protocol: requireString(raw.protocol, 'protocol') as 'ftp' | 'ftps',
+        protocol: requireString(raw.protocol, 'protocol') as 'ftp' | 'ftps' | 'sftp',
         user: requireString(raw.user, 'user'),
         remote_root: requireString(raw.remoteRoot, 'remoteRoot'),
         local_root: requireString(raw.localRoot, 'localRoot'),

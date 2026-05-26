@@ -6,7 +6,12 @@
 [![CI](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml/badge.svg)](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**Status**: v0.9.4 — verified on Star Server / Sakura / Xserver / Lolipop (Japan). Phase 2 complete (import / watch / hook / multi-profile / rollback). v0.9.4 adds default-exclude auto-apply, `[walk] follow_symlinks`, `aiftp backup init`, and build-time VERSION generation.
+**Status**: v0.10.4 — published to npm as `@aiftp-tools/{core,cli,mcp}`. Verified on Star Server / Sakura / Xserver / Lolipop (Japan). v0.10 series introduces robust `aiftp init` UX: per-field validation, non-standard port confirmation, and a numbered summary review with in-place edit loop before the config is written.
+
+```bash
+npm install -g @aiftp-tools/cli
+aiftp --version   # 0.10.4
+```
 
 ## Two problems aiftp solves
 
@@ -86,7 +91,49 @@ Why this matters for the Japanese Web development market:
 | Foreign-IP filter blocks cloud CI from reaching Japanese hosting | **Run locally from a Japanese IP — no infrastructure change needed** |
 | Hangs on long-running FTP operations through generic AI tool loops | **MCP exposes one `prepare/confirm` round-trip per push, not a per-file tool loop** |
 
-## What's in v0.9.1 (current release)
+## What's new in v0.10 (init UX hardening)
+
+The v0.10 series focuses on the `aiftp init` path — the first thing any
+new user touches, and historically the place where input mistakes were
+most expensive (one bad port, missing keychain service name, or a
+trailing whitespace would surface as an opaque error at the end of the
+flow).
+
+- **Per-field validation at the prompt boundary** (v0.10.1 / v0.10.2) —
+  host / user / remoteRoot / localRoot / keychainService / password are
+  validated on the spot; the port prompt enforces `1-65535` (no more
+  `-Infinity` slipping through).
+- **Keychain service default** (v0.10.1) — derived as
+  `aiftp:<profile-name>` instead of an empty default.
+- **Non-standard port warn-and-confirm** (v0.10.3) — anything other
+  than `21` (FTP) or `21`/`990` (FTPS implicit) triggers an explicit
+  `Continue?` confirmation, with `aborted: non-standard FTP/FTPS port`
+  on decline.
+- **Numbered summary review with edit loop** (v0.10.4) — after the
+  prompts, every captured value is displayed in a numbered table.
+  `Y`/Enter confirms, `n` aborts, `1-10` jumps back to that specific
+  field to edit it in place. Editing the protocol re-fires the
+  non-standard port check. The loop is capped at 10 iterations to
+  prevent runaway.
+- **Per-field sanitization** (v0.10.4) — text fields are trimmed and
+  rejected if they contain control characters (`U+0000`-`U+001F`)
+  before the value reaches TOML or the keychain.
+- **Strict summary-choice parsing** (v0.10.4) — `１０` (全角), `01`,
+  `1abc`, `1.5`, `1 5` are all rejected. Paste-with-trailing-newline
+  is trimmed and accepted.
+- **Non-TTY guard** (v0.10.4) — `aiftp init < /dev/null` fails fast
+  instead of hanging.
+
+The whole series was driven by 田中さん's review feedback —
+"ユーザは必ず入力ミスする前提で仕様を考える / 入力間違いの
+recovery path も仕様化する" — and validated by a Codex Phase 1
+(spec review) + Phase 2 (implementation review) loop. Spec doc:
+[`docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md`](docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md).
+
+**Quality gates (v0.10.4)**: 630 tests passed / 3 skipped / 0 failed,
+Branches coverage 83.29%, Statements 90.25%, biome lint clean.
+
+## What's in v0.9.1
 
 **Safety & MCP gates**
 
@@ -159,8 +206,13 @@ Why this matters for the Japanese Web development market:
 ## Quick start
 
 ```bash
+# 0. Install globally from npm (Node.js 22+ required)
+npm install -g @aiftp-tools/cli
+aiftp --version   # → 0.10.4
+
 # 1. Initialize a new project (asks host, port, protocol, etc.;
-#    stores the password in macOS Keychain or Windows Credential Manager)
+#    stores the password in macOS Keychain or Windows Credential Manager;
+#    shows a numbered summary and lets you edit any field before saving)
 aiftp init
 
 # 2. Already have a FileZilla site list? Import it.
@@ -199,6 +251,22 @@ open a PR with the row.
 
 ## MCP / Claude Code integration
 
+With the npm-installed CLI on your `$PATH` (`npm install -g @aiftp-tools/cli`):
+
+```json
+{
+  "mcpServers": {
+    "aiftp": {
+      "command": "aiftp",
+      "args": ["mcp"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Or, when developing aiftp from a local clone:
+
 ```json
 {
   "mcpServers": {
@@ -227,11 +295,17 @@ Resources:
 
 ## Packages
 
-This is a pnpm monorepo:
+This is a pnpm monorepo. All three packages are published to npm under
+the `@aiftp-tools` scope:
 
-- [`packages/core`](packages/core) — Config (zod), diff, deploy, backup, keychain, importers/exporters, diagnostics, migrations
-- [`packages/cli`](packages/cli) — `aiftp` command-line interface
-- [`packages/mcp`](packages/mcp) — MCP server (`aiftp mcp`) for AI agent integration
+| Package | npm | Purpose |
+|---|---|---|
+| [`packages/core`](packages/core) | [`@aiftp-tools/core`](https://www.npmjs.com/package/@aiftp-tools/core) | Config (zod), diff, deploy, backup, keychain, importers/exporters, diagnostics, migrations |
+| [`packages/cli`](packages/cli) | [`@aiftp-tools/cli`](https://www.npmjs.com/package/@aiftp-tools/cli) | `aiftp` command-line interface |
+| [`packages/mcp`](packages/mcp) | [`@aiftp-tools/mcp`](https://www.npmjs.com/package/@aiftp-tools/mcp) | MCP server (`aiftp mcp`) for AI agent integration |
+
+End users install only the CLI: `npm install -g @aiftp-tools/cli`
+(the CLI depends on `core` and `mcp` transitively).
 
 ## Development
 
@@ -242,16 +316,32 @@ pnpm typecheck
 pnpm lint
 ```
 
+## Security limitations (v0.11)
+
+**Known limitation — SFTP host key verification is NOT enforced in v0.11.** `SftpClient.connect()` accepts any host key the server presents on the first connection, and does NOT pin / compare against a `known_hosts` file. This means a man-in-the-middle attacker on the path between the client and the SFTP server could intercept the connection and capture password authentication credentials or operate as a signing oracle for SSH key authentication.
+
+**Risk mitigation in v0.11**:
+- Run aiftp on a trusted network path (the same posture you would use for FTPS without TLS pinning).
+- Prefer SSH key authentication over password authentication when possible (an attacker who intercepts the SFTP transport still cannot extract the private key, only obtain signed challenges).
+- Verify the server's host key fingerprint out-of-band against the hosting provider's documentation before the first connection.
+
+**Planned in v0.12**: `.aiftp/known_hosts` Trust-On-First-Use (TOFU) pinning with explicit prompt on host key change. Tracked in: [docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md) (Finding 3).
+
+Other security boundaries (encryption at rest, hard-exclude of secret files, prepare→confirm 2-step gate, Keychain-only credential storage, profile name + remote_root + ssh_key_path traversal rejection) are all enforced in v0.11.
+
 ## Status / roadmap
 
 | | |
 |---|---|
-| **Released** | v0.9.1 (2026-05-21) |
+| **Released** | v0.10.4 (2026-05-25) — see [CHANGELOG](CHANGELOG.md) |
+| **npm** | `@aiftp-tools/cli` · `@aiftp-tools/core` · `@aiftp-tools/mcp` |
 | **Spec** | [docs/spec.md (in parent dir)](../docs/spec.md) |
+| **Init UX design spec (v0.10.4)** | [docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md](docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md) |
 | **Walkthrough** | [docs/v0.2-walkthrough.md](docs/v0.2-walkthrough.md) |
 | **Compatibility** | [docs/compatibility-matrix.md](docs/compatibility-matrix.md) |
 | **FFFTP/FileZilla migration** | [docs/migration-from-ffftp.md](docs/migration-from-ffftp.md) |
-| **Target OS** | macOS ✅ (end-to-end verified on Star Server). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
+| **Competitive positioning** | [docs/competitive-comparison.md](docs/competitive-comparison.md) — vs alxspiker/mcp-server-ftp / Computer Use / WordPress 公式 MCP / git-ftp 系 |
+| **Target OS** | macOS ✅ (end-to-end verified on Star Server / Sakura / Xserver / Lolipop). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
 | **Language** | TypeScript / Node.js 22+ |
 | **License** | MIT |
 

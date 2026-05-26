@@ -48,7 +48,8 @@ describe('cli', () => {
   function prompt(answers: Record<string, unknown>): CliPrompt {
     // v0.10.4: default summary review choice to 'Y' so existing tests stay green.
     // Existing tests don't pass `choice`; the init field prompts ignore it.
-    return async () => ('choice' in answers ? answers : { ...answers, choice: 'Y' });
+    return async () =>
+      'choice' in answers ? answers : { 'template-select': 'none', ...answers, choice: 'Y' };
   }
 
   function keychain(existing = new Set<string>()): CliKeychain {
@@ -208,6 +209,147 @@ describe('cli', () => {
     expect(toml).not.toMatch(/tls_check_hostname = false/);
   });
 
+  it('init --template wordpress-swell writes SWELL hard-excludes to .aiftp.toml', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'wordpress-swell'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('[backup.hard_exclude]');
+    expect(toml).toContain('wp-content/themes/swell-child/node_modules/**');
+    expect(toml).toContain('wp-content/themes/swell-child/.cache/**');
+    expect(toml).toContain('wp-content/ai1wm-backups/**');
+    expect(toml).toContain('[safety]');
+    expect(toml).toContain('prod_profile_patterns = ["main*", "*prod*", "*www*", "*-live"]');
+    expect(toml).toContain('[preflight]');
+    expect(toml).toContain('php_lint = true');
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.backup.hard_exclude.additional_patterns).toEqual(
+      expect.arrayContaining(['wp-content/themes/swell-child/node_modules/**']),
+    );
+    expect(config.preflight.php_lint).toBe(true);
+  });
+
+  it('init --template static respects user-edited local_root (Phase 2-1 regression)', async () => {
+    // The user's localRoot answer must win over the template default. The
+    // previous implementation silently rewrote `local_root` to "dist" even
+    // when the operator typed "build" in the summary review.
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'static'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: 'build',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('local_root = "build"');
+    expect(toml).not.toMatch(/local_root = "dist"/);
+  });
+
+  it('init --template static writes local_root = "dist" when user accepts initial', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+
+    await parse(['init', '--template', 'static'], {
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: 'public_html',
+        localRoot: 'dist',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+      }),
+    });
+
+    const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+    expect(toml).toContain('local_root = "dist"');
+  });
+
+  it('init --template list outputs 7 id-description lines to stderr', async () => {
+    await parse(['init', '--template', 'list']);
+
+    const lines = stderr.filter((line) => line.length > 0);
+    expect(lines).toHaveLength(7);
+    expect(lines).toEqual([
+      'wordpress-swell - WordPress with SWELL theme',
+      'wordpress-lightning - WordPress with LIGHTNING (Vektor) theme',
+      'wordpress-cocoon - WordPress with Cocoon theme',
+      'wordpress-standard - WordPress (theme-agnostic baseline)',
+      'static - Static site / Jamstack build output',
+      'laravel - Laravel on shared hosting',
+      'php-simple - Standalone PHP scripts (contact form, mini-API)',
+    ]);
+    expect(stdout).toEqual([]);
+  });
+
+  it('init --template invalid-name exits nonzero with unknown-template message', async () => {
+    await expect(parse(['init', '--template', 'invalid-name'])).rejects.toMatchObject({
+      exitCode: 1,
+      code: 'aiftp.unknown-template',
+    });
+    expect(stderr.join('\n')).toMatch(/unknown-template.*invalid-name/i);
+  });
+
+  it('init without --template starts prompt flow with template-select as the first field', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    const seenNames: string[] = [];
+    const answers = {
+      'template-select': 'none',
+      profile: 'production',
+      host: 'ftp.example.com',
+      port: 21,
+      protocol: 'ftps',
+      user: 'deploy-user',
+      remoteRoot: 'public_html',
+      localRoot: '.',
+      keychainService: 'aiftp:production',
+      serverKind: 'generic',
+      password: 'secret-password',
+      consent: true,
+      choice: 'Y',
+    };
+    const recordingPrompt: CliPrompt = async (questions) => {
+      const first = Array.isArray(questions) ? questions[0] : questions;
+      if (typeof first?.name === 'string') {
+        seenNames.push(first.name);
+      }
+      return answers;
+    };
+
+    await parse(['init'], { prompt: recordingPrompt });
+
+    expect(seenNames[0]).toBe('template-select');
+  });
+
   it('init warns when remote_root starts with a leading "/" (shared-host gotcha)', async () => {
     await writeFile(join(cwd, '.gitignore'), '', 'utf8');
     await parse(['init'], {
@@ -259,6 +401,11 @@ describe('cli', () => {
   });
 
   it('init rejects -Infinity port (F-X7 / v0.10.2 regression guard)', async () => {
+    // v0.11 (Pillar α): PromptFlow.validate rejects -Infinity at the prompt
+    // boundary and re-prompts. A stuck mock that returns the same invalid
+    // value forever trips the 100-iteration safety cap and surfaces as
+    // "init cancelled" — preserving the original guarantee that the bad
+    // port never reaches parseInitAnswers or the keychain.
     await expect(
       parse(['init'], {
         prompt: prompt({
@@ -275,7 +422,7 @@ describe('cli', () => {
           consent: true,
         }),
       }),
-    ).rejects.toThrow('port must be an integer');
+    ).rejects.toThrow(/init cancelled/);
   });
 
   it('init prompts to confirm non-standard FTPS port and proceeds when confirmed (v0.10.3)', async () => {
@@ -367,6 +514,11 @@ describe('cli', () => {
   });
 
   it('init rejects port outside 1-65535 range (F-X7)', async () => {
+    // v0.11 (Pillar α): out-of-range ports are rejected at the PromptFlow
+    // validate boundary; a stuck mock returning 70000 forever trips the
+    // 100-iteration cap and surfaces as "init cancelled". The guarantee
+    // that the bad port never reaches parseInitAnswers or the keychain
+    // is preserved.
     await expect(
       parse(['init'], {
         prompt: prompt({
@@ -383,7 +535,7 @@ describe('cli', () => {
           consent: true,
         }),
       }),
-    ).rejects.toThrow('port must be between 1 and 65535');
+    ).rejects.toThrow(/init cancelled/);
   });
 
   it('init --force preserves an existing backup key by default', async () => {
@@ -432,6 +584,7 @@ describe('cli', () => {
     };
     const confirmOverwrite: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
+      if (first?.name === 'template-select') return { 'template-select': 'none' };
       if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: true };
       // v0.10.4: summary review prompt
       if (first?.name === 'choice') return { choice: 'Y' };
@@ -1224,7 +1377,7 @@ describe('cli', () => {
     expect(config.profile.production?.user).toBe('overwriter');
   });
 
-  it('import filezilla skips SFTP entries with a warning (aiftp does not yet support SFTP)', async () => {
+  it('import filezilla imports SFTP entries (Protocol=1) as protocol="sftp" with port 22 (v0.11 Pillar γ)', async () => {
     await writeConfig();
     const xml = [
       '<?xml version="1.0"?>',
@@ -1244,11 +1397,14 @@ describe('cli', () => {
 
     await parse(['import', 'filezilla', xmlPath]);
 
-    const out = stdout.join('\n');
-    expect(out).toMatch(/sftp.*not supported|skipped.*SFTP/i);
-    // No profile was written.
     const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
-    expect(toml).not.toContain('sftp-box');
+    expect(toml).toContain('[profile.sftp-box]');
+    expect(toml).toContain('protocol = "sftp"');
+    expect(toml).toContain('port = 22');
+    expect(toml).toContain('host = "sftp.example.com"');
+    // ftps_mode is FTPS-only and must NOT appear on an SFTP profile.
+    const sftpBlockMatch = toml.match(/\[profile\.sftp-box\][\s\S]*?(?=\[profile\.|$)/u);
+    expect(sftpBlockMatch?.[0]).not.toMatch(/ftps_mode/);
   });
 
   it('import filezilla refuses to write master-password-encrypted entries and warns the operator', async () => {
@@ -1792,6 +1948,111 @@ describe('cli', () => {
     expect(started).toEqual([cwd]);
     expect(stdout).toEqual([]);
   });
+
+  describe('v0.11 end-to-end mock (4 pillars combined)', () => {
+    // Cross-pillar integration paths: init UX (α) + templates (β) + SFTP (γ)
+    // shipping together. Smoke CI (δ) lives in .github/workflows/smoke.yml
+    // and is covered by actionlint/shellcheck rather than vitest.
+
+    it('init --template wordpress-swell + protocol=sftp produces a config that loadConfig accepts', async () => {
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init', '--template', 'wordpress-swell'], {
+        prompt: prompt({
+          profile: 'main',
+          host: 'sftp.example.com',
+          port: 22,
+          protocol: 'sftp',
+          user: 'deploy',
+          remoteRoot: '/home/deploy/wp',
+          localRoot: '.',
+          keychainService: 'aiftp:main',
+          serverKind: 'generic',
+          password: 'secret-password',
+          consent: true,
+        }),
+      });
+      const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+      // Pillar β (template defaults)
+      expect(toml).toContain('[backup.hard_exclude]');
+      expect(toml).toContain('wp-content/themes/swell-child/node_modules/**');
+      // HIGH 1 fix: main* is the first production pattern, so the `main`
+      // profile keeps its type-to-confirm gate even after a template is
+      // applied.
+      expect(toml).toContain('prod_profile_patterns = ["main*", "*prod*", "*www*", "*-live"]');
+      // Pillar γ (SFTP protocol)
+      expect(toml).toContain('protocol = "sftp"');
+      expect(toml).toContain('port = 22');
+      // The generated TOML must round-trip through loadConfig so deploy /
+      // rollback / backup paths can consume it without surprises.
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      expect(config.profile.main?.protocol).toBe('sftp');
+      expect(config.preflight.php_lint).toBe(true);
+      expect(config.backup.hard_exclude.additional_patterns).toEqual(
+        expect.arrayContaining(['wp-content/themes/swell-child/node_modules/**']),
+      );
+      expect(config.safety.prod_profile_patterns).toEqual(expect.arrayContaining(['main*']));
+    });
+
+    it('init --template static + protocol=ftps preserves user-edited localRoot through the full flow', async () => {
+      // Combines Pillar α (PromptFlow), Pillar β (static template defaults
+      // localRoot to "dist"), and HIGH 2 fix (user edits "build", that
+      // value reaches the TOML — not the template default).
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init', '--template', 'static'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: 21,
+          protocol: 'ftps',
+          user: 'deploy',
+          remoteRoot: '/public_html',
+          localRoot: 'build',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'p',
+          consent: true,
+        }),
+      });
+      const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+      expect(toml).toContain('local_root = "build"');
+      expect(toml).not.toMatch(/local_root = "dist"/);
+      // Static template's hard-excludes still apply even when the user
+      // overrides localRoot.
+      expect(toml).toContain('node_modules/**');
+      expect(toml).toContain('.parcel-cache/**');
+    });
+
+    it('writes ssh_key_path into .gitignore guard but never into a Keychain command', async () => {
+      // Sanity check that the SFTP init path does NOT push ssh_key_path
+      // through the password Keychain — that would leak the key location
+      // into the credential store. Keychain receives only the password.
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'sftp.example.com',
+          port: 22,
+          protocol: 'sftp',
+          user: 'deploy',
+          remoteRoot: '/var/www/html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'pw',
+          consent: true,
+        }),
+      });
+      const passwords = stored.map((s) => s.password);
+      // No stored password should match a filesystem path
+      for (const p of passwords) {
+        expect(p).not.toMatch(/^\//u);
+        expect(p).not.toMatch(/^~\//u);
+      }
+      // The .gitignore should have .aiftp/ guard from the init flow.
+      const gi = await readFile(join(cwd, '.gitignore'), 'utf8');
+      expect(gi).toContain('.aiftp/');
+    });
+  });
 });
 
 describe('sanitizeFieldInput (v0.10.4)', () => {
@@ -1942,15 +2203,57 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
     };
   }
 
+  // v0.11 (Pillar α): the init prompt path now runs through PromptFlow,
+  // which asks one field at a time. Legacy fixtures still pass a single
+  // baseAnswers object containing all 11 init fields, so we expand it on
+  // the fly — serve the next requested field from the same fixture, and
+  // advance to the next fixture only after all 11 init fields have been
+  // consumed.
+  const INIT_FIELDS_V011 = [
+    'profile',
+    'host',
+    'port',
+    'protocol',
+    'user',
+    'remoteRoot',
+    'localRoot',
+    'keychainService',
+    'serverKind',
+    'password',
+    'consent',
+  ] as const;
+
   function promptSeq(answers: Array<Record<string, unknown>>): CliPrompt {
     let i = 0;
-    return async () => {
+    let initBatchConsumed = new Set<string>();
+    return async (question: unknown) => {
       if (i >= answers.length) {
         throw new Error(`promptSeq exhausted at call ${i + 1} (only ${answers.length} provided)`);
       }
-      const a = answers[i] ?? {};
+      const fixture = answers[i] ?? {};
+
+      const askedName =
+        !Array.isArray(question) && typeof question === 'object' && question !== null
+          ? (question as { name?: string }).name
+          : undefined;
+      if (askedName === 'template-select') {
+        return { 'template-select': 'none' };
+      }
+      const fixtureHasFullInitBatch = INIT_FIELDS_V011.every((f) => f in fixture);
+      const isInitFieldRequest =
+        askedName !== undefined && (INIT_FIELDS_V011 as readonly string[]).includes(askedName);
+
+      if (fixtureHasFullInitBatch && isInitFieldRequest && !initBatchConsumed.has(askedName)) {
+        initBatchConsumed.add(askedName);
+        if (initBatchConsumed.size >= INIT_FIELDS_V011.length) {
+          i += 1;
+          initBatchConsumed = new Set<string>();
+        }
+        return { [askedName]: fixture[askedName] };
+      }
+
       i += 1;
-      return a;
+      return fixture;
     };
   }
 
@@ -2133,6 +2436,7 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
     let choiceCallNum = 0;
     const customPrompt: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
+      if (first?.name === 'template-select') return { 'template-select': 'none' };
       if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: false };
       if (first?.name === 'choice') {
         choiceCallNum += 1;

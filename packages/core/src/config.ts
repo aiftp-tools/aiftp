@@ -3,11 +3,13 @@ import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from '
 import { basename, dirname, join } from 'node:path';
 import { parse as parseToml } from '@iarna/toml';
 import { z } from 'zod';
+import { isValidProfileName } from './config-edit.js';
 import { VERSION } from './index.js';
 import { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
+import { assertSafeRemotePath, safeExpandLocalPath } from './path-utils.js';
 
 const SUPPORTED_SCHEMAS = [1, 2] as const;
-const PROTOCOLS = ['ftps', 'ftp'] as const;
+const PROTOCOLS = ['ftps', 'ftp', 'sftp'] as const;
 const FTPS_MODES = ['explicit', 'implicit'] as const;
 const ON_LIMIT_EXCEEDED = ['halt', 'rotate', 'warn'] as const;
 const FULL_BACKUP_ON_FIRST_PUSH = ['recommend', 'force', 'off'] as const;
@@ -24,13 +26,51 @@ const profileSchema = z
     port: z.number().int().min(1).max(65535).default(21),
     protocol: z.enum(PROTOCOLS).default('ftps'),
     user: z.string().min(1, 'user must not be empty'),
-    remote_root: z.string().min(1),
+    // v0.11 security review (CWE-22): refuse `..` / control char /
+    // backslash in remote_root so deploy / rollback / backup cannot be
+    // tricked into operating outside the documented remote tree.
+    remote_root: z
+      .string()
+      .min(1)
+      .superRefine((val, ctx) => {
+        try {
+          assertSafeRemotePath(val, 'remote_root');
+        } catch (error: unknown) {
+          ctx.addIssue({
+            code: 'custom',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }),
     local_root: z.string().min(1),
     keychain_service: z.string().min(1),
     server_kind: z.enum(SERVER_KINDS).default('generic'),
     account: z.string().optional(),
     ftps_mode: z.enum(FTPS_MODES).optional(),
     passive_mode: z.boolean().optional(),
+    /**
+     * v0.11 Pillar γ: path to an SSH private key for protocol="sftp".
+     * Accepts tilde-expanded paths (e.g. `~/.ssh/id_ed25519`); resolution
+     * happens at connect-time so config validation does not require the
+     * file to exist on the validator's machine. Ignored for ftp/ftps.
+     */
+    // v0.11 security review (CWE-22/367): refuse `..` segments in
+    // ssh_key_path. Tilde expansion + symlink rejection happen at
+    // connect-time in SftpClient.loadSshKey().
+    ssh_key_path: z
+      .string()
+      .min(1)
+      .superRefine((val, ctx) => {
+        try {
+          safeExpandLocalPath(val, 'ssh_key_path');
+        } catch (error: unknown) {
+          ctx.addIssue({
+            code: 'custom',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+      .optional(),
   })
   .strict();
 
@@ -130,6 +170,13 @@ const walkSchema = z
   })
   .strict();
 
+const preflightSchema = z
+  .object({
+    php_lint: z.boolean().default(false),
+    json_check: z.boolean().default(false),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     schema: z.union([z.literal(SUPPORTED_SCHEMAS[0]), z.literal(SUPPORTED_SCHEMAS[1])]),
@@ -137,7 +184,20 @@ export const configSchema = z
       .record(z.string(), profileSchema)
       .refine((profiles) => Object.keys(profiles).length > 0, {
         message: 'At least one profile must be defined',
-      }),
+      })
+      // v0.11 Pillar γ security review (CWE-22 / CWE-94): reject TOML
+      // table keys that don't match the canonical profile-name pattern.
+      // Without this, a quoted TOML key like `[profile."../../tmp/x"]`
+      // would land in stateDir() / backupRoot() path-joins and escape
+      // `.aiftp/state` / `.aiftp/backups`.
+      .refine(
+        (profiles: Record<string, unknown>) =>
+          Object.keys(profiles).every((name) => isValidProfileName(name)),
+        {
+          message:
+            'Invalid profile name: must match [a-z0-9](-?[a-z0-9])* — no quoted TOML keys, no path traversal characters.',
+        },
+      ),
     exclude: excludeSchema.prefault({}),
     safety: safetySchema.prefault({}),
     backup: backupSchema.prefault({}),
@@ -146,6 +206,7 @@ export const configSchema = z
     encoding: encodingSchema.prefault({}),
     quirks: quirksSchema.prefault({}),
     walk: walkSchema.prefault({}),
+    preflight: preflightSchema.prefault({}),
   })
   .strict();
 
@@ -159,6 +220,7 @@ export type HooksConfig = z.infer<typeof hooksSchema>;
 export type EncodingConfig = z.infer<typeof encodingSchema>;
 export type QuirksConfig = z.infer<typeof quirksSchema>;
 export type WalkConfig = z.infer<typeof walkSchema>;
+export type PreflightConfig = z.infer<typeof preflightSchema>;
 
 export interface LoadConfigOptions {
   autoMigrate?: boolean;

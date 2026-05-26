@@ -39,6 +39,7 @@ export {
   type HooksConfig,
   type LoadConfigOptions,
   type ProfileConfig,
+  type PreflightConfig,
   type QuirksConfig,
   type SafetyConfig,
   ConfigValidationError,
@@ -66,6 +67,20 @@ export {
 } from './diagnostics/ftp-probe.js';
 
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
+
+export {
+  assertSafeRemotePath,
+  expandTilde,
+  safeExpandLocalPath,
+} from './path-utils.js';
+
+export {
+  getTemplate,
+  listTemplates,
+  type TemplateConfig,
+  type TemplateDefaults,
+  templateIds,
+} from './templates/index.js';
 
 export { isProdProfile } from './safety.js';
 
@@ -208,6 +223,15 @@ export {
   type ListEntry,
   type UploadResult,
 } from './ftp-client.js';
+
+export { SftpClient, type SftpClientOptions } from './sftp-client.js';
+export {
+  buildDeployClientOptions,
+  createDeployClient,
+  type CreateDeployClientOptions,
+  type DeployClient,
+  type DeployProtocol,
+} from './deploy-client-factory.js';
 
 export {
   checkAll,
