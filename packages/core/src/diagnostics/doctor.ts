@@ -54,6 +54,30 @@ export interface FtpsProbeResult {
   remoteRootCwdError?: string;
 }
 
+/**
+ * v0.11 Pillar γ: SFTP-specific probe result. Mirrors the FtpsProbeResult
+ * lifecycle (handshake / auth / remote_root reachability) but with
+ * SSH-specific signals.
+ */
+export interface SftpProbeResult {
+  /** TCP reach to the SSH port (typically 22). Redundant with the
+   * generic NetworkProbeResult.tcpOk but emitted separately so the
+   * doctor result includes an explicit `ssh-port-reachable` line. */
+  portReachable: boolean;
+  /** SSH key file permissions are 0o600 or 0o400. `null` when ssh_key_path
+   * is not set on the profile (password auth) — the corresponding check
+   * is skipped in that case. */
+  keyPermissionsOk: boolean | null;
+  /** Octal mode actually observed (used in the recommendation message). */
+  keyMode?: string;
+  /** SftpClient.connect() succeeded — TCP + SSH transport + auth all ok. */
+  handshakeOk: boolean;
+  /** stat(remote_root) succeeded after handshake. */
+  remoteRootOk: boolean;
+  /** Captured error message from connect() / stat() when not ok. */
+  errorMessage?: string;
+}
+
 export interface NetworkProbeResult {
   dnsOk: boolean;
   tcpOk: boolean;
@@ -74,6 +98,14 @@ export interface DoctorDeps {
   getKeychainPassword?(service: string, account: string): Promise<string | null>;
   probeNetwork(host: string, port: number): Promise<NetworkProbeResult>;
   probeFtps?(profile: ProfileConfig, password: string): Promise<FtpsProbeResult>;
+  /**
+   * v0.11 Pillar γ: SFTP equivalent of probeFtps. Called only when
+   * profile.protocol === 'sftp'. Implementation lives in CLI (uses
+   * SftpClient). Returns null when unavailable (probe lib not wired) so
+   * doctor still produces a report with `skip` results instead of
+   * crashing.
+   */
+  probeSftp?(profile: ProfileConfig, password: string): Promise<SftpProbeResult>;
 }
 
 export interface RunDoctorOptions {
@@ -126,6 +158,115 @@ const SKIPPED_FTPS_RESULTS: CheckResult[] = [
     message: 'FTPS probe is not available.',
   },
 ];
+
+const SKIPPED_SFTP_RESULTS: CheckResult[] = [
+  {
+    id: 'ssh-port-reachable',
+    title: 'SSH port',
+    status: 'skip',
+    message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
+  },
+  {
+    id: 'ssh-key-permissions',
+    title: 'SSH key permissions',
+    status: 'skip',
+    message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
+  },
+  {
+    id: 'sftp-handshake',
+    title: 'SFTP handshake',
+    status: 'skip',
+    message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
+  },
+  {
+    id: 'sftp-remote-root',
+    title: 'SFTP remote root',
+    status: 'skip',
+    message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
+  },
+];
+
+const UNAVAILABLE_SFTP_RESULTS: CheckResult[] = [
+  {
+    id: 'ssh-port-reachable',
+    title: 'SSH port',
+    status: 'skip',
+    message: 'SFTP probe is not available.',
+  },
+  {
+    id: 'ssh-key-permissions',
+    title: 'SSH key permissions',
+    status: 'skip',
+    message: 'SFTP probe is not available.',
+  },
+  {
+    id: 'sftp-handshake',
+    title: 'SFTP handshake',
+    status: 'skip',
+    message: 'SFTP probe is not available.',
+  },
+  {
+    id: 'sftp-remote-root',
+    title: 'SFTP remote root',
+    status: 'skip',
+    message: 'SFTP probe is not available.',
+  },
+];
+
+function sftpResults(profile: ProfileConfig, probe: SftpProbeResult): CheckResult[] {
+  const out: CheckResult[] = [];
+  out.push({
+    id: 'ssh-port-reachable',
+    title: 'SSH port',
+    status: probe.portReachable ? 'pass' : 'fail',
+    message: probe.portReachable
+      ? `Reached ${profile.host}:${profile.port}.`
+      : `TCP ${profile.host}:${profile.port} did not respond.`,
+  });
+  if (probe.keyPermissionsOk === null) {
+    out.push({
+      id: 'ssh-key-permissions',
+      title: 'SSH key permissions',
+      status: 'skip',
+      message: 'ssh_key_path is not set (password auth).',
+    });
+  } else {
+    out.push({
+      id: 'ssh-key-permissions',
+      title: 'SSH key permissions',
+      status: probe.keyPermissionsOk ? 'pass' : 'fail',
+      message: probe.keyPermissionsOk
+        ? `Key permissions are ${probe.keyMode ?? '0o600'} (acceptable).`
+        : `Key permissions are ${probe.keyMode ?? 'too permissive'}; require 0o600 or 0o400.`,
+      recommendation: probe.keyPermissionsOk
+        ? undefined
+        : `Run \`chmod 600 ${profile.ssh_key_path ?? '<ssh_key_path>'}\`.`,
+    });
+  }
+  out.push({
+    id: 'sftp-handshake',
+    title: 'SFTP handshake',
+    status: probe.handshakeOk ? 'pass' : 'fail',
+    message: probe.handshakeOk
+      ? 'SSH transport + SFTP subsystem ready.'
+      : (probe.errorMessage ?? 'SFTP connect failed.'),
+  });
+  out.push({
+    id: 'sftp-remote-root',
+    title: 'SFTP remote root',
+    status: probe.remoteRootOk ? 'pass' : probe.handshakeOk ? 'fail' : 'skip',
+    message: probe.remoteRootOk
+      ? `stat(${profile.remote_root}) succeeded.`
+      : probe.handshakeOk
+        ? `stat(${profile.remote_root}) failed: ${probe.errorMessage ?? 'unknown error'}.`
+        : 'Skipped because the SFTP handshake failed.',
+    recommendation:
+      probe.handshakeOk && !probe.remoteRootOk
+        ? 'Verify the remote_root path exists and the user can list it.'
+        : undefined,
+  });
+  return out;
+}
 
 function summarize(results: CheckResult[]): Summary {
   const summary: Summary = { pass: 0, warn: 0, fail: 0, skip: 0 };
@@ -375,6 +516,7 @@ export async function runDoctor(
       skipped('dns', 'DNS', 'Profile is unavailable.'),
       skipped('tcp', 'TCP', 'Profile is unavailable.'),
       ...SKIPPED_FTPS_RESULTS,
+      ...SKIPPED_SFTP_RESULTS,
     );
     return report(results);
   }
@@ -415,15 +557,30 @@ export async function runDoctor(
     },
   );
 
-  if (!deps.probeFtps) {
-    results.push(...SKIPPED_FTPS_RESULTS);
-    return report(results);
-  }
-
   const password = deps.getKeychainPassword
     ? ((await deps.getKeychainPassword(profile.keychain_service, profile.user).catch(() => null)) ??
       '')
     : '';
-  results.push(...ftpsResults(profile, await deps.probeFtps(profile, password)));
+
+  if (profile.protocol === 'sftp') {
+    // SFTP profile: FTPS checks are not applicable, SFTP checks run.
+    results.push(...SKIPPED_FTPS_RESULTS);
+    if (!deps.probeSftp) {
+      results.push(...UNAVAILABLE_SFTP_RESULTS);
+      return report(results);
+    }
+    results.push(...sftpResults(profile, await deps.probeSftp(profile, password)));
+    return report(results);
+  }
+
+  // FTP/FTPS profile: FTPS checks run, SFTP checks are not applicable.
+  if (!deps.probeFtps) {
+    results.push(...SKIPPED_FTPS_RESULTS, ...SKIPPED_SFTP_RESULTS);
+    return report(results);
+  }
+  results.push(
+    ...ftpsResults(profile, await deps.probeFtps(profile, password)),
+    ...SKIPPED_SFTP_RESULTS,
+  );
   return report(results);
 }

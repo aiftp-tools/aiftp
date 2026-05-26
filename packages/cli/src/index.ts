@@ -17,6 +17,7 @@ import {
   type RollbackBackupStore,
   type RollbackResult,
   type RollbackUploader,
+  SftpClient,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -1149,17 +1150,11 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         // hostname check itself is suppressed.
         //
         // v0.11 Pillar γ: this probe is FTP/FTPS-specific (basic-ftp +
-        // RFC959 reply codes). SFTP profiles get dedicated checks in
-        // Task 27. Short-circuit a "not applicable" result so `aiftp
-        // doctor` does not blow up at FtpClient construction time for
-        // protocol='sftp'.
+        // RFC959 reply codes). SFTP profiles are routed through
+        // `probeSftp` below by doctor.ts; this callback never sees a
+        // sftp profile in practice. Asserted for safety.
         if (profile.protocol === 'sftp') {
-          return {
-            ok: true,
-            handshakeOk: true,
-            authOk: true,
-            error: undefined,
-          };
+          throw new Error('probeFtps: SFTP profile reached the FTPS probe (should be impossible)');
         }
         const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
         // v0.9.2 patch: pipe basic-ftp verbose log to stderr so the
@@ -1236,6 +1231,94 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
             mlsdSupported: false,
             sizeSupported: false,
             remoteRootCwdOk: false,
+          };
+        } finally {
+          await client.disconnect().catch(() => undefined);
+        }
+      },
+      probeSftp: async (profile, password) => {
+        // v0.11 Pillar γ: parallel to probeFtps but uses SftpClient. Emits
+        // the 4 SFTP checks (port-reachable / key-perms / handshake /
+        // remote-root). Network reachability was already established by
+        // the upstream `tcp` check so portReachable just mirrors that
+        // here; the doctor consumer uses it for the `ssh-port-reachable`
+        // line.
+        const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
+        const tcpOk = await probeTcp(profile.host, profile.port).catch(() => false);
+        let keyPermissionsOk: boolean | null = null;
+        let keyMode: string | undefined;
+        if (profile.ssh_key_path) {
+          try {
+            const { statSync } = await import('node:fs');
+            const mode = statSync(profile.ssh_key_path).mode & 0o777;
+            keyMode = `0o${mode.toString(8).padStart(3, '0')}`;
+            keyPermissionsOk = mode === 0o600 || mode === 0o400;
+          } catch (error: unknown) {
+            keyPermissionsOk = false;
+            keyMode = error instanceof Error ? error.message : 'unknown';
+          }
+        }
+        if (!tcpOk) {
+          return {
+            portReachable: false,
+            keyPermissionsOk,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: `TCP ${profile.host}:${profile.port} did not respond.`,
+          };
+        }
+        if (keyPermissionsOk === false) {
+          // Refuse to attempt the handshake when the key file has bad
+          // permissions; SftpClient.connect() would throw anyway and we
+          // want a clear `ssh-key-permissions: fail` line rather than a
+          // misleading `sftp-handshake: fail`.
+          return {
+            portReachable: true,
+            keyPermissionsOk: false,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: 'Refusing to use over-permissive SSH key.',
+          };
+        }
+        const client = new SftpClient({
+          host: profile.host,
+          port: profile.port,
+          user: profile.user,
+          password: password || undefined,
+          sshKeyPath: profile.ssh_key_path,
+          timeoutMs: probeConfig?.connection.timeout_ms,
+        });
+        try {
+          await client.connect();
+          try {
+            await client.list(profile.remote_root);
+            return {
+              portReachable: true,
+              keyPermissionsOk,
+              keyMode,
+              handshakeOk: true,
+              remoteRootOk: true,
+            };
+          } catch (error: unknown) {
+            return {
+              portReachable: true,
+              keyPermissionsOk,
+              keyMode,
+              handshakeOk: true,
+              remoteRootOk: false,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            };
+          }
+        } catch (error: unknown) {
+          return {
+            portReachable: true,
+            keyPermissionsOk,
+            keyMode,
+            handshakeOk: false,
+            remoteRootOk: false,
+            errorMessage: error instanceof Error ? error.message : String(error),
           };
         } finally {
           await client.disconnect().catch(() => undefined);
