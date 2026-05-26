@@ -106,10 +106,11 @@ export function buildInitFieldsWithTemplate(
       name: 'protocol',
       label: 'Protocol',
       type: 'select',
-      hint: 'FTPS (TLS) 推奨。FTP は平文。SFTP は v0.11+ で対応予定。',
+      hint: 'FTPS (TLS) 推奨。FTP は平文 (非推奨)。SFTP は SSH 経由 — v0.11+ で対応。',
       initial: 'ftps',
       choices: [
         { title: 'FTPS', value: 'ftps' },
+        { title: 'SFTP', value: 'sftp' },
         { title: 'FTP', value: 'ftp' },
       ],
     },

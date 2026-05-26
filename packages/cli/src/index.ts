@@ -157,7 +157,7 @@ interface InitAnswers {
   profile: string;
   host: string;
   port: number;
-  protocol: 'ftp' | 'ftps';
+  protocol: 'ftp' | 'ftps' | 'sftp';
   user: string;
   remoteRoot: string;
   localRoot: string;
@@ -306,7 +306,10 @@ function requireNumber(value: unknown, name: string): number {
   return value;
 }
 
-function isStandardFtpPort(port: number, protocol: 'ftp' | 'ftps'): boolean {
+function isStandardFtpPort(port: number, protocol: 'ftp' | 'ftps' | 'sftp'): boolean {
+  if (protocol === 'sftp') {
+    return port === 22;
+  }
   if (protocol === 'ftps') {
     return port === 21 || port === 990;
   }
@@ -2226,7 +2229,7 @@ export function createCli(options: CliOptions = {}): Command {
       const fields: ProfileBlockFields = {
         host: requireString(raw.host, 'host'),
         port: requireNumber(raw.port, 'port'),
-        protocol: requireString(raw.protocol, 'protocol') as 'ftp' | 'ftps',
+        protocol: requireString(raw.protocol, 'protocol') as 'ftp' | 'ftps' | 'sftp',
         user: requireString(raw.user, 'user'),
         remote_root: requireString(raw.remoteRoot, 'remoteRoot'),
         local_root: requireString(raw.localRoot, 'localRoot'),

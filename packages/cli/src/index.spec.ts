@@ -1948,6 +1948,111 @@ describe('cli', () => {
     expect(started).toEqual([cwd]);
     expect(stdout).toEqual([]);
   });
+
+  describe('v0.11 end-to-end mock (4 pillars combined)', () => {
+    // Cross-pillar integration paths: init UX (α) + templates (β) + SFTP (γ)
+    // shipping together. Smoke CI (δ) lives in .github/workflows/smoke.yml
+    // and is covered by actionlint/shellcheck rather than vitest.
+
+    it('init --template wordpress-swell + protocol=sftp produces a config that loadConfig accepts', async () => {
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init', '--template', 'wordpress-swell'], {
+        prompt: prompt({
+          profile: 'main',
+          host: 'sftp.example.com',
+          port: 22,
+          protocol: 'sftp',
+          user: 'deploy',
+          remoteRoot: '/home/deploy/wp',
+          localRoot: '.',
+          keychainService: 'aiftp:main',
+          serverKind: 'generic',
+          password: 'secret-password',
+          consent: true,
+        }),
+      });
+      const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+      // Pillar β (template defaults)
+      expect(toml).toContain('[backup.hard_exclude]');
+      expect(toml).toContain('wp-content/themes/swell-child/node_modules/**');
+      // HIGH 1 fix: main* is the first production pattern, so the `main`
+      // profile keeps its type-to-confirm gate even after a template is
+      // applied.
+      expect(toml).toContain('prod_profile_patterns = ["main*", "*prod*", "*www*", "*-live"]');
+      // Pillar γ (SFTP protocol)
+      expect(toml).toContain('protocol = "sftp"');
+      expect(toml).toContain('port = 22');
+      // The generated TOML must round-trip through loadConfig so deploy /
+      // rollback / backup paths can consume it without surprises.
+      const config = await loadConfig(join(cwd, '.aiftp.toml'));
+      expect(config.profile.main?.protocol).toBe('sftp');
+      expect(config.preflight.php_lint).toBe(true);
+      expect(config.backup.hard_exclude.additional_patterns).toEqual(
+        expect.arrayContaining(['wp-content/themes/swell-child/node_modules/**']),
+      );
+      expect(config.safety.prod_profile_patterns).toEqual(expect.arrayContaining(['main*']));
+    });
+
+    it('init --template static + protocol=ftps preserves user-edited localRoot through the full flow', async () => {
+      // Combines Pillar α (PromptFlow), Pillar β (static template defaults
+      // localRoot to "dist"), and HIGH 2 fix (user edits "build", that
+      // value reaches the TOML — not the template default).
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init', '--template', 'static'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'ftp.example.com',
+          port: 21,
+          protocol: 'ftps',
+          user: 'deploy',
+          remoteRoot: '/public_html',
+          localRoot: 'build',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'p',
+          consent: true,
+        }),
+      });
+      const toml = await readFile(join(cwd, '.aiftp.toml'), 'utf8');
+      expect(toml).toContain('local_root = "build"');
+      expect(toml).not.toMatch(/local_root = "dist"/);
+      // Static template's hard-excludes still apply even when the user
+      // overrides localRoot.
+      expect(toml).toContain('node_modules/**');
+      expect(toml).toContain('.parcel-cache/**');
+    });
+
+    it('writes ssh_key_path into .gitignore guard but never into a Keychain command', async () => {
+      // Sanity check that the SFTP init path does NOT push ssh_key_path
+      // through the password Keychain — that would leak the key location
+      // into the credential store. Keychain receives only the password.
+      await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+      await parse(['init'], {
+        prompt: prompt({
+          profile: 'production',
+          host: 'sftp.example.com',
+          port: 22,
+          protocol: 'sftp',
+          user: 'deploy',
+          remoteRoot: '/var/www/html',
+          localRoot: '.',
+          keychainService: 'aiftp:production',
+          serverKind: 'generic',
+          password: 'pw',
+          consent: true,
+        }),
+      });
+      const passwords = stored.map((s) => s.password);
+      // No stored password should match a filesystem path
+      for (const p of passwords) {
+        expect(p).not.toMatch(/^\//u);
+        expect(p).not.toMatch(/^~\//u);
+      }
+      // The .gitignore should have .aiftp/ guard from the init flow.
+      const gi = await readFile(join(cwd, '.gitignore'), 'utf8');
+      expect(gi).toContain('.aiftp/');
+    });
+  });
 });
 
 describe('sanitizeFieldInput (v0.10.4)', () => {
