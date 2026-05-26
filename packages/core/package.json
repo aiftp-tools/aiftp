@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/core",
-  "version": "0.10.4",
+  "version": "0.11.0",
   "description": "aiftp core engine: config, diff, deploy, backup, keychain",
   "license": "MIT",
   "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
