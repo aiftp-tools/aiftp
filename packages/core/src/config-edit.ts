@@ -33,7 +33,7 @@ export function isValidProfileName(name: string): boolean {
 export interface ProfileBlockFields {
   host: string;
   port: number;
-  protocol: 'ftp' | 'ftps';
+  protocol: 'ftp' | 'ftps' | 'sftp';
   user: string;
   remote_root: string;
   local_root: string;
@@ -42,6 +42,8 @@ export interface ProfileBlockFields {
   account?: string;
   ftps_mode?: 'explicit' | 'implicit';
   passive_mode?: boolean;
+  /** v0.11 Pillar γ: only meaningful for protocol="sftp". */
+  ssh_key_path?: string;
 }
 
 /** Line-index range of a profile block (half-open: [start, end)). */
@@ -163,6 +165,8 @@ export function appendProfileBlock(
   if (fields.ftps_mode !== undefined) blockLines.push(renderField('ftps_mode', fields.ftps_mode));
   if (fields.passive_mode !== undefined)
     blockLines.push(renderField('passive_mode', fields.passive_mode));
+  if (fields.ssh_key_path !== undefined)
+    blockLines.push(renderField('ssh_key_path', fields.ssh_key_path));
 
   const trimmedSource = source.replace(/\n+$/u, '');
   const sep = trimmedSource.length === 0 ? '' : '\n\n';

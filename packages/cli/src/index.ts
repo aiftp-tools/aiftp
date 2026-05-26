@@ -1147,6 +1147,20 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         // *post-connect* cert CN / altName vs requested host comparison,
         // so a mismatch is still surfaced as a warning even when the
         // hostname check itself is suppressed.
+        //
+        // v0.11 Pillar γ: this probe is FTP/FTPS-specific (basic-ftp +
+        // RFC959 reply codes). SFTP profiles get dedicated checks in
+        // Task 27. Short-circuit a "not applicable" result so `aiftp
+        // doctor` does not blow up at FtpClient construction time for
+        // protocol='sftp'.
+        if (profile.protocol === 'sftp') {
+          return {
+            ok: true,
+            handshakeOk: true,
+            authOk: true,
+            error: undefined,
+          };
+        }
         const probeConfig = await loadConfig(join(context.cwd, '.aiftp.toml')).catch(() => null);
         // v0.9.2 patch: pipe basic-ftp verbose log to stderr so the
         // operator can see *why* a handshake/login failed instead of

@@ -7,7 +7,7 @@ import { VERSION } from './index.js';
 import { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
 const SUPPORTED_SCHEMAS = [1, 2] as const;
-const PROTOCOLS = ['ftps', 'ftp'] as const;
+const PROTOCOLS = ['ftps', 'ftp', 'sftp'] as const;
 const FTPS_MODES = ['explicit', 'implicit'] as const;
 const ON_LIMIT_EXCEEDED = ['halt', 'rotate', 'warn'] as const;
 const FULL_BACKUP_ON_FIRST_PUSH = ['recommend', 'force', 'off'] as const;
@@ -31,6 +31,13 @@ const profileSchema = z
     account: z.string().optional(),
     ftps_mode: z.enum(FTPS_MODES).optional(),
     passive_mode: z.boolean().optional(),
+    /**
+     * v0.11 Pillar γ: path to an SSH private key for protocol="sftp".
+     * Accepts tilde-expanded paths (e.g. `~/.ssh/id_ed25519`); resolution
+     * happens at connect-time so config validation does not require the
+     * file to exist on the validator's machine. Ignored for ftp/ftps.
+     */
+    ssh_key_path: z.string().min(1).optional(),
   })
   .strict();
 

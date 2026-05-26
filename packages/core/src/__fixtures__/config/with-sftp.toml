@@ -1,0 +1,11 @@
+schema = 2
+
+[profile.production]
+host = "vps.example.com"
+port = 22
+protocol = "sftp"
+user = "deploy"
+remote_root = "/var/www/html"
+local_root = "./dist"
+keychain_service = "aiftp:vps-prod"
+ssh_key_path = "~/.ssh/id_ed25519"
