@@ -3,6 +3,7 @@ import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises
 import { createConnection } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  type DeployClient,
   type DeployUploader,
   type DoctorReport,
   type ExportProfile,
@@ -26,6 +27,7 @@ import {
   backupKeyService,
   checkAll,
   createDefaultBackupStore,
+  createDeployClient,
   createExcluder,
   createWatchDebouncer,
   deletePassword,
@@ -877,13 +879,13 @@ async function createDefaultFtpClient(
   cwd: string,
   profileName: string,
   keychain: CliKeychain,
-): Promise<FtpClient> {
+): Promise<DeployClient> {
   const config = await loadConfig(join(cwd, '.aiftp.toml'));
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = new FtpClient({
+  const client = createDeployClient({
     host: profile.host,
     port: profile.port,
     user: profile.user,
@@ -899,7 +901,7 @@ async function createDefaultFtpClient(
   return client;
 }
 
-function managedUploaderFromClient(client: FtpClient): ManagedUploader {
+function managedUploaderFromClient(client: DeployClient): ManagedUploader {
   return {
     uploader: {
       upload: (localPath, remotePath) => client.upload(localPath, remotePath),
@@ -915,7 +917,7 @@ async function createDefaultManagedUploader(
   cwd: string,
   profileName: string,
   keychain: CliKeychain,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
 ): Promise<ManagedUploader> {
   if (ftpClient) {
     return managedUploaderFromClient(ftpClient);
@@ -931,7 +933,7 @@ async function resolveManagedUploader(
   dryRun: boolean | undefined,
   keychain: CliKeychain,
   runtime: CliRuntime,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
   runtimeUploader?: DeployUploader,
 ): Promise<ManagedUploader> {
   if (runtimeUploader) {
@@ -1043,7 +1045,7 @@ async function defaultRunRollback(
   // Build the uploader — dry-run gets a stub so we don't open an FTP
   // socket needlessly. Real rollback uses the FtpClient's buffer +
   // rename API so each file is written atomically (Codex BLOCK fix).
-  let ftpClient: FtpClient | undefined;
+  let ftpClient: DeployClient | undefined;
   const uploader: RollbackUploader = options.dryRun
     ? {
         upload: async () => {
@@ -1757,7 +1759,7 @@ export function createCli(options: CliOptions = {}): Command {
           !runtime.runPush &&
           !cmd.dryRun &&
           (runtimePushBackupStore === undefined || runtimeUploader === undefined);
-        let sharedFtpClient: FtpClient | undefined;
+        let sharedFtpClient: DeployClient | undefined;
         try {
           sharedFtpClient = needsDefaultFtp
             ? await createDefaultFtpClient(cwd, cmd.profile, keychain)

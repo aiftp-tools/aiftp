@@ -218,6 +218,14 @@ export {
   type UploadResult,
 } from './ftp-client.js';
 
+export { SftpClient, type SftpClientOptions } from './sftp-client.js';
+export {
+  createDeployClient,
+  type CreateDeployClientOptions,
+  type DeployClient,
+  type DeployProtocol,
+} from './deploy-client-factory.js';
+
 export {
   checkAll,
   checkFile,

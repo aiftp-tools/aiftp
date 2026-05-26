@@ -2,9 +2,9 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  type DeployClient,
   type DeployUploader,
   type DoctorReport,
-  FtpClient,
   type ImportedProfile,
   type PushBackupStore,
   type PushOptions,
@@ -18,6 +18,7 @@ import {
   type VerifyResult,
   checkAll,
   createDefaultBackupStore,
+  createDeployClient,
   createExcluder,
   getPassword,
   hasPassword,
@@ -527,13 +528,13 @@ function unavailableUploader(): DeployUploader {
   };
 }
 
-async function createDefaultFtpClient(cwd: string, profileName: string): Promise<FtpClient> {
+async function createDefaultFtpClient(cwd: string, profileName: string): Promise<DeployClient> {
   const config = await loadConfigForMcp(cwd);
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = new FtpClient({
+  const client = createDeployClient({
     host: profile.host,
     port: profile.port,
     user: profile.user,
@@ -549,7 +550,7 @@ async function createDefaultFtpClient(cwd: string, profileName: string): Promise
   return client;
 }
 
-function uploaderFromClient(client: FtpClient): DeployUploader {
+function uploaderFromClient(client: DeployClient): DeployUploader {
   return {
     upload: (localPath, remotePath) => client.upload(localPath, remotePath),
     delete: (remotePath) => client.delete(remotePath),
@@ -583,7 +584,7 @@ async function pushBackupStoreFor(
   app: AiftpMcpApp,
   profileName: string,
   dryRun: boolean,
-  ftpClient?: FtpClient,
+  ftpClient?: DeployClient,
   runtimeStore?: PushBackupStore,
 ): Promise<PushBackupStore> {
   if (runtimeStore) {
@@ -2164,7 +2165,7 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   // localPath when the runtime didn't expose `uploadBuffer`. Now we use
   // a dedicated `createRollbackUploader` hook. Default to FtpClient
   // when no hook is wired.
-  let sharedFtp: FtpClient | undefined;
+  let sharedFtp: DeployClient | undefined;
   const uploader: RollbackUploader =
     (await app.runtime.createRollbackUploader?.({
       cwd: app.cwd,

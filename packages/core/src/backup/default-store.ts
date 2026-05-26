@@ -3,8 +3,9 @@ import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { loadConfig } from '../config.js';
+import { type DeployClient, createDeployClient } from '../deploy-client-factory.js';
 import { createExcluder } from '../exclude.js';
-import { FtpClient, FtpConnectionError, FtpError, FtpNotFoundError } from '../ftp-client.js';
+import { FtpConnectionError, FtpError, FtpNotFoundError } from '../ftp-client.js';
 import { getPassword } from '../keychain.js';
 import { BackupError, BackupStore, type BackupStoreOptions } from './store.js';
 
@@ -68,12 +69,12 @@ export async function createDefaultBackupStore(
     throw error;
   }
   const key = Buffer.from(backupKeyBase64, 'base64');
-  let ownedFtpClient: BackupFtpClient | undefined;
+  let ownedFtpClient: DeployClient | undefined;
   async function getFtpClient(): Promise<BackupFtpClient> {
     if (options.ftpClient) {
       return options.ftpClient;
     }
-    ownedFtpClient ??= new FtpClient({
+    ownedFtpClient ??= createDeployClient({
       host: selectedProfile.host,
       port: selectedProfile.port,
       user: selectedProfile.user,
