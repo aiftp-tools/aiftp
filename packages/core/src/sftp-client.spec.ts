@@ -454,20 +454,47 @@ describe('SftpClient — Task 23 SSH key authentication', () => {
     await client.disconnect();
   });
 
-  it('rejects when SSH key file permissions are >600 (world/group readable)', async () => {
-    chmodSync(keyPath, 0o644);
+  // v0.11 release: Windows does not honour POSIX `chmod` bits (NTFS
+  // ACLs are the real mechanism, Node `chmod` is mostly cosmetic). The
+  // strict 0o600/0o400 gate is intentionally skipped on Windows in
+  // loadSshKey(); these two tests cover the POSIX-only branch.
+  const posixIt = process.platform === 'win32' ? it.skip : it;
+
+  posixIt(
+    'rejects when SSH key file permissions are >600 (world/group readable) — POSIX only',
+    async () => {
+      chmodSync(keyPath, 0o644);
+      const { SftpClient } = await loadSftpClient();
+      const client = new SftpClient({
+        host: 'sftp.example.com',
+        user: 'deploy',
+        sshKeyPath: keyPath,
+      });
+      await expect(client.connect()).rejects.toThrow(/permissions/i);
+      expect(mockInstances).toHaveLength(0);
+    },
+  );
+
+  posixIt('accepts SSH key file with 0o400 permissions — POSIX only', async () => {
+    chmodSync(keyPath, 0o400);
     const { SftpClient } = await loadSftpClient();
     const client = new SftpClient({
       host: 'sftp.example.com',
       user: 'deploy',
       sshKeyPath: keyPath,
     });
-    await expect(client.connect()).rejects.toThrow(/permissions/i);
-    expect(mockInstances).toHaveLength(0);
+    await expect(client.connect()).resolves.toBeUndefined();
+    await client.disconnect();
   });
 
-  it('accepts SSH key file with 0o400 permissions', async () => {
-    chmodSync(keyPath, 0o400);
+  it('skips permission check on Windows (NTFS ACL is the real mechanism)', async () => {
+    if (process.platform !== 'win32') {
+      // POSIX: the strict-check path is covered by the two posixIt
+      // cases above. Skip the Windows assertion to keep the suite
+      // green on POSIX.
+      return;
+    }
+    chmodSync(keyPath, 0o644);
     const { SftpClient } = await loadSftpClient();
     const client = new SftpClient({
       host: 'sftp.example.com',

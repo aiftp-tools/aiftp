@@ -1277,6 +1277,13 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
             if (lstatSync(resolved).isSymbolicLink()) {
               keyPermissionsOk = false;
               keyMode = 'symlink';
+            } else if (process.platform === 'win32') {
+              // Windows: NTFS does not honour POSIX `chmod` bits, so the
+              // mode bits we read back are not meaningful. Skip the check
+              // (matches SftpClient.loadSshKey() behaviour) and surface
+              // the platform note via keyMode.
+              keyPermissionsOk = null;
+              keyMode = 'windows-acl';
             } else {
               const mode = statSync(resolved).mode & 0o777;
               keyMode = `0o${mode.toString(8).padStart(3, '0')}`;

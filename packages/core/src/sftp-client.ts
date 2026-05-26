@@ -151,11 +151,20 @@ function loadSshKey(path: string): Buffer {
       `SftpClient: ssh_key_path "${path}" is a symbolic link. Symbolic links are refused because they introduce a TOCTOU window (stat vs read). Point ssh_key_path at the real key file directly.`,
     );
   }
-  const mode = statSync(resolved).mode & 0o777;
-  if (mode !== 0o600 && mode !== 0o400) {
-    throw new Error(
-      `SftpClient: SSH key permissions must be 0o600 or 0o400, got 0o${mode.toString(8).padStart(3, '0')} (${path}). Run \`chmod 600 ${path}\` to fix.`,
-    );
+  // Windows: NTFS does not honour POSIX `chmod` bits (Node reports
+  // `0o666` for `chmod 600` and `0o444` for `chmod 400`), so the
+  // strict 0o600/0o400 gate would refuse every Windows key path. The
+  // real Windows security mechanism is NTFS ACL, which Node fs cannot
+  // inspect portably. We skip the bit check on Windows; operators are
+  // expected to set ACL via `icacls` themselves. POSIX platforms keep
+  // the strict check that mirrors `ssh(1)`.
+  if (process.platform !== 'win32') {
+    const mode = statSync(resolved).mode & 0o777;
+    if (mode !== 0o600 && mode !== 0o400) {
+      throw new Error(
+        `SftpClient: SSH key permissions must be 0o600 or 0o400, got 0o${mode.toString(8).padStart(3, '0')} (${path}). Run \`chmod 600 ${path}\` to fix.`,
+      );
+    }
   }
   return readFileSync(resolved);
 }

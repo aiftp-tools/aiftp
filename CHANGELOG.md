@@ -85,6 +85,10 @@ Release tags live in the GitHub repository:
   - **CWE-22/367**: `ssh_key_path` の `..` segment を tilde 展開前にも拒否（`safeExpandLocalPath`）。さらに `lstatSync` で symlink を refuse し、stat-then-read の TOCTOU window を縮小。
   - **CWE-200/732**: MCP FileZilla import の confirm tempfile が `mode: 0o600` を明示。post-rename `.aiftp.toml` が umask 起因で world-readable にならない。
 
+### Platform notes
+
+- **Windows SFTP key auth**: `SftpClient.loadSshKey()` skips the `0o600/0o400` POSIX mode-bit check on Windows because NTFS does not honour Node `chmod` faithfully (a 0o600 key reads back as 0o666). The real Windows security mechanism is NTFS ACL; operators on Windows should use `icacls` to restrict the key file (e.g., `icacls C:\path\to\id_ed25519 /inheritance:r /grant:r %USERNAME%:R`). `aiftp doctor` returns `ssh-key-permissions: skip` with `keyMode: windows-acl` to surface the platform difference.
+
 ### Known security limitations (v0.11)
 
 - **CWE-295: SFTP host key verification は v0.11 では実装されない**。`SftpClient.connect()` は known_hosts / TOFU pinning を行わず、初回接続時のサーバ提示 host key を盲目的に受理する。経路上の MITM 攻撃で password / 鍵 signing oracle が悪用される可能性。`aiftp doctor` の `sftp-handshake` check は `warn` 状態を返し続け、毎回 limitation をログに出す。 v0.12 で `.aiftp/known_hosts` TOFU pinning を実装予定（[review log](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md) Finding 3）。
