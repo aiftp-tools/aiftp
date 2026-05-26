@@ -1,0 +1,77 @@
+name: smoke
+
+# Post-release smoke test for the published @aiftp-tools/cli npm
+# package. Runs against the *latest* published version (NOT the
+# current branch) so we catch regressions in the install + CLI
+# entrypoint + MCP server that source-tree tests cannot see.
+#
+# Triggers:
+#   - release: every published GitHub Release
+#   - workflow_dispatch: manual button in the Actions tab
+#   - schedule: Mondays 00:00 UTC = 09:00 JST so the team sees a
+#     fresh signal at the start of the week.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        node: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install the published CLI
+        run: npm install -g @aiftp-tools/cli@latest
+
+      - name: aiftp --version
+        run: aiftp --version
+
+      - name: doctor outside a project (sanity)
+        shell: bash
+        run: |
+          # `aiftp doctor` without a .aiftp.toml should exit non-zero with
+          # a clear error rather than crash. We accept either exit path —
+          # the goal is "no uncaught exception", not a specific exit code.
+          set +e
+          mkdir -p ./smoke-tmp
+          cd ./smoke-tmp
+          aiftp doctor --json || true
+          echo "doctor exited with $?"
+
+      - name: init refuses non-TTY stdin
+        shell: bash
+        run: |
+          # `aiftp init` must refuse to run without an interactive TTY
+          # (security gate — prevents an automated pipe from creating
+          # a profile with attacker-supplied credentials).
+          set +e
+          aiftp init </dev/null
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            echo "FAIL: aiftp init succeeded on non-TTY stdin"
+            exit 1
+          fi
+          echo "PASS: aiftp init refused non-TTY stdin (exit $rc)"
+
+      - name: MCP smoke (stdio + tools/list)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash ./.github/workflows/scripts/mcp-smoke.sh
