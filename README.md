@@ -327,6 +327,7 @@ pnpm lint
 | **Walkthrough** | [docs/v0.2-walkthrough.md](docs/v0.2-walkthrough.md) |
 | **Compatibility** | [docs/compatibility-matrix.md](docs/compatibility-matrix.md) |
 | **FFFTP/FileZilla migration** | [docs/migration-from-ffftp.md](docs/migration-from-ffftp.md) |
+| **Competitive positioning** | [docs/competitive-comparison.md](docs/competitive-comparison.md) — vs alxspiker/mcp-server-ftp / Computer Use / WordPress 公式 MCP / git-ftp 系 |
 | **Target OS** | macOS ✅ (end-to-end verified on Star Server / Sakura / Xserver / Lolipop). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
 | **Language** | TypeScript / Node.js 22+ |
 | **License** | MIT |
