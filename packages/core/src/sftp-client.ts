@@ -14,7 +14,16 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import Sftp from 'ssh2-sftp-client';
-import type { ListEntry, UploadResult } from './ftp-client.js';
+import {
+  FtpAuthError,
+  FtpConnectionError,
+  FtpError,
+  FtpNotFoundError,
+  FtpTimeoutError,
+  type ListEntry,
+  type UploadResult,
+} from './ftp-client.js';
+import { expandTilde } from './path-utils.js';
 
 export interface SftpClientOptions {
   host: string;
@@ -57,19 +66,85 @@ function mapType(t: string): ListEntry['type'] {
 }
 
 /**
+ * v0.11 Pillar γ Codex review Phase 2-2: map ssh2-sftp-client errors
+ * to the shared FtpError hierarchy so backup / rollback / deploy can
+ * branch on the same exception types regardless of protocol.
+ *
+ * ssh2-sftp-client surfaces three styles of error:
+ * - `error.code === 2` (SFTP_STATUS_CODE NO_SUCH_FILE) → FtpNotFoundError
+ * - `error.code === 'ENOENT'` (Node fs-style) → FtpNotFoundError
+ * - message-based hints ('No such file', 'Permission denied', timeouts,
+ *   'All configured authentication methods failed')
+ *
+ * The fallback `FtpError` preserves the original cause so callers can
+ * dig deeper if needed.
+ */
+export function mapSftpError(error: unknown, context: string): FtpError {
+  if (error instanceof FtpError) {
+    return error;
+  }
+  const err = error as {
+    code?: number | string;
+    message?: string;
+    name?: string;
+  };
+  const code = err?.code;
+  const msg = (err?.message ?? String(error)).trim();
+  const lower = msg.toLowerCase();
+
+  // SFTP protocol code 2 = SSH_FX_NO_SUCH_FILE.
+  if (code === 2 || code === 'ENOENT' || lower.includes('no such file')) {
+    return new FtpNotFoundError(`${context}: not found`, { cause: error });
+  }
+  // SFTP protocol code 3 = SSH_FX_PERMISSION_DENIED.
+  if (code === 3 || code === 'EACCES' || lower.includes('permission denied')) {
+    return new FtpError(`${context}: permission denied`, { cause: error });
+  }
+  if (
+    lower.includes('all configured authentication methods failed') ||
+    lower.includes('keyboard-interactive') ||
+    lower.includes('auth')
+  ) {
+    return new FtpAuthError(`${context}: authentication failed`, { cause: error });
+  }
+  if (
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    lower.includes('timeout') ||
+    lower.includes('timed out')
+  ) {
+    return new FtpTimeoutError(`${context}: timeout`, { cause: error });
+  }
+  if (
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNRESET' ||
+    lower.includes('connect') ||
+    lower.includes('not connected')
+  ) {
+    return new FtpConnectionError(`${context}: connection failed`, { cause: error });
+  }
+  return new FtpError(`${context}: ${msg}`, { cause: error });
+}
+
+/**
  * Read an SSH private key from disk after verifying that its UNIX mode
  * is 0o600 or 0o400. This mirrors `ssh(1)`'s refusal to use a private
  * key that is group- or world-readable. Throws on bad permissions or
  * missing file (the underlying ENOENT propagates).
  */
 function loadSshKey(path: string): Buffer {
-  const mode = statSync(path).mode & 0o777;
+  // v0.11 Pillar γ Codex review Phase 1-3: tilde expansion at the
+  // runtime boundary so `ssh_key_path = "~/.ssh/id_ed25519"` works
+  // without the operator having to know absolute paths.
+  const resolved = expandTilde(path);
+  const mode = statSync(resolved).mode & 0o777;
   if (mode !== 0o600 && mode !== 0o400) {
     throw new Error(
       `SftpClient: SSH key permissions must be 0o600 or 0o400, got 0o${mode.toString(8).padStart(3, '0')} (${path}). Run \`chmod 600 ${path}\` to fix.`,
     );
   }
-  return readFileSync(path);
+  return readFileSync(resolved);
 }
 
 /**
@@ -135,20 +210,28 @@ export class SftpClient {
 
   async list(remotePath: string): Promise<ListEntry[]> {
     const client = this.requireConnection();
-    const items = await client.list(remotePath);
-    return items.map((i) => ({
-      name: i.name,
-      size: i.size,
-      type: mapType(i.type),
-      modifiedAt: new Date(i.modifyTime),
-    }));
+    try {
+      const items = await client.list(remotePath);
+      return items.map((i) => ({
+        name: i.name,
+        size: i.size,
+        type: mapType(i.type),
+        modifiedAt: new Date(i.modifyTime),
+      }));
+    } catch (error: unknown) {
+      throw mapSftpError(error, `list(${remotePath})`);
+    }
   }
 
   async upload(localPath: string, remotePath: string): Promise<UploadResult> {
     const client = this.requireConnection();
-    await client.put(localPath, remotePath);
-    const bytes = await this.safeSize(remotePath, 0);
-    return { remotePath, bytesUploaded: bytes };
+    try {
+      await client.put(localPath, remotePath);
+      const bytes = await this.safeSize(remotePath, 0);
+      return { remotePath, bytesUploaded: bytes };
+    } catch (error: unknown) {
+      throw mapSftpError(error, `upload(${remotePath})`);
+    }
   }
 
   /**
@@ -159,25 +242,41 @@ export class SftpClient {
    */
   async uploadBuffer(content: Buffer, remotePath: string): Promise<UploadResult> {
     const client = this.requireConnection();
-    await client.put(content, remotePath);
-    const bytes = await this.safeSize(remotePath, content.length);
-    return { remotePath, bytesUploaded: bytes };
+    try {
+      await client.put(content, remotePath);
+      const bytes = await this.safeSize(remotePath, content.length);
+      return { remotePath, bytesUploaded: bytes };
+    } catch (error: unknown) {
+      throw mapSftpError(error, `uploadBuffer(${remotePath})`);
+    }
   }
 
   async download(remotePath: string, localPath: string): Promise<void> {
     const client = this.requireConnection();
-    await client.get(remotePath, localPath);
+    try {
+      await client.get(remotePath, localPath);
+    } catch (error: unknown) {
+      throw mapSftpError(error, `download(${remotePath})`);
+    }
   }
 
   async delete(remotePath: string): Promise<void> {
     const client = this.requireConnection();
-    await client.delete(remotePath);
+    try {
+      await client.delete(remotePath);
+    } catch (error: unknown) {
+      throw mapSftpError(error, `delete(${remotePath})`);
+    }
   }
 
   async size(remotePath: string): Promise<number> {
     const client = this.requireConnection();
-    const stats = await client.stat(remotePath);
-    return stats.size;
+    try {
+      const stats = await client.stat(remotePath);
+      return stats.size;
+    } catch (error: unknown) {
+      throw mapSftpError(error, `size(${remotePath})`);
+    }
   }
 
   /**
@@ -195,7 +294,11 @@ export class SftpClient {
 
   async rename(srcPath: string, destPath: string): Promise<void> {
     const client = this.requireConnection();
-    await client.rename(srcPath, destPath);
+    try {
+      await client.rename(srcPath, destPath);
+    } catch (error: unknown) {
+      throw mapSftpError(error, `rename(${srcPath} → ${destPath})`);
+    }
   }
 
   /**
@@ -206,7 +309,11 @@ export class SftpClient {
    */
   async mkdir(remotePath: string): Promise<void> {
     const client = this.requireConnection();
-    await client.mkdir(remotePath, true);
+    try {
+      await client.mkdir(remotePath, true);
+    } catch (error: unknown) {
+      throw mapSftpError(error, `mkdir(${remotePath})`);
+    }
   }
 
   private requireConnection(): Sftp {

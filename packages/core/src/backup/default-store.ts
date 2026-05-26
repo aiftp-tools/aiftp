@@ -3,7 +3,11 @@ import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { loadConfig } from '../config.js';
-import { type DeployClient, createDeployClient } from '../deploy-client-factory.js';
+import {
+  type DeployClient,
+  buildDeployClientOptions,
+  createDeployClient,
+} from '../deploy-client-factory.js';
 import { createExcluder } from '../exclude.js';
 import { FtpConnectionError, FtpError, FtpNotFoundError } from '../ftp-client.js';
 import { getPassword } from '../keychain.js';
@@ -74,16 +78,13 @@ export async function createDefaultBackupStore(
     if (options.ftpClient) {
       return options.ftpClient;
     }
-    ownedFtpClient ??= createDeployClient({
-      host: selectedProfile.host,
-      port: selectedProfile.port,
-      user: selectedProfile.user,
-      password: await keychain.getPassword(selectedProfile.keychain_service, selectedProfile.user),
-      protocol: selectedProfile.protocol,
-      requireTls: config.safety.require_tls,
-      verifyCertificate: config.safety.verify_certificate,
-      timeoutMs: config.connection.timeout_ms,
-    });
+    const password = await keychain.getPassword(
+      selectedProfile.keychain_service,
+      selectedProfile.user,
+    );
+    ownedFtpClient ??= createDeployClient(
+      buildDeployClientOptions({ profile: selectedProfile, config, password }),
+    );
     return ownedFtpClient;
   }
 

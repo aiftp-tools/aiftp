@@ -16,6 +16,7 @@ import {
   type StatusResult,
   VERSION,
   type VerifyResult,
+  buildDeployClientOptions,
   checkAll,
   createDefaultBackupStore,
   createDeployClient,
@@ -534,18 +535,8 @@ async function createDefaultFtpClient(cwd: string, profileName: string): Promise
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = createDeployClient({
-    host: profile.host,
-    port: profile.port,
-    user: profile.user,
-    password: await getPassword(profile.keychain_service, profile.user),
-    protocol: profile.protocol,
-    requireTls: config.safety.require_tls,
-    verifyCertificate: config.safety.verify_certificate,
-    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
-    timeoutMs: config.connection.timeout_ms,
-    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
-  });
+  const password = await getPassword(profile.keychain_service, profile.user);
+  const client = createDeployClient(buildDeployClientOptions({ profile, config, password }));
   await client.connect();
   return client;
 }

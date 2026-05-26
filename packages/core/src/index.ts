@@ -68,6 +68,8 @@ export {
 
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
+export { expandTilde } from './path-utils.js';
+
 export {
   getTemplate,
   listTemplates,
@@ -220,6 +222,7 @@ export {
 
 export { SftpClient, type SftpClientOptions } from './sftp-client.js';
 export {
+  buildDeployClientOptions,
   createDeployClient,
   type CreateDeployClientOptions,
   type DeployClient,

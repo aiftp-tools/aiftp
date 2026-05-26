@@ -26,12 +26,14 @@ import {
   type VerifyResult,
   appendProfileBlock,
   backupKeyService,
+  buildDeployClientOptions,
   checkAll,
   createDefaultBackupStore,
   createDeployClient,
   createExcluder,
   createWatchDebouncer,
   deletePassword,
+  expandTilde,
   extractHookPaths,
   generateKey,
   getPassword,
@@ -399,7 +401,11 @@ function formatInitSummaryValue(
   answers: InitAnswers,
   key: (typeof INIT_SUMMARY_FIELDS)[number]['key'],
 ): string {
-  if (key === 'protocol') return answers.protocol === 'ftps' ? 'FTPS' : 'FTP';
+  if (key === 'protocol') {
+    if (answers.protocol === 'ftps') return 'FTPS';
+    if (answers.protocol === 'sftp') return 'SFTP';
+    return 'FTP';
+  }
   if (key === 'serverKind') return SERVER_KIND_LABELS[answers.serverKind];
   if (key === 'password') {
     const len = answers.password.length;
@@ -498,9 +504,13 @@ async function editInitField(
           message: 'Protocol',
           choices: [
             { title: 'FTPS', value: 'ftps' },
+            { title: 'SFTP', value: 'sftp' },
             { title: 'FTP', value: 'ftp' },
           ],
-          initial: current.protocol === 'ftps' ? 0 : 1,
+          // v0.11 Pillar γ Codex Phase 1-2: edit-prompt's initial index
+          // matches the choices ordering above (FTPS=0, SFTP=1, FTP=2)
+          // so reselecting SFTP from the summary edit lands on SFTP.
+          initial: current.protocol === 'ftps' ? 0 : current.protocol === 'sftp' ? 1 : 2,
         },
       ];
       break;
@@ -889,18 +899,8 @@ async function createDefaultFtpClient(
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
-  const client = createDeployClient({
-    host: profile.host,
-    port: profile.port,
-    user: profile.user,
-    password: await keychain.getPassword(profile.keychain_service, profile.user),
-    protocol: profile.protocol,
-    requireTls: config.safety.require_tls,
-    verifyCertificate: config.safety.verify_certificate,
-    skipHostnameCheck: config.quirks?.tls_check_hostname === false,
-    timeoutMs: config.connection.timeout_ms,
-    noopIntervalSec: config.quirks?.noop_interval_sec ?? 0,
-  });
+  const password = await keychain.getPassword(profile.keychain_service, profile.user);
+  const client = createDeployClient(buildDeployClientOptions({ profile, config, password }));
   await client.connect();
   return client;
 }
@@ -1253,7 +1253,11 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         if (profile.ssh_key_path) {
           try {
             const { statSync } = await import('node:fs');
-            const mode = statSync(profile.ssh_key_path).mode & 0o777;
+            // v0.11 Pillar γ Codex Phase 1-3: tilde expansion at the
+            // runtime boundary so doctor matches SftpClient.connect()
+            // behavior (both honour `~/.ssh/...`).
+            const resolved = expandTilde(profile.ssh_key_path);
+            const mode = statSync(resolved).mode & 0o777;
             keyMode = `0o${mode.toString(8).padStart(3, '0')}`;
             keyPermissionsOk = mode === 0o600 || mode === 0o400;
           } catch (error: unknown) {

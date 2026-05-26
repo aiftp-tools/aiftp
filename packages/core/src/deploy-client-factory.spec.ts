@@ -116,3 +116,93 @@ describe('createDeployClient', () => {
     expect(typeof b.disconnect).toBe('function');
   });
 });
+
+describe('buildDeployClientOptions (v0.11 Pillar γ Codex Phase 1-1/2-1)', () => {
+  // Helper to build a minimal Config that satisfies the schema for builder testing.
+  // We cast through `as unknown as Config` because the builder only reads
+  // a narrow set of fields.
+  function makeConfig(overrides: Record<string, unknown> = {}): unknown {
+    return {
+      schema: 2,
+      safety: {
+        require_tls: true,
+        verify_certificate: true,
+      },
+      connection: { timeout_ms: 60000 },
+      quirks: { tls_check_hostname: true, noop_interval_sec: 0 },
+      ...overrides,
+    };
+  }
+
+  function makeProfile(overrides: Record<string, unknown> = {}) {
+    return {
+      host: 'srv.example.com',
+      port: 22,
+      protocol: 'sftp' as const,
+      user: 'deploy',
+      remote_root: '/var/www',
+      local_root: '.',
+      keychain_service: 'aiftp:test',
+      server_kind: 'generic' as const,
+      ...overrides,
+    };
+  }
+
+  it('SFTP profile: sshKeyPath flows through, FTP-only props are dropped', async () => {
+    const { buildDeployClientOptions } = await loadFactory();
+    const opts = buildDeployClientOptions({
+      // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      profile: makeProfile({ ssh_key_path: '~/.ssh/id_ed25519' }) as any,
+      // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      config: makeConfig() as any,
+      password: 'pw-from-keychain',
+    });
+    expect(opts.protocol).toBe('sftp');
+    if (opts.protocol === 'sftp') {
+      expect(opts.sshKeyPath).toBe('~/.ssh/id_ed25519');
+      expect(opts.password).toBe('pw-from-keychain');
+      // FTP-only fields MUST NOT leak into the SFTP options
+      expect('requireTls' in opts).toBe(false);
+      expect('verifyCertificate' in opts).toBe(false);
+      expect('skipHostnameCheck' in opts).toBe(false);
+      expect('noopIntervalSec' in opts).toBe(false);
+    }
+  });
+
+  it('SFTP profile with empty password normalizes to undefined (key auth path)', async () => {
+    const { buildDeployClientOptions } = await loadFactory();
+    const opts = buildDeployClientOptions({
+      // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      profile: makeProfile({ ssh_key_path: '/abs/path/id' }) as any,
+      // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      config: makeConfig() as any,
+      password: '',
+    });
+    if (opts.protocol === 'sftp') {
+      expect(opts.password).toBeUndefined();
+      expect(opts.sshKeyPath).toBe('/abs/path/id');
+    }
+  });
+
+  it('FTPS profile: FTP knobs flow through, sshKeyPath is not surfaced', async () => {
+    const { buildDeployClientOptions } = await loadFactory();
+    const opts = buildDeployClientOptions({
+      profile: makeProfile({
+        protocol: 'ftps',
+        port: 990,
+        // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      }) as any,
+      // biome-ignore lint/suspicious/noExplicitAny: cast for narrow builder testing
+      config: makeConfig({ quirks: { tls_check_hostname: false, noop_interval_sec: 30 } }) as any,
+      password: 'pw',
+    });
+    expect(opts.protocol).toBe('ftps');
+    if (opts.protocol === 'ftps') {
+      expect(opts.requireTls).toBe(true);
+      expect(opts.verifyCertificate).toBe(true);
+      expect(opts.skipHostnameCheck).toBe(true);
+      expect(opts.noopIntervalSec).toBe(30);
+      expect('sshKeyPath' in opts).toBe(false);
+    }
+  });
+});

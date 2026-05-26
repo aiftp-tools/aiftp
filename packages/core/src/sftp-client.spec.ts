@@ -294,6 +294,61 @@ describe('SftpClient — Task 22 full interface', () => {
     await client.disconnect();
   });
 
+  // v0.11 Pillar γ Codex Phase 2-2: SftpClient maps errors to the
+  // shared FtpError hierarchy so backup / rollback / deploy can use
+  // `error instanceof FtpNotFoundError` regardless of protocol.
+
+  it('list() maps SFTP code-2 "no such file" to FtpNotFoundError', async () => {
+    const { client, m } = await connected();
+    const { FtpNotFoundError } = await import('./ftp-client.ts');
+    m.list.mockRejectedValueOnce(Object.assign(new Error('No such file'), { code: 2 }));
+    await expect(client.list('/missing')).rejects.toBeInstanceOf(FtpNotFoundError);
+    await client.disconnect();
+  });
+
+  it('size() maps "ENOENT" to FtpNotFoundError', async () => {
+    const { client, m } = await connected();
+    const { FtpNotFoundError } = await import('./ftp-client.ts');
+    m.stat.mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    await expect(client.size('/missing')).rejects.toBeInstanceOf(FtpNotFoundError);
+    await client.disconnect();
+  });
+
+  it('download() maps "All configured authentication methods failed" to FtpAuthError', async () => {
+    const { client, m } = await connected();
+    const { FtpAuthError } = await import('./ftp-client.ts');
+    m.get.mockRejectedValueOnce(new Error('All configured authentication methods failed'));
+    await expect(client.download('/x', '/y')).rejects.toBeInstanceOf(FtpAuthError);
+    await client.disconnect();
+  });
+
+  it('rename() maps timeout to FtpTimeoutError', async () => {
+    const { client, m } = await connected();
+    const { FtpTimeoutError } = await import('./ftp-client.ts');
+    m.rename.mockRejectedValueOnce(
+      Object.assign(new Error('socket timed out'), { code: 'ETIMEDOUT' }),
+    );
+    await expect(client.rename('/a', '/b')).rejects.toBeInstanceOf(FtpTimeoutError);
+    await client.disconnect();
+  });
+
+  it('upload() maps unknown error to plain FtpError (preserves cause)', async () => {
+    const { client, m } = await connected();
+    const { FtpError } = await import('./ftp-client.ts');
+    const original = new Error('something weird');
+    m.put.mockRejectedValueOnce(original);
+    await expect(client.upload('/l', '/r')).rejects.toBeInstanceOf(FtpError);
+    await client.disconnect();
+  });
+
+  it('delete() maps "Permission denied" via message text fallback', async () => {
+    const { client, m } = await connected();
+    const { FtpError } = await import('./ftp-client.ts');
+    m.delete.mockRejectedValueOnce(new Error('Permission denied'));
+    await expect(client.delete('/restricted')).rejects.toBeInstanceOf(FtpError);
+    await client.disconnect();
+  });
+
   it.each([
     'upload',
     'uploadBuffer',
