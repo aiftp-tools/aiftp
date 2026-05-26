@@ -12,7 +12,95 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-(Pending work for v0.11+.)
+(Pending work for v0.12+ and v0.11.x.)
+
+---
+
+## [0.11.0] — 2026-05-26
+
+**Feature release** — 「SSH が使えない 50%+ の日本のレンタルサーバーで、AI と仕事をする」をコンセプトに、4 ピラーを実装。
+
+- **Pillar α**: PromptFlow ステートマシン (`packages/cli/src/prompt-framework/`) — 三重防御 A (入力ヒント表示) と B (`:back` 戻りナビ) を実装。v0.10.4 の C (summary review) と組み合わせて完成。
+- **Pillar β**: WordPress 特化テンプレ 7 種 (`packages/core/src/templates/`)。
+- **Pillar γ**: SFTP 対応 (`packages/core/src/sftp-client.ts` + `deploy-client-factory.ts`)。
+- **Pillar δ**: 3 OS × 2 Node smoke CI + 競合比較ドキュメント。
+
+開発期間: 2026-05-25 〜 2026-05-26 (2 日)。spec → writing-plans → TDD → Codex Phase 1/2 review → 統合テスト → release。
+
+### Added
+
+#### Pillar α (init UX framework)
+
+- **PromptFlow ステートマシン** (`packages/cli/src/prompt-framework/prompt-flow.ts`) — 順次フィールド prompt + sanitize + validate + iter cap (100) + `:back` keyword navigation。30 箇所の既存 prompt を順次移行する基盤。v0.11 では `aiftp init` のみ移行、残りは v0.11.x で順次対応。
+- **入力ヒント表示** (A) — 各 field に `hint` + `example` を表示。「何を入れるべきか分からない」誤入力を未然防止。
+- **`:back` 戻りナビゲーション** (B) — 任意の field で `:back` と入力すると前 field に戻る。連続戻りも可能。
+- **hint 重複抑制** (S1) — validate 失敗ループ中の hint スパムを抑制し、UX を改善。
+
+#### Pillar β (WordPress 特化テンプレ)
+
+- **テンプレレジストリ** (`packages/core/src/templates/`) — zod strict schema + 7 preset を module-load 時に検証 (closed set, MCP injection 防止)。
+- **7 プリセット**: `wordpress-swell` / `wordpress-lightning` / `wordpress-cocoon` / `wordpress-standard` / `static` / `laravel` / `php-simple`。各テンプレが hard-exclude / safety / preflight の妥当な既定値を提供。
+- **CLI**: `aiftp init --template <id>` でテンプレ適用、`aiftp init --template list` で 7 件一覧表示、未指定時は PromptFlow で対話選択。
+- **MCP**: `aiftp_init_template_list` read-only tool — AI クライアントがテンプレ一覧を取得可能。
+- **renderConfig 拡張** — `[backup.hard_exclude]` / `[safety]` / `[preflight]` セクションをテンプレに応じて出力。
+
+#### Pillar γ (SFTP 対応)
+
+- **SftpClient** (`packages/core/src/sftp-client.ts`) — `ssh2-sftp-client` ベース。FtpClient と同 interface (connect / disconnect / list / upload / uploadBuffer / download / delete / size / exists / rename / mkdir) で透過に切替可能。
+- **SSH 鍵認証** — `0o600` / `0o400` permission check (`ssh(1)` ポリシー準拠)。over-permissive な鍵ファイルは connect 前に拒否し、`chmod 600 <path>` 修復ヒントを出す。
+- **deploy-client-factory** — protocol 別に FtpClient / SftpClient を切替。deploy / rollback / backup は factory 経由で動作するため、`protocol = "sftp"` を `.aiftp.toml` に書くだけで全コマンドが SFTP 経由になる。
+- **config schema 拡張** — `protocol` enum に `"sftp"` 追加、`ssh_key_path` optional 追加。
+- **doctor SFTP 4 check** — `ssh-port-reachable` / `ssh-key-permissions` / `sftp-handshake` / `sftp-remote-root`。FTP/FTPS profile では skip、SFTP profile では FTPS 系 check が skip される dispatch。
+- **FileZilla import SFTP 対応** — `<Protocol>1</Protocol>` (SFTP) を `protocol = "sftp"` + port 22 として取り込み (従来は skip していた)。
+- **`aiftp init` の protocol prompt に SFTP 追加** — FTPS / SFTP / FTP の 3 択。
+
+#### Pillar δ (smoke CI + 競合比較)
+
+- **`.github/workflows/smoke.yml`** — 3 OS (macOS / Ubuntu / Windows) × 2 Node (22 / 24) matrix。release / workflow_dispatch / 月曜 09:00 JST スケジュール。
+- **`.github/workflows/scripts/mcp-smoke.sh`** — `aiftp mcp` stdio JSON-RPC probe (≥ 22 tools 確認)。
+- **`docs/competitive-comparison.md`** — vs alxspiker/mcp-server-ftp / Computer Use / WordPress 公式 MCP / git-ftp / SamKirkland 系の比較。aiftp の立ち位置を明文化。
+
+### Changed
+
+- `parseInitAnswers` の `protocol` 型が `'ftp' | 'ftps'` から `'ftp' | 'ftps' | 'sftp'` に拡張。
+- `deploy.ts` / `rollback.ts` / `backup/` の `new FtpClient(...)` 直接構築箇所 (cli, mcp, backup の 3 箇所) を `createDeployClient(...)` 経由に refactor。FTP/FTPS profile の挙動は完全互換。
+- doctor の FTPS probe 出力に SFTP 専用 4 check を追加 (SFTP profile 以外は skip)。
+- `aiftp init` の protocol prompt に SFTP 選択肢が追加され、SFTP profile を init 経由で作成可能に。
+
+### Quality gates
+
+- 全テスト **740 passed / 3 skipped** (v0.10.4 baseline 630 から +110)
+- biome lint clean / build clean / tsc --noEmit clean
+- branches coverage 84%+ (v0.10.4 の 83.29% から維持・改善)
+- smoke CI は release 後に自動起動 (3 OS × 2 Node = 6 matrix jobs)
+
+### Security
+
+- SFTP 鍵 permission gate: world/group-readable な秘密鍵は connect 前に拒否。
+- HIGH 1 fix: テンプレ適用時に `safety.prod_profile_patterns` の default `main*` が消失するバグを修正。`main` プロファイルでも production type-to-confirm gate が外れない。
+- HIGH 2 fix: `static` / `laravel` テンプレで summary review でユーザーが確認した `localRoot` 値が render 時に template default で上書きされるバグを修正。ユーザー編集値が常に最優先。
+
+### Deferred (v0.11.x へ繰越)
+
+Pillar β Codex review で挙がった MEDIUM / LOW:
+
+- WP 4 templates の `wp-content/debug.log` 共通 exclude (wordpress-standard のみ実装済み)
+- `vendor/**` hard exclude の方針再検討 (Composer 不可サーバーでは vendor を FTP 配置するケースあり)
+- preflight `php_lint` / `json_check` を CLI/MCP runtime に接続 (現状 schema + TOML 出力のみ)
+- MCP `aiftp_init_template_show` tool 追加 (defaults を surface する read-only 補助)
+- edge test 追加 (空文字 `--template` / `--template list` への余剰引数 / template-select cancel)
+- 他 prompt 箇所の PromptFlow 移行 (`aiftp auth` / `aiftp config edit` 等 30 箇所)
+
+詳細: [docs/superpowers/specs/2026-05-26-v0.11-pillar-beta-codex-review.md](docs/superpowers/specs/2026-05-26-v0.11-pillar-beta-codex-review.md)
+
+### Process
+
+- brainstorming → spec (2026-05-25) → writing-plans (2026-05-25) → TDD (各 task) → Codex Phase 1/2 review (Pillar β で実施、γ/δ は次マイルストーン)
+- Codex `--write` モードのサンドボックス制限 (`.git/index.lock` 書き込み拒否) を回避する hybrid 体制: **Codex が実装 + Claude が commit 代行**
+
+### Notes for adopters
+
+`.aiftp.toml` の `protocol = "sftp"` + `ssh_key_path = "~/.ssh/id_ed25519"` で SFTP deploy 可能。FTP/FTPS profile は v0.10.4 と完全互換 — 移行作業不要。
 
 ---
 
