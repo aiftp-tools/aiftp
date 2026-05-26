@@ -1878,7 +1878,12 @@ async function handleImportFilezillaConfirm(
   // see either the old inode or the new inode, never an intermediate
   // partial buffer.
   const tmpPath = `${tomlPath}.tmp.${process.pid}.${Date.now()}`;
-  await writeFile(tmpPath, source, 'utf8');
+  // v0.11 security review (CWE-200/732): tempfile mode must be 0o600
+  // so the post-rename .aiftp.toml is NOT world-readable. Without the
+  // explicit mode, umask default (typically 0o644) makes profile
+  // metadata visible to other local users between the rename and any
+  // later chmod. The matching config_migrate path already uses 0o600.
+  await writeFile(tmpPath, source, { encoding: 'utf8', mode: 0o600 });
   await rename(tmpPath, tomlPath);
 
   // The MCP server intentionally does not touch the Keychain — passwords

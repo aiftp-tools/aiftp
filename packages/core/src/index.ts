@@ -68,7 +68,11 @@ export {
 
 export { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
 
-export { expandTilde } from './path-utils.js';
+export {
+  assertSafeRemotePath,
+  expandTilde,
+  safeExpandLocalPath,
+} from './path-utils.js';
 
 export {
   getTemplate,

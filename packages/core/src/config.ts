@@ -3,8 +3,10 @@ import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from '
 import { basename, dirname, join } from 'node:path';
 import { parse as parseToml } from '@iarna/toml';
 import { z } from 'zod';
+import { isValidProfileName } from './config-edit.js';
 import { VERSION } from './index.js';
 import { migrateV1ToV2Source } from './migrations/v1-to-v2.js';
+import { assertSafeRemotePath, safeExpandLocalPath } from './path-utils.js';
 
 const SUPPORTED_SCHEMAS = [1, 2] as const;
 const PROTOCOLS = ['ftps', 'ftp', 'sftp'] as const;
@@ -24,7 +26,22 @@ const profileSchema = z
     port: z.number().int().min(1).max(65535).default(21),
     protocol: z.enum(PROTOCOLS).default('ftps'),
     user: z.string().min(1, 'user must not be empty'),
-    remote_root: z.string().min(1),
+    // v0.11 security review (CWE-22): refuse `..` / control char /
+    // backslash in remote_root so deploy / rollback / backup cannot be
+    // tricked into operating outside the documented remote tree.
+    remote_root: z
+      .string()
+      .min(1)
+      .superRefine((val, ctx) => {
+        try {
+          assertSafeRemotePath(val, 'remote_root');
+        } catch (error: unknown) {
+          ctx.addIssue({
+            code: 'custom',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }),
     local_root: z.string().min(1),
     keychain_service: z.string().min(1),
     server_kind: z.enum(SERVER_KINDS).default('generic'),
@@ -37,7 +54,23 @@ const profileSchema = z
      * happens at connect-time so config validation does not require the
      * file to exist on the validator's machine. Ignored for ftp/ftps.
      */
-    ssh_key_path: z.string().min(1).optional(),
+    // v0.11 security review (CWE-22/367): refuse `..` segments in
+    // ssh_key_path. Tilde expansion + symlink rejection happen at
+    // connect-time in SftpClient.loadSshKey().
+    ssh_key_path: z
+      .string()
+      .min(1)
+      .superRefine((val, ctx) => {
+        try {
+          safeExpandLocalPath(val, 'ssh_key_path');
+        } catch (error: unknown) {
+          ctx.addIssue({
+            code: 'custom',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+      .optional(),
   })
   .strict();
 
@@ -151,7 +184,20 @@ export const configSchema = z
       .record(z.string(), profileSchema)
       .refine((profiles) => Object.keys(profiles).length > 0, {
         message: 'At least one profile must be defined',
-      }),
+      })
+      // v0.11 Pillar γ security review (CWE-22 / CWE-94): reject TOML
+      // table keys that don't match the canonical profile-name pattern.
+      // Without this, a quoted TOML key like `[profile."../../tmp/x"]`
+      // would land in stateDir() / backupRoot() path-joins and escape
+      // `.aiftp/state` / `.aiftp/backups`.
+      .refine(
+        (profiles: Record<string, unknown>) =>
+          Object.keys(profiles).every((name) => isValidProfileName(name)),
+        {
+          message:
+            'Invalid profile name: must match [a-z0-9](-?[a-z0-9])* — no quoted TOML keys, no path traversal characters.',
+        },
+      ),
     exclude: excludeSchema.prefault({}),
     safety: safetySchema.prefault({}),
     backup: backupSchema.prefault({}),

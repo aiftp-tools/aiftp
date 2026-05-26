@@ -116,7 +116,17 @@ function decodeRemoteDir(raw: string | undefined): string {
     cursor += lenMatch[0].length;
     const segment = trimmed.slice(cursor, cursor + segmentLength);
     cursor += segmentLength;
-    if (segment.length > 0) segments.push(segment);
+    // v0.11 security review (CWE-22): refuse `..` / `.` / segments
+    // with `/` or backslash. FileZilla's binary length-prefix format
+    // means a segment is supposed to be a directory name, never a
+    // composite path or traversal token. Dropping these (rather than
+    // throwing) keeps imports resilient — the caller still sees the
+    // remaining path and `aiftp doctor` will flag the truncation.
+    if (segment.length > 0 && segment !== '..' && segment !== '.') {
+      if (!segment.includes('/') && !segment.includes('\\')) {
+        segments.push(segment);
+      }
+    }
   }
 
   if (segments.length === 0) return '/';
@@ -124,22 +134,36 @@ function decodeRemoteDir(raw: string | undefined): string {
 }
 
 function kebabize(value: string): string {
-  return value
-    .normalize('NFKC')
-    .trim()
-    .replace(/[\s_/\\.]+/gu, '-')
-    .replace(/[^\p{L}\p{N}-]+/gu, '')
-    .replace(/-+/gu, '-')
-    .replace(/^-|-$/gu, '')
-    .toLowerCase();
+  return (
+    value
+      .normalize('NFKC')
+      .trim()
+      .replace(/[\s_/\\.]+/gu, '-')
+      // v0.11 security review (CWE-22/94): restrict to ASCII alphanum +
+      // hyphen so the result always satisfies `isValidProfileName`. The
+      // earlier Unicode `\p{L}\p{N}` set let through Japanese characters
+      // which TOML allowed as quoted keys but stateDir / backupRoot path
+      // joins could not safely round-trip.
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/gu, '')
+      .replace(/-+/gu, '-')
+      .replace(/^-|-$/gu, '')
+  );
 }
 
 function generateProfileName(folderPath: readonly string[], rawName: string): string {
   const parts = [...folderPath, rawName]
     .map((part) => kebabize(part))
     .filter((part) => part.length > 0);
-  if (parts.length === 0) return 'imported-profile';
-  return parts.join('-');
+  const joined = parts.join('-');
+  // Strict fallback: if all input was non-ASCII or empty, emit
+  // `imported-profile` so the result still passes config validation.
+  if (joined.length === 0) return 'imported-profile';
+  // Must start and end with [a-z0-9] (no leading/trailing hyphen).
+  // kebabize already strips leading/trailing hyphens, but defend in
+  // depth in case folderPath joining introduced one.
+  const tightened = joined.replace(/^-+|-+$/gu, '');
+  return tightened.length === 0 ? 'imported-profile' : tightened;
 }
 
 function decodePassword(

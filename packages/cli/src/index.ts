@@ -25,6 +25,7 @@ import {
   VERSION,
   type VerifyResult,
   appendProfileBlock,
+  assertSafeRemotePath,
   backupKeyService,
   buildDeployClientOptions,
   checkAll,
@@ -33,7 +34,6 @@ import {
   createExcluder,
   createWatchDebouncer,
   deletePassword,
-  expandTilde,
   extractHookPaths,
   generateKey,
   getPassword,
@@ -59,6 +59,7 @@ import {
   runPush,
   runRollback,
   runStatus,
+  safeExpandLocalPath,
   saveDefaultProfile,
   saveState,
   setPassword,
@@ -746,13 +747,27 @@ function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
   if (/[\u0000-\u001f]/u.test(pw)) {
     throw new Error('password must not contain control characters or newlines');
   }
+  // v0.11 security review (CWE-22/94): profile names must round-trip
+  // safely through TOML table headers AND through stateDir() / backupRoot()
+  // path joins. Reject anything that does not match the canonical
+  // lowercase-alphanum-hyphen pattern before we even write the file.
+  const profileName = sanitizeFieldInput(raw.profile, 'profile');
+  if (!isValidProfileName(profileName)) {
+    throw new Error(
+      `Invalid profile name "${profileName}": must match [a-z0-9](-?[a-z0-9])*. Path traversal / TOML key injection characters are not allowed.`,
+    );
+  }
+  // remote_root must also be guarded against `..` segments here so a
+  // malicious initial-prompt answer cannot land in .aiftp.toml.
+  const remoteRoot = sanitizeFieldInput(raw.remoteRoot, 'remoteRoot');
+  assertSafeRemotePath(remoteRoot, 'remoteRoot');
   return {
-    profile: sanitizeFieldInput(raw.profile, 'profile'),
+    profile: profileName,
     host: sanitizeFieldInput(raw.host, 'host'),
     port: requirePort(raw.port),
     protocol: requireString(raw.protocol, 'protocol') as InitAnswers['protocol'],
     user: sanitizeFieldInput(raw.user, 'user'),
-    remoteRoot: sanitizeFieldInput(raw.remoteRoot, 'remoteRoot'),
+    remoteRoot,
     localRoot: sanitizeFieldInput(raw.localRoot, 'localRoot'),
     keychainService: sanitizeFieldInput(raw.keychainService, 'keychainService'),
     serverKind: requireString(raw.serverKind, 'serverKind') as InitAnswers['serverKind'],
@@ -1252,14 +1267,21 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         let keyMode: string | undefined;
         if (profile.ssh_key_path) {
           try {
-            const { statSync } = await import('node:fs');
-            // v0.11 Pillar γ Codex Phase 1-3: tilde expansion at the
-            // runtime boundary so doctor matches SftpClient.connect()
-            // behavior (both honour `~/.ssh/...`).
-            const resolved = expandTilde(profile.ssh_key_path);
-            const mode = statSync(resolved).mode & 0o777;
-            keyMode = `0o${mode.toString(8).padStart(3, '0')}`;
-            keyPermissionsOk = mode === 0o600 || mode === 0o400;
+            const { lstatSync, statSync } = await import('node:fs');
+            // v0.11 Pillar γ Codex Phase 1-3 + security review Phase 4:
+            // - safeExpandLocalPath: tilde expansion + `..` rejection
+            //   so doctor matches SftpClient.connect() behaviour.
+            // - lstat: refuse symbolic links to mirror the
+            //   loadSshKey() TOCTOU guard.
+            const resolved = safeExpandLocalPath(profile.ssh_key_path, 'ssh_key_path');
+            if (lstatSync(resolved).isSymbolicLink()) {
+              keyPermissionsOk = false;
+              keyMode = 'symlink';
+            } else {
+              const mode = statSync(resolved).mode & 0o777;
+              keyMode = `0o${mode.toString(8).padStart(3, '0')}`;
+              keyPermissionsOk = mode === 0o600 || mode === 0o400;
+            }
           } catch (error: unknown) {
             keyPermissionsOk = false;
             keyMode = error instanceof Error ? error.message : 'unknown';

@@ -12,7 +12,7 @@
  * 'unknown'.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import Sftp from 'ssh2-sftp-client';
 import {
   FtpAuthError,
@@ -23,7 +23,7 @@ import {
   type ListEntry,
   type UploadResult,
 } from './ftp-client.js';
-import { expandTilde } from './path-utils.js';
+import { safeExpandLocalPath } from './path-utils.js';
 
 export interface SftpClientOptions {
   host: string;
@@ -134,10 +134,23 @@ export function mapSftpError(error: unknown, context: string): FtpError {
  * missing file (the underlying ENOENT propagates).
  */
 function loadSshKey(path: string): Buffer {
-  // v0.11 Pillar γ Codex review Phase 1-3: tilde expansion at the
-  // runtime boundary so `ssh_key_path = "~/.ssh/id_ed25519"` works
-  // without the operator having to know absolute paths.
-  const resolved = expandTilde(path);
+  // v0.11 Pillar γ Codex review Phase 1-3 + security review Phase 4:
+  // - tilde expansion + `..` rejection via safeExpandLocalPath
+  // - lstat (NOT stat) so a symlink ANYWHERE in the resolved path is
+  //   surfaced and refused. This blocks the symlink-swap TOCTOU where
+  //   `statSync` saw a 0o600 regular file and `readFileSync` followed
+  //   a different symlink on the second access.
+  // - stat then read uses the SAME resolved path string. Closing the
+  //   TOCTOU window completely would require open-by-fd + fstat; we
+  //   stop short of that to avoid the extra fs primitives, and rely
+  //   on lstat to refuse symlinks (the common attack vector).
+  const resolved = safeExpandLocalPath(path, 'ssh_key_path');
+  const lstats = lstatSync(resolved);
+  if (lstats.isSymbolicLink()) {
+    throw new Error(
+      `SftpClient: ssh_key_path "${path}" is a symbolic link. Symbolic links are refused because they introduce a TOCTOU window (stat vs read). Point ssh_key_path at the real key file directly.`,
+    );
+  }
   const mode = statSync(resolved).mode & 0o777;
   if (mode !== 0o600 && mode !== 0o400) {
     throw new Error(
