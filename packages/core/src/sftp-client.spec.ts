@@ -17,6 +17,13 @@ const mockInstances: Array<{
   connect: ReturnType<typeof vi.fn>;
   end: ReturnType<typeof vi.fn>;
   list: ReturnType<typeof vi.fn>;
+  put: ReturnType<typeof vi.fn>;
+  get: ReturnType<typeof vi.fn>;
+  delete: ReturnType<typeof vi.fn>;
+  stat: ReturnType<typeof vi.fn>;
+  exists: ReturnType<typeof vi.fn>;
+  rename: ReturnType<typeof vi.fn>;
+  mkdir: ReturnType<typeof vi.fn>;
 }> = [];
 
 vi.mock('ssh2-sftp-client', () => ({
@@ -24,6 +31,13 @@ vi.mock('ssh2-sftp-client', () => ({
     connect = vi.fn().mockResolvedValue(undefined);
     end = vi.fn().mockResolvedValue(true);
     list = vi.fn().mockResolvedValue([]);
+    put = vi.fn().mockResolvedValue('uploaded');
+    get = vi.fn().mockResolvedValue('downloaded');
+    delete = vi.fn().mockResolvedValue('deleted');
+    stat = vi.fn().mockResolvedValue({ size: 0, mode: 0, uid: 0, gid: 0 });
+    exists = vi.fn().mockResolvedValue('-');
+    rename = vi.fn().mockResolvedValue('renamed');
+    mkdir = vi.fn().mockResolvedValue('made');
     constructor() {
       mockInstances.push(this);
     }
@@ -164,5 +178,143 @@ describe('SftpClient — Task 21 skeleton', () => {
     expect(() => new SftpClient({ host: '', user: 'u', password: 'p' })).toThrow(
       /host is required/i,
     );
+  });
+});
+
+describe('SftpClient — Task 22 full interface', () => {
+  beforeEach(() => {
+    mockInstances.length = 0;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connected() {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      user: 'u',
+      password: 'p',
+    });
+    await client.connect();
+    return { client, m: mockInstances[0] };
+  }
+
+  it('upload(localPath, remotePath) calls put() and returns size from stat', async () => {
+    const { client, m } = await connected();
+    m.stat.mockResolvedValueOnce({ size: 4096, mode: 0, uid: 0, gid: 0 });
+    const result = await client.upload('/tmp/a.html', '/var/www/a.html');
+    expect(m.put).toHaveBeenCalledWith('/tmp/a.html', '/var/www/a.html');
+    expect(m.stat).toHaveBeenCalledWith('/var/www/a.html');
+    expect(result).toEqual({ remotePath: '/var/www/a.html', bytesUploaded: 4096 });
+    await client.disconnect();
+  });
+
+  it('upload falls back to 0 bytesUploaded when stat fails', async () => {
+    const { client, m } = await connected();
+    m.stat.mockRejectedValueOnce(new Error('no stat'));
+    const result = await client.upload('/tmp/a.html', '/var/www/a.html');
+    expect(result.bytesUploaded).toBe(0);
+    await client.disconnect();
+  });
+
+  it('uploadBuffer(buf, remote) passes the Buffer directly to put()', async () => {
+    const { client, m } = await connected();
+    const buf = Buffer.from('hello-world');
+    m.stat.mockResolvedValueOnce({ size: buf.length, mode: 0, uid: 0, gid: 0 });
+    const result = await client.uploadBuffer(buf, '/var/www/a.html');
+    expect(m.put).toHaveBeenCalledWith(buf, '/var/www/a.html');
+    expect(result.bytesUploaded).toBe(buf.length);
+    await client.disconnect();
+  });
+
+  it('uploadBuffer falls back to content.length when stat fails', async () => {
+    const { client, m } = await connected();
+    const buf = Buffer.from('xyz');
+    m.stat.mockRejectedValueOnce(new Error('no stat'));
+    const result = await client.uploadBuffer(buf, '/var/www/x.bin');
+    expect(result.bytesUploaded).toBe(3);
+    await client.disconnect();
+  });
+
+  it('download(remote, local) maps to get(remote, local)', async () => {
+    const { client, m } = await connected();
+    await client.download('/var/www/a.html', '/tmp/a.html');
+    expect(m.get).toHaveBeenCalledWith('/var/www/a.html', '/tmp/a.html');
+    await client.disconnect();
+  });
+
+  it('delete(remote) calls underlying delete', async () => {
+    const { client, m } = await connected();
+    await client.delete('/var/www/old.html');
+    expect(m.delete).toHaveBeenCalledWith('/var/www/old.html');
+    await client.disconnect();
+  });
+
+  it('size(remote) returns stat.size', async () => {
+    const { client, m } = await connected();
+    m.stat.mockResolvedValueOnce({ size: 2048, mode: 0, uid: 0, gid: 0 });
+    expect(await client.size('/var/www/a.html')).toBe(2048);
+    await client.disconnect();
+  });
+
+  it('exists(remote) returns true for "d" / "-" / "l" results', async () => {
+    const { client, m } = await connected();
+    m.exists.mockResolvedValueOnce('-');
+    expect(await client.exists('/file')).toBe(true);
+    m.exists.mockResolvedValueOnce('d');
+    expect(await client.exists('/dir')).toBe(true);
+    m.exists.mockResolvedValueOnce('l');
+    expect(await client.exists('/symlink')).toBe(true);
+    await client.disconnect();
+  });
+
+  it('exists(remote) returns false when underlying returns false', async () => {
+    const { client, m } = await connected();
+    m.exists.mockResolvedValueOnce(false);
+    expect(await client.exists('/missing')).toBe(false);
+    await client.disconnect();
+  });
+
+  it('rename(src, dest) calls underlying rename', async () => {
+    const { client, m } = await connected();
+    await client.rename('/var/www/a.html.tmp', '/var/www/a.html');
+    expect(m.rename).toHaveBeenCalledWith('/var/www/a.html.tmp', '/var/www/a.html');
+    await client.disconnect();
+  });
+
+  it('mkdir(remote) calls underlying mkdir with recursive=true (mkdir -p semantics)', async () => {
+    const { client, m } = await connected();
+    await client.mkdir('/var/www/a/b/c');
+    expect(m.mkdir).toHaveBeenCalledWith('/var/www/a/b/c', true);
+    await client.disconnect();
+  });
+
+  it.each([
+    'upload',
+    'uploadBuffer',
+    'download',
+    'delete',
+    'size',
+    'exists',
+    'rename',
+    'mkdir',
+  ] as const)('%s throws when not connected', async (method) => {
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({ host: 'h', user: 'u', password: 'p' });
+    // biome-ignore lint/suspicious/noExplicitAny: dispatch table for guard test
+    const args: Record<string, any[]> = {
+      upload: ['/local', '/remote'],
+      uploadBuffer: [Buffer.from('x'), '/remote'],
+      download: ['/remote', '/local'],
+      delete: ['/remote'],
+      size: ['/remote'],
+      exists: ['/remote'],
+      rename: ['/src', '/dest'],
+      mkdir: ['/remote'],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: guard test
+    await expect((client as any)[method](...args[method])).rejects.toThrow(/not connected/i);
   });
 });

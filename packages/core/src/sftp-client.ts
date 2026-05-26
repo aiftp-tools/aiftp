@@ -13,7 +13,7 @@
  */
 
 import Sftp from 'ssh2-sftp-client';
-import type { ListEntry } from './ftp-client.js';
+import type { ListEntry, UploadResult } from './ftp-client.js';
 
 export interface SftpClientOptions {
   host: string;
@@ -80,15 +80,93 @@ export class SftpClient {
   }
 
   async list(remotePath: string): Promise<ListEntry[]> {
-    if (this.client === null) {
-      throw new Error('not connected');
-    }
-    const items = await this.client.list(remotePath);
+    const client = this.requireConnection();
+    const items = await client.list(remotePath);
     return items.map((i) => ({
       name: i.name,
       size: i.size,
       type: mapType(i.type),
       modifiedAt: new Date(i.modifyTime),
     }));
+  }
+
+  async upload(localPath: string, remotePath: string): Promise<UploadResult> {
+    const client = this.requireConnection();
+    await client.put(localPath, remotePath);
+    const bytes = await this.safeSize(remotePath, 0);
+    return { remotePath, bytesUploaded: bytes };
+  }
+
+  /**
+   * Upload an in-memory Buffer. Used by rollback so decrypted snapshot
+   * bytes never touch the local filesystem. ssh2-sftp-client accepts a
+   * Buffer directly in `put(input, dest)`, so no Readable.from() wrap
+   * is needed.
+   */
+  async uploadBuffer(content: Buffer, remotePath: string): Promise<UploadResult> {
+    const client = this.requireConnection();
+    await client.put(content, remotePath);
+    const bytes = await this.safeSize(remotePath, content.length);
+    return { remotePath, bytesUploaded: bytes };
+  }
+
+  async download(remotePath: string, localPath: string): Promise<void> {
+    const client = this.requireConnection();
+    await client.get(remotePath, localPath);
+  }
+
+  async delete(remotePath: string): Promise<void> {
+    const client = this.requireConnection();
+    await client.delete(remotePath);
+  }
+
+  async size(remotePath: string): Promise<number> {
+    const client = this.requireConnection();
+    const stats = await client.stat(remotePath);
+    return stats.size;
+  }
+
+  /**
+   * Returns true when the remote path exists, regardless of whether it is
+   * a file ('-'), directory ('d'), or symlink ('l').
+   * ssh2-sftp-client.exists() returns `false | 'd' | '-' | 'l'`; we narrow
+   * truthy-vs-false rather than overloading the predicate with a type
+   * value to keep parity with FtpClient.exists(): Promise<boolean>.
+   */
+  async exists(remotePath: string): Promise<boolean> {
+    const client = this.requireConnection();
+    const result = await client.exists(remotePath);
+    return result !== false;
+  }
+
+  async rename(srcPath: string, destPath: string): Promise<void> {
+    const client = this.requireConnection();
+    await client.rename(srcPath, destPath);
+  }
+
+  /**
+   * mkdir -p semantics. ssh2-sftp-client's mkdir takes a recursive
+   * flag so the caller does not need to walk parent directories
+   * manually. Unlike basic-ftp's ensureDir there is no cwd side effect
+   * to restore.
+   */
+  async mkdir(remotePath: string): Promise<void> {
+    const client = this.requireConnection();
+    await client.mkdir(remotePath, true);
+  }
+
+  private requireConnection(): Sftp {
+    if (this.client === null) {
+      throw new Error('not connected');
+    }
+    return this.client;
+  }
+
+  private async safeSize(remotePath: string, fallback: number): Promise<number> {
+    try {
+      return await this.size(remotePath);
+    } catch {
+      return fallback;
+    }
   }
 }
