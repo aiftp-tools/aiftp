@@ -6,11 +6,11 @@
 [![CI](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml/badge.svg)](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**Status**: v0.10.4 — published to npm as `@aiftp-tools/{core,cli,mcp}`. Verified on Star Server / Sakura / Xserver / Lolipop (Japan). v0.10 series introduces robust `aiftp init` UX: per-field validation, non-standard port confirmation, and a numbered summary review with in-place edit loop before the config is written.
+**Status**: v0.11.0 — published to npm as `@aiftp-tools/{core,cli,mcp}`. Continuously verified on Star Server (Japan); Sakura / Xserver / Lolipop were verified end-to-end at v0.9.3 (2026-05-22), with those accounts since cancelled and re-verified on demand (see [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)). v0.11 adds WordPress-focused templates, SFTP support, and an expanded smoke CI.
 
 ```bash
 npm install -g @aiftp-tools/cli
-aiftp --version   # 0.10.4
+aiftp --version   # 0.11.0
 ```
 
 ## Two problems aiftp solves
@@ -59,9 +59,11 @@ setting needs to be weakened.
 > can change over time. What we've verified so far — Sakura's
 > foreign-IP filter ON by default and including FTP, Xserver's FTP
 > unrestricted by default, Lolipop's "海外アタックガード" scoped
-> to WordPress admin paths rather than FTP — is tracked in
-> [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)
-> and re-checked each release.
+> to WordPress admin paths rather than FTP — was verified at v0.9.3
+> and is tracked in
+> [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md);
+> those provider accounts have since been cancelled, so it is
+> re-verified on demand rather than every release.
 
 ### Market context
 
@@ -208,7 +210,7 @@ Branches coverage 83.29%, Statements 90.25%, biome lint clean.
 ```bash
 # 0. Install globally from npm (Node.js 22+ required)
 npm install -g @aiftp-tools/cli
-aiftp --version   # → 0.10.4
+aiftp --version   # → 0.11.0
 
 # 1. Initialize a new project (asks host, port, protocol, etc.;
 #    stores the password in macOS Keychain or Windows Credential Manager;
@@ -333,7 +335,7 @@ Other security boundaries (encryption at rest, hard-exclude of secret files, pre
 
 | | |
 |---|---|
-| **Released** | v0.10.4 (2026-05-25) — see [CHANGELOG](CHANGELOG.md) |
+| **Released** | v0.11.0 (2026-05-26) — see [CHANGELOG](CHANGELOG.md) |
 | **npm** | `@aiftp-tools/cli` · `@aiftp-tools/core` · `@aiftp-tools/mcp` |
 | **Spec** | [docs/spec.md (in parent dir)](../docs/spec.md) |
 | **Init UX design spec (v0.10.4)** | [docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md](docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md) |
@@ -341,7 +343,7 @@ Other security boundaries (encryption at rest, hard-exclude of secret files, pre
 | **Compatibility** | [docs/compatibility-matrix.md](docs/compatibility-matrix.md) |
 | **FFFTP/FileZilla migration** | [docs/migration-from-ffftp.md](docs/migration-from-ffftp.md) |
 | **Competitive positioning** | [docs/competitive-comparison.md](docs/competitive-comparison.md) — vs alxspiker/mcp-server-ftp / Computer Use / WordPress 公式 MCP / git-ftp 系 |
-| **Target OS** | macOS ✅ (end-to-end verified on Star Server / Sakura / Xserver / Lolipop). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
+| **Target OS** | macOS ✅ (continuously verified on Star Server; Sakura / Xserver / Lolipop verified at v0.9.3, accounts since cancelled — see [compatibility-matrix](docs/compatibility-matrix.md)). Windows ✅ (v0.3 — `cmdkey` + Win32 `CredRead` via PowerShell, CI-tested on `windows-latest`). Linux is a Phase 2+ candidate. |
 | **Language** | TypeScript / Node.js 22+ |
 | **License** | MIT |
 
