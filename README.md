@@ -93,6 +93,52 @@ Why this matters for the Japanese Web development market:
 | Foreign-IP filter blocks cloud CI from reaching Japanese hosting | **Run locally from a Japanese IP — no infrastructure change needed** |
 | Hangs on long-running FTP operations through generic AI tool loops | **MCP exposes one `prepare/confirm` round-trip per push, not a per-file tool loop** |
 
+## What's new in v0.11 (templates, SFTP, smoke CI)
+
+The v0.11 series ships four pillars under one theme — *"work with an AI
+agent on the 50%+ of Japanese rental servers where SSH isn't available"*
+— aimed squarely at the **制作者 (Builder)** persona (WordPress / static
+site builders on SSH-less shared hosting; see [`CONTEXT.md`](CONTEXT.md)).
+
+- **WordPress-focused templates — 7 presets** (Pillar β) — `aiftp init
+  --template <id>` applies sensible hard-exclude / safety / preflight
+  defaults per stack. Presets: `wordpress-swell`, `wordpress-lightning`,
+  `wordpress-cocoon`, `wordpress-standard`, `static`, `laravel`,
+  `php-simple`. `aiftp init --template list` prints the catalog; with no
+  flag, the template is chosen interactively. The registry is a closed
+  set validated by a strict Zod schema at module load (MCP-injection
+  safe).
+- **SFTP support** (Pillar γ) — `SftpClient` shares the exact `FtpClient`
+  interface, so setting `protocol = "sftp"` in `.aiftp.toml` routes every
+  command (deploy / rollback / backup) through SFTP via the deploy-client
+  factory. SSH key auth enforces `0o600` / `0o400` permissions (rejects
+  over-permissive keys before connect, with a `chmod 600` hint). `doctor`
+  gains four SFTP checks (`ssh-port-reachable`, `ssh-key-permissions`,
+  `sftp-handshake`, `sftp-remote-root`); FileZilla import now maps SFTP
+  sites instead of skipping them.
+- **`:back` navigation in `aiftp init`** (Pillar α) — the new PromptFlow
+  state machine adds per-field hints/examples and a `:back` keyword to
+  step back to a previous field. Combined with the v0.10.4 summary
+  review, the init path is now fully recoverable from input mistakes.
+- **MCP `aiftp_init_template_list` tool** — a read-only tool so an AI
+  client (Claude Code, Cursor, etc.) can fetch the template catalog
+  before scaffolding a project.
+- **Smoke CI — 3 OS × 2 Node** (Pillar δ) — `.github/workflows/smoke.yml`
+  runs on macOS / Ubuntu / Windows × Node 22 / 24 on release, dispatch,
+  and a Monday 09:00 JST schedule; an MCP stdio JSON-RPC probe verifies
+  the tool surface. Competitive positioning is documented in
+  [`docs/competitive-comparison.md`](docs/competitive-comparison.md).
+
+Built across 2026-05-25 – 26 via spec → writing-plans → TDD → a Claude
+implements / Codex independently reviews loop (Phase 1 spec + Phase 2
+implementation), which caught a critical SFTP bug — the config schema
+accepted an SSH key while the deploy path silently fell back to password
+auth — before release.
+
+**Quality gates (v0.11.0)**: 740 tests passed / 3 skipped / 0 failed,
+Branches coverage 84%+, biome lint clean, `tsc --noEmit` clean. See
+[CHANGELOG](CHANGELOG.md) for the full per-pillar detail.
+
 ## What's new in v0.10 (init UX hardening)
 
 The v0.10 series focuses on the `aiftp init` path — the first thing any
@@ -244,7 +290,7 @@ aiftp backup restore <snapshot-id> <path> --output restored.html
 | Provider | Status |
 |---|---|
 | **Star Server**（スターサーバー） | ✅ Verified (with documented TLS hostname quirk — see [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)) |
-| Lolipop / Sakura / Xserver | Adapter present, end-to-end verification underway ahead of v1.0.0 |
+| Lolipop / Sakura / Xserver | ✅ Verified end-to-end at v0.9.3 (2026-05-22); accounts since cancelled, re-verified on demand — see [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md) |
 | Generic vsftpd / pure-ftpd / FileZilla Server | Works with default settings |
 
 If you run aiftp against a host not in
