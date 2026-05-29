@@ -23,6 +23,9 @@ Legend:
 | **さくらインターネット** | ✅ `*.sakura.ne.jp` covers `<user>.sakura.ne.jp` (v0.9.3 wildcard match) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `sakura` | ✅ doctor 11/2/0 on Standard plan (v0.9.3, 2026-05-22). push + rollback verified at v0.9.2 (Sakura). **国外IPフィルタは 2026-05 新規契約でもデフォルト ON、FTP を含む** — verified against the 2014-03 announcement. |
 | **エックスサーバー** | ✅ `*.xserver.jp` covers `sv<N>.xserver.jp` (v0.9.3 wildcard match) | ✅ | ⚠️ FEAT does not advertise MLSD | ✅ | UTF-8 OK | `xserver` | ✅ doctor 11/2/0 on Standard plan (v0.9.3, 2026-05-22). FTP unrestricted by default per public docs — verified. |
 
+> **Verification status note (2026-05, [ADR 0002](adr/0002-v1.0-release-gate-redefinition.md))**:
+> ロリポップ / さくら / エックスサーバー の上記 ✅ は **v0.9.3（2026-05-22）時点で実アカウントにて検証した記録**です。**その後これら3社のレンタル契約は解約済み**で、現在ライブ再実行はできません。残る未検証 delta（最小 push の再確認・Shift_JIS 挙動）は、需要発生時——特にデプロイ代行案件で実際に客のサーバへ触れた機会——に再検証します。継続的にライブ検証されているのは **Star Server（GWco）のみ**で、smoke CI は ftp-srv モックで動いています。検証状況を誇張せず正直に記録するのは、aiftp の信用の土台が安全性であるためです。
+
 ### Star Server (starserver) notes
 
 The certificate served on `ftp.glocalworks.co.jp` (the typical

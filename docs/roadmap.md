@@ -27,15 +27,26 @@ full-time business).
 
 ## Near-term: v1.0.0
 
-**Target release**: 2026-06 (subject to A-7 compatibility verification)
-**Theme**: "Officially safe to recommend"
+**Target release**: 2026-06
+**Theme**: "制作者が実務で頼れる安定版"（a stable release the *制作者* / Builder persona can rely on in practice — see [ADR 0001](adr/0001-product-direction-builder-wedge-services-monetization.md))
+
+> **Gate change (2026-05, [ADR 0002](adr/0002-v1.0-release-gate-redefinition.md))**: the
+> original "3 providers re-verified live end-to-end" gate is **dropped**.
+> Lolipop / Sakura / Xserver were verified at v0.9.3 (2026-05-22, recorded in
+> `compatibility-matrix.md`); those accounts have since been cancelled, and
+> re-buying them just to close a small Shift_JIS / minimum-push delta is poor
+> ROI for a tool we are not monetizing directly. v1.0 instead ships on the
+> retained Star Server (GWco) live verification + the recorded v0.9.3 results +
+> the mocked smoke CI. Remaining provider deltas are re-verified on demand —
+> notably when a real deploy-代行 engagement touches a client's server.
 
 **v1.0 ships when:**
 
 - [`docs/phase0-launch-checklist.md`](phase0-launch-checklist.md) is
   fully green
-- 3 major providers (Lolipop / Sakura / Xserver) are end-to-end
-  verified and documented in `compatibility-matrix.md`
+- Star Server (GWco) is live end-to-end verified, and the v0.9.3
+  Lolipop / Sakura / Xserver results are honestly annotated in
+  `compatibility-matrix.md` (verified-then-cancelled, re-verify on demand)
 - README is in its final wording, fact-checked against
   `research-sources.md`
 - Community on-ramps (Issue/PR templates, CONTRIBUTING, CoC,
