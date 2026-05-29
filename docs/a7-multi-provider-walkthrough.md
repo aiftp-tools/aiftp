@@ -361,7 +361,7 @@ aiftp push --dry-run
 
 - 一次資料: `docs/research-sources.md` §C-4
 - 現行 compatibility: `docs/compatibility-matrix.md`
-- ローンチチェックリスト: `docs/phase0-launch-checklist.md` A-7 行
+- ローンチチェックリスト: `docs/phase0-launch-checklist.md`（A-7 ライブ再認証ゲートは [ADR 0002](adr/0002-v1.0-release-gate-redefinition.md) で撤廃済み）
 - 既存検証ログ: `docs/v0.2-walkthrough.md` (Star Server)
 
 ---
