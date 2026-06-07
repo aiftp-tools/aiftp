@@ -22,8 +22,40 @@ permissions:
   contents: read
 
 jobs:
+  wait-for-publish:
+    name: wait for npm publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Wait for the release version on npm
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          expected_version="${RELEASE_TAG#v}"
+
+          for attempt in {1..30}; do
+            published_version="$(npm view @aiftp-tools/cli@latest version 2>/dev/null || true)"
+            if [ "$published_version" = "$expected_version" ]; then
+              echo "PASS: npm latest is $published_version"
+              exit 0
+            fi
+
+            echo "Waiting for npm latest=$expected_version (attempt $attempt/30, current=${published_version:-unavailable})"
+            sleep 30
+          done
+
+          echo "FAIL: npm latest did not reach $expected_version within 15 minutes"
+          exit 1
+
   smoke:
     name: smoke (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: wait-for-publish
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
