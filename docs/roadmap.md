@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-05-21 (aiftp v0.9.1)
+**Last updated**: 2026-06-07 (aiftp v0.11.0)
 **Status**: Pre-v1.0.0. Phase 0 launch preparation in progress.
 
 This roadmap describes what aiftp aims to do **next**, and what it
@@ -21,7 +21,8 @@ full-time business).
 | **Phase 1.1 (v0.1.1, v0.2.5)** | ✅ Done | Init UX, TLS diagnostics, auto-mkdir, `ls`, backup hardening |
 | **Phase 1.5 (v0.3)** | ✅ Done | Windows credential backend, CI matrix expanded |
 | **Phase 2 (v0.4.x – v0.9.1)** | ✅ Done | Multi-profile, MCP two-step gates everywhere, FileZilla + FFFTP import, schema v2, doctor, rollback, watch, hook, production gate |
-| **Phase 0 launch prep** | 🟡 In progress | 3-provider compat verification, CHANGELOG, NOTICE, community templates, docs.aiftp.dev LP |
+| **v0.9.2 – v0.11.0** | ✅ Done | Provider verification, init UX hardening, WordPress templates, SFTP transport, published-package smoke CI |
+| **Phase 0 launch prep** | 🟡 In progress | Star Server release-commit verification, CHANGELOG, v1.0 release docs |
 
 ---
 
@@ -51,8 +52,10 @@ full-time business).
   `research-sources.md`
 - Community on-ramps (Issue/PR templates, CONTRIBUTING, CoC,
   Security policy) are live
-- `aiftp.dev` landing page is published
 - First Zenn launch article is published in Japanese
+
+`aiftp.dev` is optional for v1.0. If published, it will be a lightweight
+single-persona page for the Builder wedge rather than a broad mass-market LP.
 
 **v1.0 does NOT add new features.** It is the "we are ready to be
 recommended" milestone.
@@ -70,7 +73,7 @@ Likely candidates in priority order, all in the **Free tier (MIT)**:
 | **High** | Better error messages around foreign-IP filtering | When `tcp-reach` fails and the server is known to filter foreign IPs, doctor should suggest the specific control-panel toggle by name |
 | **High** | Linux credential backend | `libsecret` / `kwallet` integration; currently Linux uses an in-memory backend |
 | Medium | `aiftp pull` improvements (selective pull, dry-run pull) | Currently push is the well-trodden path |
-| Medium | SFTP support | Currently FTP/FTPS only; SFTP is a separate transport layer and a significant addition |
+| Medium | SFTP host-key pinning and atomic upload | SFTP transport shipped in v0.11; TOFU pinning and atomic rename remain |
 | Medium | `aiftp diff <profile>` showing detailed file-level diff before push | Beyond the current change-set summary |
 | Medium | i18n for CLI strings beyond Japanese/English | If the project gets international traction |
 | Low | Pre-flight checks for additional file types (CSS, JS minifier sanity) | Currently PHP / JSON / HTML |
@@ -191,9 +194,9 @@ silently or because of one-off requests.
 
 ## ロードマップ（日本語サマリ）
 
-- **現状**: v0.9.1 / Phase 2 完了。v1.0.0 ローンチ準備中
-- **v1.0.0 (2026-06 想定)**: 3 プロバイダ実機検証 + ドキュメント完成 + コミュニティ受け入れ態勢が揃った時点で「**安心して薦められる**」マイルストーンとしてリリース
-- **v1.x patch/minor**: コミュニティのフィードバックで決める。SFTP / Linux credential / プロバイダ quirks 拡張など
+- **現状**: v0.11.0 公開済み。v1.0.0 ローンチ準備中
+- **v1.0.0 (2026-06 想定)**: 保持中の Star Server でリリースコミットを実機検証し、記録済み3社検証結果・ドキュメント・コミュニティ受け入れ態勢が揃った時点で「**安心して薦められる**」マイルストーンとしてリリース
+- **v1.x patch/minor**: コミュニティのフィードバックで決める。SFTP 改善 / Linux credential / プロバイダ quirks 拡張など
 - **Pro tier (将来)**: 2026 年末〜2027 年想定。Free が継続的に使われ始めてから着手。
   - **Pro 化候補**: クラウドバックアップ / チーム機能 / 承認ワークフロー / GUI / 優先サポート
   - **Free CLI に残す安全機能**: 二段ゲート / 暗号化バックアップ / hard-exclude / Keychain / プロバイダ quirks / production gate（Pro 化の予定はなく、変える場合は事前周知と移行経路を用意する）
@@ -202,4 +205,4 @@ silently or because of one-off requests.
 
 ---
 
-**Version**: 1.0 (2026-05-21)
+**Version**: 1.1 (2026-06-07)
