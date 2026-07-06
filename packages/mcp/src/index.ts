@@ -9,8 +9,11 @@ import {
   type PushBackupStore,
   type PushOptions,
   type PushResult,
+  type ResolvedSite,
   type RollbackBackupStore,
   type RollbackUploader,
+  type SiteEntry,
+  SiteRegistry,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -33,6 +36,7 @@ import {
   removeProfileBlock,
   resolveDefaultProfile,
   resolveRollbackTarget,
+  resolveSite,
   runPush,
   runRollback,
   runStatus,
@@ -89,6 +93,8 @@ export interface AiftpMcpRuntime {
    * Test harnesses inject a mock that observes Buffer-level uploads.
    */
   createRollbackUploader?(context: AiftpMcpContext): Promise<RollbackUploader>;
+  createSiteRegistry?(): { list(): Promise<readonly SiteEntry[]> };
+  resolveSite?(entry: SiteEntry): Promise<ResolvedSite>;
 }
 
 export interface AiftpMcpOptions {
@@ -110,6 +116,7 @@ export type AiftpToolName =
   | 'aiftp_log'
   | 'aiftp_list_remote'
   | 'aiftp_profile_list'
+  | 'aiftp_sites_list'
   | 'aiftp_init_template_list'
   | 'aiftp_profile_current'
   | 'aiftp_profile_test'
@@ -351,6 +358,7 @@ const toolSchemas = {
   aiftp_log: logSchema,
   aiftp_list_remote: listRemoteSchema,
   aiftp_profile_list: noArgsSchema,
+  aiftp_sites_list: noArgsSchema,
   aiftp_init_template_list: noArgsSchema,
   aiftp_profile_current: noArgsSchema,
   aiftp_profile_test: profileSchema,
@@ -385,6 +393,8 @@ const toolDescriptions = {
   aiftp_list_remote: 'List a remote directory through the configured runtime.',
   aiftp_profile_list:
     'List profiles from .aiftp.toml as redacted summaries: name, protocol, server_kind, credentialsStatus (present/missing/unknown), isDefault. Host / user / remote_root / keychain_service are NEVER surfaced (mirrors aiftp://config redaction policy). Read-only.',
+  aiftp_sites_list:
+    'List registered sites as redacted summaries: name, label, path, profiles, default_profile, protocol, credentialsStatus, lastPushAt, health. Host / user / remote_root / keychain_service are NEVER surfaced. Read-only.',
   aiftp_init_template_list:
     'List available .aiftp.toml templates for `aiftp init --template <name>`. Read-only.',
   aiftp_profile_current:
@@ -1228,6 +1238,39 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     });
   }
   return textResult({ ok: true, profiles, default: defaultName });
+}
+
+interface SiteSummary {
+  name: string;
+  label?: string;
+  path: string;
+  profiles: readonly string[];
+  default_profile?: string;
+  protocol?: 'ftp' | 'ftps' | 'sftp';
+  credentialsStatus: CredentialsStatus;
+  lastPushAt?: string;
+  health: 'ok' | 'missing' | 'invalid';
+}
+
+async function handleSitesList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const registry = app.runtime.createSiteRegistry?.() ?? new SiteRegistry();
+  const resolveSiteEntry =
+    app.runtime.resolveSite ?? ((entry: SiteEntry) => resolveSite(entry, { hasPassword }));
+  const entries = await registry.list();
+  const resolvedSites = await Promise.all(entries.map((entry) => resolveSiteEntry(entry)));
+  const sites: SiteSummary[] = resolvedSites.map((resolvedSite) => ({
+    name: resolvedSite.name,
+    label: resolvedSite.label,
+    path: resolvedSite.path,
+    profiles: resolvedSite.profiles,
+    default_profile: resolvedSite.default_profile,
+    protocol: resolvedSite.protocol,
+    credentialsStatus: resolvedSite.credentialsStatus,
+    lastPushAt: resolvedSite.lastPushAt,
+    health: resolvedSite.health,
+  }));
+  return textResult({ ok: true, sites });
 }
 
 async function handleInitTemplateList(
@@ -2236,6 +2279,7 @@ const handlers = {
   aiftp_log: handleLog,
   aiftp_list_remote: handleListRemote,
   aiftp_profile_list: handleProfileList,
+  aiftp_sites_list: handleSitesList,
   aiftp_init_template_list: handleInitTemplateList,
   aiftp_profile_current: handleProfileCurrent,
   aiftp_profile_test: handleProfileTest,

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type PushResult, VERSION } from '@aiftp-tools/core';
+import { type PushResult, type ResolvedSite, type SiteEntry, VERSION } from '@aiftp-tools/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   type AiftpBackupStore,
@@ -757,6 +757,146 @@ describe('mcp', () => {
     expect(entry.user).toBeUndefined();
     expect(entry.remote_root).toBeUndefined();
     expect(entry.keychain_service).toBeUndefined();
+  });
+
+  it('aiftp_sites_list returns resolved registered site summaries', async () => {
+    const entries: readonly SiteEntry[] = [
+      {
+        name: 'corporate',
+        label: 'Corporate site',
+        path: '/srv/corporate',
+        default_profile: 'production',
+      },
+      {
+        name: 'campaign',
+        path: '/srv/campaign',
+      },
+    ];
+    const resolvedByName: Readonly<Record<string, ResolvedSite>> = {
+      corporate: {
+        ...entries[0],
+        name: 'corporate',
+        path: '/srv/corporate',
+        profiles: ['production', 'staging'],
+        protocol: 'ftps',
+        credentialsStatus: 'present',
+        lastPushAt: '2026-07-06T01:02:03.000Z',
+        health: 'ok',
+      },
+      campaign: {
+        name: 'campaign',
+        path: '/srv/campaign',
+        profiles: [],
+        credentialsStatus: 'unknown',
+        health: 'missing',
+      },
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => entries }),
+        resolveSite: async (entry) => resolvedByName[entry.name] as ResolvedSite,
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+
+    expect(parseText(result)).toEqual({
+      ok: true,
+      sites: [
+        {
+          name: 'corporate',
+          label: 'Corporate site',
+          path: '/srv/corporate',
+          profiles: ['production', 'staging'],
+          default_profile: 'production',
+          protocol: 'ftps',
+          credentialsStatus: 'present',
+          lastPushAt: '2026-07-06T01:02:03.000Z',
+          health: 'ok',
+        },
+        {
+          name: 'campaign',
+          path: '/srv/campaign',
+          profiles: [],
+          credentialsStatus: 'unknown',
+          health: 'missing',
+        },
+      ],
+    });
+  });
+
+  it('aiftp_sites_list returns REDACTED summaries without config or credential fields', async () => {
+    const entry: SiteEntry = { name: 'secure', path: '/srv/secure' };
+    const resolvedWithSecrets = {
+      ...entry,
+      profiles: ['production'],
+      protocol: 'sftp' as const,
+      credentialsStatus: 'present' as const,
+      health: 'ok' as const,
+      host: 'ftp.example.com',
+      user: 'deploy-user',
+      port: 22,
+      remote_root: '/public_html',
+      keychain_service: 'aiftp:production',
+      password: 'must-not-leak',
+      account: 'deploy-user',
+      ssh_key_path: '/Users/example/.ssh/id_ed25519',
+      ftps_mode: 'explicit',
+      rawProfile: { host: 'nested.example.com' },
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => [entry] }),
+        resolveSite: async () => resolvedWithSecrets,
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+    const rawText = result.content[0]?.text ?? '';
+    const parsed = JSON.parse(rawText) as { sites: Array<Record<string, unknown>> };
+    const site = parsed.sites[0] as Record<string, unknown>;
+
+    for (const key of [
+      'host',
+      'user',
+      'port',
+      'remote_root',
+      'keychain_service',
+      'password',
+      'account',
+      'ssh_key_path',
+      'ftps_mode',
+      'rawProfile',
+    ]) {
+      expect(site[key]).toBeUndefined();
+    }
+    expect(rawText).not.toMatch(
+      /keychain_service|remote_root|ssh_key_path|ftps_mode|rawProfile|"host"|"user"|"port"|"password"|"account"/u,
+    );
+  });
+
+  it('aiftp_sites_list returns an empty array for an empty registry', async () => {
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => [] }),
+        resolveSite: async () => {
+          throw new Error('resolveSite must not run for an empty registry');
+        },
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+
+    expect(parseText(result)).toEqual({ ok: true, sites: [] });
+  });
+
+  it('exposes aiftp_sites_list read-only tool', () => {
+    const app = createAiftpMcp({ cwd });
+
+    expect(app.tools).toContain('aiftp_sites_list');
   });
 
   it('exposes aiftp_init_template_list read-only tool', () => {
