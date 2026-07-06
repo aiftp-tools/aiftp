@@ -1,6 +1,17 @@
-import { getTemplate } from '@aiftp-tools/core';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { configSchema, getTemplate } from '@aiftp-tools/core';
 import { describe, expect, it } from 'vitest';
-import { buildInitFields, buildInitFieldsWithTemplate, isStandardFtpPort } from './init-flow.ts';
+import {
+  buildInitFields,
+  buildInitFieldsFromInherited,
+  buildInitFieldsWithTemplate,
+  computeInheritedSections,
+  extractInheritedProfileInitials,
+  isStandardFtpPort,
+  resolveInitFromRef,
+} from './init-flow.ts';
 
 describe('buildInitFields', () => {
   const fields = buildInitFields();
@@ -152,5 +163,121 @@ describe('buildInitFieldsWithTemplate — localRoot initial', () => {
 
   it('buildInitFields() backward-compat returns "." for localRoot initial', () => {
     expect(resolveInitial(localRootField(buildInitFields()).initial, {})).toBe('.');
+  });
+});
+
+describe('init --from inheritance', () => {
+  const sourceConfig = (overrides: Record<string, unknown> = {}) =>
+    configSchema.parse({
+      schema: 2,
+      profile: {
+        production: {
+          host: 'source.example.com',
+          port: 990,
+          protocol: 'ftps',
+          user: 'source-user',
+          remote_root: '/source',
+          local_root: 'source-dist',
+          keychain_service: 'aiftp:source',
+          server_kind: 'lolipop',
+          ftps_mode: 'implicit',
+          passive_mode: false,
+        },
+      },
+      ...overrides,
+    });
+
+  it('resolves a registered site name to its .aiftp.toml', async () => {
+    const path = await resolveInitFromRef('source-site', {
+      cwd: '/new-project',
+      registry: {
+        list: async () => [{ name: 'source-site', path: '/sites/source' }],
+      },
+    });
+
+    expect(path).toBe('/sites/source/.aiftp.toml');
+  });
+
+  it('resolves a directory path to <dir>/.aiftp.toml', async () => {
+    const directory = join(tmpdir(), `aiftp-init-from-dir-${crypto.randomUUID()}`);
+    await mkdir(directory, { recursive: true });
+    try {
+      const path = await resolveInitFromRef(directory, {
+        cwd: '/new-project',
+        registry: { list: async () => [] },
+      });
+
+      expect(path).toBe(join(directory, '.aiftp.toml'));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a direct .aiftp.toml file path', async () => {
+    const directory = join(tmpdir(), `aiftp-init-from-file-${crypto.randomUUID()}`);
+    const file = join(directory, '.aiftp.toml');
+    await mkdir(directory, { recursive: true });
+    await writeFile(file, 'schema = 2\n', 'utf8');
+    try {
+      const path = await resolveInitFromRef(file, {
+        cwd: '/new-project',
+        registry: { list: async () => [] },
+      });
+
+      expect(path).toBe(file);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('throws an actionable error when neither a site nor path exists', async () => {
+    await expect(
+      resolveInitFromRef('missing-source', {
+        cwd: tmpdir(),
+        registry: { list: async () => [] },
+      }),
+    ).rejects.toThrow(/missing-source.*registered site.*path/i);
+  });
+
+  it('uses only connection defaults as inherited field initials', () => {
+    const initials = extractInheritedProfileInitials(sourceConfig(), 'production');
+    expect(initials).toEqual({
+      serverKind: 'lolipop',
+      protocol: 'ftps',
+      port: 990,
+      ftpsMode: 'implicit',
+      passiveMode: false,
+    });
+    expect(initials).not.toHaveProperty('host');
+    expect(initials).not.toHaveProperty('user');
+    expect(initials).not.toHaveProperty('remoteRoot');
+    expect(initials).not.toHaveProperty('localRoot');
+    expect(initials).not.toHaveProperty('keychainService');
+
+    const fields = buildInitFieldsFromInherited(initials);
+    expect(fields.find((field) => field.name === 'port')?.initial).toBe(990);
+    expect(fields.find((field) => field.name === 'ftpsMode')?.initial).toBe('implicit');
+    expect(fields.find((field) => field.name === 'passiveMode')?.initial).toBe(false);
+  });
+
+  it('emits only a customized quirks field and omits all default sections', () => {
+    const inherited = computeInheritedSections(
+      sourceConfig({ quirks: { tls_check_hostname: false } }),
+    );
+
+    expect(inherited).toEqual({ quirks: { tls_check_hostname: false } });
+  });
+
+  it('returns no inherited sections for pure schema defaults', () => {
+    expect(computeInheritedSections(sourceConfig())).toEqual({});
+  });
+
+  it('emits custom backup hard-exclude patterns but omits the default empty array', () => {
+    expect(
+      computeInheritedSections(
+        sourceConfig({ backup: { hard_exclude: { additional_patterns: ['cache/**'] } } }),
+      ),
+    ).toEqual({ backup: { hard_exclude: { additional_patterns: ['cache/**'] } } });
+    expect(computeInheritedSections(sourceConfig({ backup: { hard_exclude: {} } }))).toEqual({});
   });
 });

@@ -67,7 +67,14 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
-import { buildInitFieldsWithTemplate } from './init-flow.js';
+import {
+  type InheritedSections,
+  InitFromInvalidError,
+  InitFromNotFoundError,
+  buildInitFieldsFromInherited,
+  buildInitFieldsWithTemplate,
+  loadInitInheritance,
+} from './init-flow.js';
 import { PromptFlow } from './prompt-framework/prompt-flow.js';
 import { type SitesCommandDeps, registerSitesCommand } from './sites-command.js';
 
@@ -141,6 +148,7 @@ export interface CliRollbackOptions {
 interface InitCommandOptions {
   force?: boolean;
   template?: string;
+  from?: string;
 }
 
 interface ManagedUploader {
@@ -168,6 +176,8 @@ interface InitAnswers {
   localRoot: string;
   keychainService: string;
   serverKind: 'starserver' | 'lolipop' | 'sakura' | 'xserver' | 'generic';
+  ftpsMode?: 'explicit' | 'implicit';
+  passiveMode?: boolean;
   password: string;
   consent: boolean;
 }
@@ -207,7 +217,111 @@ function renderStringArray(values: readonly string[]): string {
   return `[${values.map((value) => quote(value)).join(', ')}]`;
 }
 
-function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
+type TomlValue = string | number | boolean | readonly string[] | readonly number[];
+
+function renderTomlValue(value: TomlValue): string {
+  if (typeof value === 'string') return quote(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => (typeof item === 'string' ? quote(item) : item)).join(', ')}]`;
+  }
+  return String(value);
+}
+
+function appendTomlSection(
+  lines: string[],
+  name: string,
+  fields: ReadonlyArray<readonly [string, TomlValue | undefined]>,
+): void {
+  const defined = fields.filter(
+    (entry): entry is readonly [string, TomlValue] => entry[1] !== undefined,
+  );
+  if (defined.length === 0) return;
+  lines.push(
+    `[${name}]`,
+    ...defined.map(([key, value]) => `${key} = ${renderTomlValue(value)}`),
+    '',
+  );
+}
+
+function appendInheritedSections(
+  lines: string[],
+  inherited: InheritedSections | undefined,
+  quirks: InheritedSections['quirks'],
+  starserver: boolean,
+): void {
+  appendTomlSection(lines, 'safety', [
+    ['require_tls', inherited?.safety?.require_tls],
+    ['verify_certificate', inherited?.safety?.verify_certificate],
+    ['confirm_on_delete', inherited?.safety?.confirm_on_delete],
+    ['max_files_per_push', inherited?.safety?.max_files_per_push],
+    ['max_total_size_mb', inherited?.safety?.max_total_size_mb],
+    [
+      'require_full_backup_before_first_push',
+      inherited?.safety?.require_full_backup_before_first_push,
+    ],
+    ['warn_on_prod_profile', inherited?.safety?.warn_on_prod_profile],
+    ['prod_profile_patterns', inherited?.safety?.prod_profile_patterns],
+    ['syntax_check', inherited?.safety?.syntax_check],
+    ['server_lock', inherited?.safety?.server_lock],
+    ['lock_timeout_min', inherited?.safety?.lock_timeout_min],
+    ['verify_after_upload', inherited?.safety?.verify_after_upload],
+    ['deletion_policy', inherited?.safety?.deletion_policy],
+  ]);
+  appendTomlSection(lines, 'backup', [
+    ['auto_before_push', inherited?.backup?.auto_before_push],
+    ['retention_count', inherited?.backup?.retention_count],
+    ['max_disk_mb', inherited?.backup?.max_disk_mb],
+    ['on_limit_exceeded', inherited?.backup?.on_limit_exceeded],
+    ['full_backup_on_first_push', inherited?.backup?.full_backup_on_first_push],
+    ['full_backup_schedule', inherited?.backup?.full_backup_schedule],
+    ['full_backup_retention', inherited?.backup?.full_backup_retention],
+    ['encrypt', inherited?.backup?.encrypt],
+    ['encryption_algorithm', inherited?.backup?.encryption_algorithm],
+    ['key_storage', inherited?.backup?.key_storage],
+    ['cloud_backup', inherited?.backup?.cloud_backup],
+  ]);
+  appendTomlSection(lines, 'backup.hard_exclude', [
+    ['additional_patterns', inherited?.backup?.hard_exclude?.additional_patterns],
+  ]);
+  appendTomlSection(lines, 'connection', [
+    ['max_concurrent', inherited?.connection?.max_concurrent],
+    ['throttle_per_minute', inherited?.connection?.throttle_per_minute],
+    ['retry_count', inherited?.connection?.retry_count],
+    ['retry_backoff_ms', inherited?.connection?.retry_backoff_ms],
+    ['timeout_ms', inherited?.connection?.timeout_ms],
+    ['resume_partial_upload', inherited?.connection?.resume_partial_upload],
+  ]);
+  appendTomlSection(lines, 'encoding', [['file_name', inherited?.encoding?.file_name]]);
+  if (starserver) {
+    lines.push(
+      '# Star Server quirk: certificate CN is *.star.ne.jp while customer',
+      '# hosts are usually *.stars.ne.jp, so TLS hostname verification',
+      '# fails by default. We disable hostname-only checking here. aiftp',
+      '# still requires a valid certificate chain.',
+    );
+  }
+  appendTomlSection(lines, 'quirks', [
+    ['ignore_pasv_address', quirks?.ignore_pasv_address],
+    ['use_mlsd', quirks?.use_mlsd],
+    ['tls_check_hostname', quirks?.tls_check_hostname],
+    ['noop_interval_sec', quirks?.noop_interval_sec],
+  ]);
+  appendTomlSection(lines, 'walk', [['follow_symlinks', inherited?.walk?.follow_symlinks]]);
+  appendTomlSection(lines, 'preflight', [
+    ['php_lint', inherited?.preflight?.php_lint],
+    ['json_check', inherited?.preflight?.json_check],
+  ]);
+  appendTomlSection(lines, 'exclude', [
+    ['patterns', inherited?.exclude?.patterns],
+    ['use_defaults', inherited?.exclude?.use_defaults],
+  ]);
+}
+
+function renderConfig(
+  answers: InitAnswers,
+  template?: TemplateConfig,
+  inherited?: InheritedSections,
+): string {
   const defaults = template?.defaults;
   // v0.11 Pillar β review Phase 2-1: the user's localRoot answer always wins.
   // The template default is wired into init-flow.ts as the field's initial
@@ -225,6 +339,8 @@ function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
     `local_root = ${quote(answers.localRoot)}`,
     `keychain_service = ${quote(answers.keychainService)}`,
     `server_kind = ${quote(answers.serverKind)}`,
+    ...(answers.ftpsMode === undefined ? [] : [`ftps_mode = ${quote(answers.ftpsMode)}`]),
+    ...(answers.passiveMode === undefined ? [] : [`passive_mode = ${answers.passiveMode}`]),
     '',
   ];
 
@@ -259,22 +375,11 @@ function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
     }
   }
 
-  if (answers.serverKind === 'starserver') {
-    // Star Server presents `*.star.ne.jp` cert for `*.stars.ne.jp` hosts.
-    // We pre-set the documented quirk so the operator does not have to
-    // hand-edit the file after the first hostname-mismatch error. The
-    // CLI emits a stderr warning when this happens so the trade-off is
-    // explicit, not silent.
-    lines.push(
-      '[quirks]',
-      '# Star Server quirk: certificate CN is *.star.ne.jp while customer',
-      '# hosts are usually *.stars.ne.jp, so TLS hostname verification',
-      '# fails by default. We disable hostname-only checking here. aiftp',
-      '# still requires a valid certificate chain.',
-      'tls_check_hostname = false',
-      '',
-    );
-  }
+  const effectiveQuirks =
+    answers.serverKind === 'starserver'
+      ? { ...inherited?.quirks, tls_check_hostname: false }
+      : inherited?.quirks;
+  appendInheritedSections(lines, inherited, effectiveQuirks, answers.serverKind === 'starserver');
 
   return lines.join('\n');
 }
@@ -773,6 +878,14 @@ function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
     localRoot: sanitizeFieldInput(raw.localRoot, 'localRoot'),
     keychainService: sanitizeFieldInput(raw.keychainService, 'keychainService'),
     serverKind: requireString(raw.serverKind, 'serverKind') as InitAnswers['serverKind'],
+    ...(raw.ftpsMode === undefined
+      ? {}
+      : {
+          ftpsMode: requireString(raw.ftpsMode, 'ftpsMode') as NonNullable<InitAnswers['ftpsMode']>,
+        }),
+    ...(raw.passiveMode === undefined
+      ? {}
+      : { passiveMode: requireBoolean(raw.passiveMode, 'passiveMode') }),
     password: pw,
     consent: requireBoolean(raw.consent, 'consent'),
   };
@@ -1611,7 +1724,14 @@ export function createCli(options: CliOptions = {}): Command {
     .description('Create .aiftp.toml and register credentials')
     .option('-f, --force', 'overwrite an existing .aiftp.toml')
     .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
+    .option('--from <ref>', 'inherit defaults and customized sections from a site or path')
     .action(async (cmd: InitCommandOptions) => {
+      if (cmd.from !== undefined && cmd.template !== undefined) {
+        const message = 'init --from and --template cannot be used together.';
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.from-template-conflict', message);
+      }
+
       if (cmd.template === 'list') {
         for (const template of listTemplates()) {
           stderr(`${template.id} - ${template.description}`);
@@ -1629,6 +1749,27 @@ export function createCli(options: CliOptions = {}): Command {
         throw new CommanderError(1, 'aiftp.unknown-template', message);
       }
 
+      let inheritance: Awaited<ReturnType<typeof loadInitInheritance>> | undefined;
+      if (cmd.from !== undefined) {
+        const registry = options.sites?.createRegistry?.();
+        try {
+          inheritance = await loadInitInheritance(cmd.from, {
+            cwd,
+            ...(registry === undefined ? {} : { registry }),
+          });
+        } catch (error: unknown) {
+          if (error instanceof InitFromNotFoundError) {
+            stderr(error.message);
+            throw new CommanderError(1, 'aiftp.from-not-found', error.message);
+          }
+          if (error instanceof InitFromInvalidError) {
+            stderr(error.message);
+            throw new CommanderError(1, 'aiftp.from-invalid', error.message);
+          }
+          throw error;
+        }
+      }
+
       const configPath = join(cwd, '.aiftp.toml');
       if ((await exists(configPath)) && !cmd.force) {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
@@ -1639,7 +1780,9 @@ export function createCli(options: CliOptions = {}): Command {
       // v0.10.4 summary review (C). Field definitions live in init-flow.ts
       // so they can be reused / extended for templates (v0.11 Pillar β).
       const flowResult = await new PromptFlow(
-        buildInitFieldsWithTemplate(template !== undefined, template),
+        inheritance
+          ? buildInitFieldsFromInherited(inheritance.initials)
+          : buildInitFieldsWithTemplate(template !== undefined, template),
         {
           prompt: (question) => prompt(question as PromptQuestion),
           stderr,
@@ -1702,7 +1845,7 @@ export function createCli(options: CliOptions = {}): Command {
         );
       }
 
-      await writeFile(configPath, renderConfig(answers, selectedTemplate), {
+      await writeFile(configPath, renderConfig(answers, selectedTemplate, inheritance?.sections), {
         encoding: 'utf8',
         mode: 0o600,
       });

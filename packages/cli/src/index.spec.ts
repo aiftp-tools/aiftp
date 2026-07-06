@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type PushResult, type StatusResult, loadConfig } from '@aiftp-tools/core';
+import { type PushResult, type SiteEntry, type StatusResult, loadConfig } from '@aiftp-tools/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   type CliBackupStore,
   type CliKeychain,
+  type CliOptions,
   type CliPrompt,
   type CliRuntime,
   VERSION,
@@ -14,6 +15,7 @@ import {
   __test__parseSummaryChoice as parseSummaryChoice,
   __test__sanitizeFieldInput as sanitizeFieldInput,
 } from './index.js';
+import { computeInheritedSections } from './init-flow.js';
 
 // v0.10.4: ensure process.stdin.isTTY is true so init summary review does not abort
 // during tests. Individual tests (e.g. #24 non-TTY) can override and restore via afterEach.
@@ -77,13 +79,19 @@ describe('cli', () => {
 
   async function parse(
     args: string[],
-    options: { prompt?: CliPrompt; keychain?: CliKeychain; runtime?: CliRuntime } = {},
+    options: {
+      prompt?: CliPrompt;
+      keychain?: CliKeychain;
+      runtime?: CliRuntime;
+      sites?: CliOptions['sites'];
+    } = {},
   ) {
     const command = createCli({
       cwd,
       prompt: options.prompt ?? prompt({}),
       keychain: options.keychain ?? keychain(),
       runtime: options.runtime,
+      sites: options.sites,
       stdout: (line) => stdout.push(line),
       stderr: (line) => stderr.push(line),
     });
@@ -127,6 +135,42 @@ describe('cli', () => {
     await writeFile(filePath, content, 'utf8');
   }
 
+  async function writeInheritanceSource(
+    directory: string,
+    sections: readonly string[] = [],
+  ): Promise<void> {
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, '.aiftp.toml'),
+      [
+        'schema = 2',
+        '',
+        '[profile.source]',
+        'host = "source.example.com"',
+        'port = 990',
+        'protocol = "ftps"',
+        'user = "source-user"',
+        'remote_root = "/source-root"',
+        'local_root = "source-dist"',
+        'keychain_service = "aiftp:source"',
+        'server_kind = "lolipop"',
+        'ftps_mode = "implicit"',
+        'passive_mode = false',
+        '',
+        ...sections,
+      ].join('\n'),
+      'utf8',
+    );
+  }
+
+  function fakeRegistry(entries: readonly SiteEntry[]) {
+    return {
+      list: async () => entries,
+      add: async () => entries,
+      remove: async () => entries,
+    };
+  }
+
   it('re-exports VERSION from core (semver shape)', () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+(?:-[\w.]+)?$/u);
   });
@@ -162,6 +206,274 @@ describe('cli', () => {
     });
     expect(stored[1]?.service).toBe('aiftp:production:backup-key');
     expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
+  });
+
+  it('init --from <dir> inherits customized sections while prompting site-specific fields', async () => {
+    const sourceDirectory = join(cwd, 'source-site');
+    await writeInheritanceSource(sourceDirectory, [
+      '[safety]',
+      'deletion_policy = "prune-with-confirm"',
+      '',
+      '[backup]',
+      'retention_count = 12',
+      '',
+      '[backup.hard_exclude]',
+      'additional_patterns = ["cache/**"]',
+      '',
+      '[connection]',
+      'retry_count = 2',
+      'retry_backoff_ms = [500, 1500]',
+      '',
+      '[encoding]',
+      'file_name = "shift_jis"',
+      '',
+      '[quirks]',
+      'tls_check_hostname = false',
+      '',
+      '[walk]',
+      'follow_symlinks = true',
+      '',
+      '[preflight]',
+      'json_check = true',
+      '',
+      '[exclude]',
+      'patterns = ["private/**"]',
+      'use_defaults = false',
+      '',
+    ]);
+
+    await parse(['init', '--from', sourceDirectory], {
+      sites: { createRegistry: () => fakeRegistry([]) },
+      prompt: prompt({
+        profile: 'new-site',
+        host: 'new.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'new-user',
+        remoteRoot: '/new-root',
+        localRoot: 'dist',
+        keychainService: 'aiftp:new-site',
+        serverKind: 'generic',
+        ftpsMode: 'explicit',
+        passiveMode: true,
+        password: 'new-secret',
+        consent: true,
+      }),
+    });
+
+    const config = await loadConfig(join(cwd, '.aiftp.toml'));
+    expect(config.profile['new-site']).toMatchObject({
+      host: 'new.example.com',
+      user: 'new-user',
+      remote_root: '/new-root',
+      local_root: 'dist',
+      keychain_service: 'aiftp:new-site',
+      ftps_mode: 'explicit',
+      passive_mode: true,
+    });
+    expect(config.safety.deletion_policy).toBe('prune-with-confirm');
+    expect(config.backup.retention_count).toBe(12);
+    expect(config.backup.hard_exclude.additional_patterns).toEqual(['cache/**']);
+    expect(config.connection.retry_count).toBe(2);
+    expect(config.connection.retry_backoff_ms).toEqual([500, 1500]);
+    expect(config.encoding.file_name).toBe('shift_jis');
+    expect(config.quirks.tls_check_hostname).toBe(false);
+    expect(config.walk.follow_symlinks).toBe(true);
+    expect(config.preflight.json_check).toBe(true);
+    expect(config.exclude).toEqual({ patterns: ['private/**'], use_defaults: false });
+    expect(stored[0]).toMatchObject({ account: 'new-user', password: 'new-secret' });
+    expect(await readFile(join(cwd, '.gitignore'), 'utf8')).toContain('.aiftp/');
+  });
+
+  it('init rejects --from with --template before prompting or writing', async () => {
+    let promptCalls = 0;
+    await expect(
+      parse(['init', '--from', 'source', '--template', 'static'], {
+        prompt: async () => {
+          promptCalls += 1;
+          return {};
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'aiftp.from-template-conflict' });
+
+    expect(promptCalls).toBe(0);
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+  });
+
+  it('init --from <nonexistent> fails without writing a config', async () => {
+    await expect(
+      parse(['init', '--from', 'does-not-exist'], {
+        sites: { createRegistry: () => fakeRegistry([]) },
+      }),
+    ).rejects.toMatchObject({ code: 'aiftp.from-not-found' });
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+  });
+
+  it('init --from reports an invalid source without writing a config', async () => {
+    const sourceDirectory = join(cwd, 'invalid-source');
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(join(sourceDirectory, '.aiftp.toml'), 'not valid toml =', 'utf8');
+
+    await expect(
+      parse(['init', '--from', sourceDirectory], {
+        sites: { createRegistry: () => fakeRegistry([]) },
+      }),
+    ).rejects.toMatchObject({ code: 'aiftp.from-invalid' });
+    await expect(readFile(join(cwd, '.aiftp.toml'), 'utf8')).rejects.toThrow();
+  });
+
+  it('init --from <site-name> resolves through the injected registry', async () => {
+    const sourceDirectory = join(cwd, 'registered-source');
+    await writeInheritanceSource(sourceDirectory, ['[encoding]', 'file_name = "shift_jis"', '']);
+
+    await parse(['init', '--from', 'legacy-site'], {
+      sites: {
+        createRegistry: () => fakeRegistry([{ name: 'legacy-site', path: sourceDirectory }]),
+      },
+      prompt: prompt({
+        profile: 'new-site',
+        host: 'new.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'new-user',
+        remoteRoot: '/new-root',
+        localRoot: '.',
+        keychainService: 'aiftp:new-site',
+        serverKind: 'generic',
+        ftpsMode: 'explicit',
+        passiveMode: true,
+        password: 'new-secret',
+        consent: true,
+      }),
+    });
+
+    expect((await loadConfig(join(cwd, '.aiftp.toml'))).encoding.file_name).toBe('shift_jis');
+  });
+
+  // Drift guard: computeInheritedSections (init-flow.ts) diffs sections generically
+  // via Object.keys, but appendInheritedSections (index.ts) renders each field by
+  // explicit enumeration. If a schema field is added to the former without the
+  // latter, the customized value would be silently dropped from the written config.
+  // This test sets every inheritable field to a non-default value and asserts each
+  // one computeInheritedSections produces round-trips into the new config.
+  it('init --from renders every inheritable field it computes (enumeration drift guard)', async () => {
+    await writeFile(join(cwd, '.gitignore'), '', 'utf8');
+    const sourceDirectory = join(cwd, 'exhaustive-source');
+    await writeInheritanceSource(sourceDirectory, [
+      '[safety]',
+      'require_tls = false',
+      'verify_certificate = false',
+      'confirm_on_delete = false',
+      'max_files_per_push = 250',
+      'max_total_size_mb = 50',
+      'require_full_backup_before_first_push = true',
+      'warn_on_prod_profile = false',
+      'prod_profile_patterns = ["live*"]',
+      'syntax_check = false',
+      'server_lock = false',
+      'lock_timeout_min = 20',
+      'verify_after_upload = "off"',
+      'deletion_policy = "prune-auto"',
+      '',
+      '[backup]',
+      'retention_count = 12',
+      'max_disk_mb = 250',
+      'on_limit_exceeded = "warn"',
+      'full_backup_on_first_push = "force"',
+      'full_backup_schedule = "daily"',
+      'full_backup_retention = 8',
+      'cloud_backup = true',
+      '',
+      '[backup.hard_exclude]',
+      'additional_patterns = ["cache/**"]',
+      '',
+      '[connection]',
+      'max_concurrent = 4',
+      'throttle_per_minute = 60',
+      'retry_count = 2',
+      'retry_backoff_ms = [500, 1500]',
+      'timeout_ms = 30000',
+      'resume_partial_upload = false',
+      '',
+      '[encoding]',
+      'file_name = "shift_jis"',
+      '',
+      '[quirks]',
+      'ignore_pasv_address = true',
+      'use_mlsd = false',
+      'tls_check_hostname = false',
+      'noop_interval_sec = 30',
+      '',
+      '[walk]',
+      'follow_symlinks = true',
+      '',
+      '[preflight]',
+      'php_lint = true',
+      'json_check = true',
+      '',
+      '[exclude]',
+      'patterns = ["private/**"]',
+      'use_defaults = false',
+      '',
+    ]);
+
+    await parse(['init', '--from', sourceDirectory], {
+      sites: { createRegistry: () => fakeRegistry([]) },
+      prompt: prompt({
+        profile: 'new-site',
+        host: 'new.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'new-user',
+        remoteRoot: '/new-root',
+        localRoot: '.',
+        keychainService: 'aiftp:new-site',
+        serverKind: 'generic',
+        ftpsMode: 'explicit',
+        passiveMode: true,
+        password: 'new-secret',
+        consent: true,
+      }),
+    });
+
+    const source = await loadConfig(join(sourceDirectory, '.aiftp.toml'));
+    const expected = computeInheritedSections(source);
+    const target = (await loadConfig(join(cwd, '.aiftp.toml'))) as unknown as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    // Fail loudly if the source ever stops exercising every inheritable section.
+    expect(Object.keys(expected).sort()).toEqual([
+      'backup',
+      'connection',
+      'encoding',
+      'exclude',
+      'preflight',
+      'quirks',
+      'safety',
+      'walk',
+    ]);
+
+    for (const [section, fields] of Object.entries(expected)) {
+      const targetSection = target[section];
+      for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+          const nestedTarget = targetSection[key] as Record<string, unknown>;
+          for (const [nestedKey, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+            expect(
+              nestedTarget[nestedKey],
+              `${section}.${key}.${nestedKey} must be inherited into the new config`,
+            ).toEqual(nestedValue);
+          }
+        } else {
+          expect(
+            targetSection[key],
+            `${section}.${key} must be inherited into the new config`,
+          ).toEqual(value);
+        }
+      }
+    }
   });
 
   it('init with server_kind=starserver writes [quirks].tls_check_hostname = false and warns about it', async () => {
