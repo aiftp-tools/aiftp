@@ -69,6 +69,7 @@ import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
 import { buildInitFieldsWithTemplate } from './init-flow.js';
 import { PromptFlow } from './prompt-framework/prompt-flow.js';
+import { type SitesCommandDeps, registerSitesCommand } from './sites-command.js';
 
 export { VERSION };
 
@@ -154,6 +155,7 @@ export interface CliOptions {
   runtime?: CliRuntime;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
+  sites?: Pick<SitesCommandDeps, 'createRegistry' | 'resolveSite'>;
 }
 
 interface InitAnswers {
@@ -1593,6 +1595,15 @@ export function createCli(options: CliOptions = {}): Command {
   program.configureOutput({
     writeOut: (text) => stdout(text.trimEnd()),
     writeErr: (text) => stderr(text.trimEnd()),
+  });
+
+  registerSitesCommand(program, {
+    cwd,
+    stdout,
+    stderr,
+    keychain,
+    runDoctor: runtime.runDoctor ?? defaultRunDoctor,
+    ...options.sites,
   });
 
   program

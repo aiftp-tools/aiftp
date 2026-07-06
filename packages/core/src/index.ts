@@ -247,3 +247,8 @@ export {
   type PhpLintResult,
   type PhpLintRunner,
 } from './preflight.js';
+
+// v0.12 F1: site registry + live resolution layer. Re-export the curated
+// sites barrel so the CLI (`aiftp sites`) and MCP (`aiftp_sites_list`)
+// consume SiteRegistry / resolveSite / SiteEntry from @aiftp-tools/core.
+export * from './sites/index.js';
