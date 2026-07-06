@@ -186,6 +186,13 @@ const pushSchema = profileSchema
 const pushPrepareSchema = profileSchema
   .extend({
     files: z.array(z.string().min(1)).optional(),
+    expected_site: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Always specify this to declare the intended destination site. The value must match the registered fleet site name or label for the current working directory.',
+      ),
   })
   .strict();
 
@@ -377,7 +384,7 @@ const toolDescriptions = {
   aiftp_status: 'Show local deployment diff.',
   aiftp_push: 'Run a dry-run push. For a real push, use aiftp_push_prepare + aiftp_push_confirm.',
   aiftp_push_prepare:
-    'Prepare a real push: returns plan_id, diff_hash, confirm_token, expected_file_count, and expected_remote_root. Pass these back to aiftp_push_confirm within the TTL to actually upload.',
+    'Prepare a real push: always pass expected_site to declare the intended destination site. Returns destination, plan_id, diff_hash, confirm_token, expected_file_count, and expected_remote_root. Pass the confirmation values back to aiftp_push_confirm within the TTL to actually upload.',
   aiftp_push_confirm:
     'Confirm a previously-prepared real push. Requires the exact plan_id / diff_hash / confirm_token from aiftp_push_prepare.',
   aiftp_backup_list: 'List encrypted backup snapshots.',
@@ -837,6 +844,29 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
+  const { destination, matchedEntry, registryReadFailed } = await resolveDestination(
+    app,
+    profileName,
+    profile,
+  );
+  if (args.expected_site !== undefined) {
+    if (registryReadFailed) {
+      throw new Error(
+        `site-mismatch: cannot verify expected site "${args.expected_site}" because the fleet registry is unavailable.`,
+      );
+    }
+    if (!matchedEntry) {
+      throw new Error(
+        `site-mismatch: cannot verify expected site "${args.expected_site}" because the current working directory is not registered in the fleet.`,
+      );
+    }
+    if (args.expected_site !== matchedEntry.name && args.expected_site !== matchedEntry.label) {
+      const actualLabel = matchedEntry.label ? ` (label: "${matchedEntry.label}")` : '';
+      throw new Error(
+        `site-mismatch: expected site "${args.expected_site}" does not match actual site "${matchedEntry.name}"${actualLabel}.`,
+      );
+    }
+  }
   // Run a dry-run to compute the plan + diff that the operator will later
   // be confirming. The diff_hash binds the confirm to *this* set of files;
   // if anything changes between prepare and confirm (e.g. the user edits
@@ -889,6 +919,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   return textResult({
     ok: true,
     profile: profileName,
+    destination,
     plan_id: planId,
     diff_hash: diffHash,
     confirm_token: confirmToken,
@@ -1250,6 +1281,50 @@ interface SiteSummary {
   credentialsStatus: CredentialsStatus;
   lastPushAt?: string;
   health: 'ok' | 'missing' | 'invalid';
+}
+
+interface DestinationSummary {
+  site?: string;
+  label?: string;
+  profile: string;
+  remote_root: string;
+  server_kind: string;
+}
+
+async function resolveDestination(
+  app: AiftpMcpApp,
+  profileName: string,
+  profile: { readonly remote_root: string; readonly server_kind: string },
+): Promise<{
+  destination: DestinationSummary;
+  matchedEntry?: SiteEntry;
+  registryReadFailed: boolean;
+}> {
+  let matchedEntry: SiteEntry | undefined;
+  let registryReadFailed = false;
+  try {
+    const registry = app.runtime.createSiteRegistry?.();
+    if (!registry) {
+      registryReadFailed = true;
+    } else {
+      const entries = await registry.list();
+      matchedEntry = entries.find((entry) => resolve(entry.path) === resolve(app.cwd));
+    }
+  } catch {
+    registryReadFailed = true;
+  }
+
+  return {
+    destination: {
+      site: matchedEntry?.name,
+      label: matchedEntry?.label,
+      profile: profileName,
+      remote_root: profile.remote_root,
+      server_kind: profile.server_kind,
+    },
+    matchedEntry,
+    registryReadFailed,
+  };
 }
 
 async function handleSitesList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -2052,6 +2127,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
   }
+  const { destination } = await resolveDestination(app, profileName, profile);
   const backupStore = await backupStoreFor(app, profileName);
   const rollbackStore = asRollbackStore(backupStore);
   const target = await resolveRollbackTarget({
@@ -2109,6 +2185,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     confirm_token: confirmToken,
     ttl_ms: PLAN_TTL_MS,
     profile: profileName,
+    destination,
     snapshot_id: target.id,
     snapshot_type: target.type,
     snapshot_created_at: target.createdAt,
