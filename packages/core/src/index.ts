@@ -166,6 +166,8 @@ export {
   type UploadedFileResult,
 } from './deploy.js';
 
+export * from './deploy/destination-banner.js';
+
 export {
   decryptBuffer,
   decryptFile,

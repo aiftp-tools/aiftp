@@ -18,6 +18,7 @@ import {
   type RollbackResult,
   type RollbackUploader,
   SftpClient,
+  type SiteEntry,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -35,6 +36,7 @@ import {
   createWatchDebouncer,
   deletePassword,
   extractHookPaths,
+  formatDestinationBanner,
   generateKey,
   getPassword,
   getTemplate,
@@ -207,6 +209,37 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function resolveDestinationBanner(
+  cwd: string,
+  profileName: string,
+  profile: {
+    protocol: string;
+    remote_root: string;
+    local_root: string;
+    server_kind: string;
+  },
+  registry?: { list(): Promise<readonly SiteEntry[]> },
+): Promise<string> {
+  let site: SiteEntry | undefined;
+  if (registry) {
+    try {
+      site = (await registry.list()).find((entry) => resolve(entry.path) === resolve(cwd));
+    } catch {
+      site = undefined;
+    }
+  }
+
+  return formatDestinationBanner({
+    profile: profileName,
+    protocol: profile.protocol,
+    remoteRoot: profile.remote_root,
+    serverKind: profile.server_kind,
+    localRoot: profile.local_root,
+    siteName: site?.name,
+    label: site?.label,
+  });
 }
 
 function quote(value: string): string {
@@ -1951,6 +1984,13 @@ export function createCli(options: CliOptions = {}): Command {
         if (!profile) {
           throw new Error(`Profile not found: ${cmd.profile}`);
         }
+        const banner = await resolveDestinationBanner(
+          cwd,
+          cmd.profile,
+          profile,
+          options.sites?.createRegistry?.(),
+        );
+        stderr(banner);
         // v0.6.0 #7: Always surface the deploy target before any FTP
         // activity. The point is that the operator (or AI agent) reading
         // the terminal can spot a typo'd profile or wrong host before
@@ -2888,9 +2928,17 @@ export function createCli(options: CliOptions = {}): Command {
             'Could not resolve a default profile. Pass --profile, set AIFTP_PROFILE, or run `aiftp profile use <name>`.',
           );
         }
-        if (!config.profile[profileName]) {
+        const profile = config.profile[profileName];
+        if (!profile) {
           throw new Error(`Profile not found: ${profileName}`);
         }
+        const banner = await resolveDestinationBanner(
+          cwd,
+          profileName,
+          profile,
+          options.sites?.createRegistry?.(),
+        );
+        stderr(banner);
         const dryRun = cmd.dryRun === true;
         const cliOptions: CliRollbackOptions = {
           cwd,

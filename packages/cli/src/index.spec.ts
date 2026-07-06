@@ -171,6 +171,12 @@ describe('cli', () => {
     };
   }
 
+  function destinationBannerLines(): string[] {
+    const start = stderr.findIndex((line) => line.startsWith('⛳ 宛先:'));
+    if (start < 0) return [];
+    return stderr.slice(start, start + 1).flatMap((line) => line.split('\n').slice(0, 3));
+  }
+
   it('re-exports VERSION from core (semver shape)', () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+(?:-[\w.]+)?$/u);
   });
@@ -1109,6 +1115,33 @@ describe('cli', () => {
     expect(banner).toMatch(/remote_root=\/public_html/);
   });
 
+  it('push shows the registered site name and label without host in the destination banner', async () => {
+    await writeConfig();
+    await parse(['push', '--profile', 'production', '--dry-run'], {
+      sites: {
+        createRegistry: () =>
+          fakeRegistry([{ name: 'gwco', path: cwd, label: 'example-corp.co.jp' }]),
+      },
+    });
+
+    const banner = destinationBannerLines();
+    expect(banner).toEqual([
+      '⛳ 宛先: gwco (example-corp.co.jp)',
+      '   ftps://production → /public_html   [server: starserver]',
+      '   local: .',
+    ]);
+    expect(banner.join('\n')).not.toContain('ftp.example.com');
+  });
+
+  it('push falls back to the profile name when the site registry has no cwd match', async () => {
+    await writeConfig();
+    await parse(['push', '--profile', 'production', '--dry-run'], {
+      sites: { createRegistry: () => fakeRegistry([]) },
+    });
+
+    expect(destinationBannerLines()[0]).toBe('⛳ 宛先: production');
+  });
+
   it('push refuses on a production-pattern profile when the typed confirmation is wrong', async () => {
     // Real push (no --dry-run) on `production` → confirmation prompt
     // fires. Prompt returns the WRONG string → abort.
@@ -1150,6 +1183,7 @@ describe('cli', () => {
       runtime: { runPush: async () => realResult },
     });
     expect(stdout.join('\n')).toContain('Uploaded 1 file(s)');
+    expect(destinationBannerLines()[0]).toBe('⛳ 宛先: production');
   });
 
   it('push prune-with-confirm requires typed delete confirmation before mutation', async () => {
@@ -2107,6 +2141,11 @@ describe('cli', () => {
     expect(out).toMatch(/old\.html/);
     expect(out).toMatch(/\.env/);
     expect(out).toMatch(/skipped|hard-exclude/i);
+    expect(destinationBannerLines()).toEqual([
+      '⛳ 宛先: production',
+      '   ftps://production → /public_html   [server: starserver]',
+      '   local: .',
+    ]);
   });
 
   it('rollback --steps 1 real-run shows uploaded and deleted files, then persists state', async () => {
