@@ -57,6 +57,9 @@ describe('template registry', () => {
       expect(t.defaults.excludeAdd, `${t.id} excludes wp-content cache`).toContain(
         'wp-content/cache/**',
       );
+      expect(t.defaults.excludeAdd, `${t.id} excludes wp-content/debug.log`).toContain(
+        'wp-content/debug.log',
+      );
       expect(t.defaults.preflightPhpLint, `${t.id} enables PHP lint`).toBe(true);
     }
   });

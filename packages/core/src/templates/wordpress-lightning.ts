@@ -22,6 +22,7 @@ export const wordpressLightningTemplate: TemplateConfig = {
       'wp-content/wflogs/**',
       'wp-content/ai1wm-backups/**',
       'wp-content/updraft/**',
+      'wp-content/debug.log',
     ],
     safetyProductionPatterns: ['main*', '*prod*', '*www*', '*-live'],
     preflightPhpLint: true,
