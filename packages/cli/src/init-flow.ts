@@ -14,7 +14,7 @@
  */
 
 import { stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
   type BackupConfig,
   type Config,
@@ -40,6 +40,11 @@ export interface SiteRegistryLookup {
 }
 
 export interface ResolveInitFromRefOptions {
+  readonly cwd: string;
+  readonly registry?: SiteRegistryLookup;
+}
+
+export interface ResolveInitSiteNameOptions {
   readonly cwd: string;
   readonly registry?: SiteRegistryLookup;
 }
@@ -137,6 +142,18 @@ export async function resolveInitFromRef(
   options: ResolveInitFromRefOptions,
 ): Promise<string> {
   return (await resolveInitFromRefDetails(ref, options)).path;
+}
+
+export async function resolveInitSiteName(options: ResolveInitSiteNameOptions): Promise<string> {
+  const absoluteCwd = resolve(options.cwd);
+  const fallback = basename(absoluteCwd);
+  const registry = options.registry ?? new SiteRegistry();
+  try {
+    const site = (await registry.list()).find((entry) => resolve(entry.path) === absoluteCwd);
+    return site?.name && site.name.trim().length > 0 ? site.name : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 const BASELINE_CONFIG: Config = configSchema.parse({
@@ -270,12 +287,38 @@ function isStandardFtpPort(port: number, protocol: string): boolean {
   return port === 21;
 }
 
-export function buildInitFields(): PromptField[] {
-  return buildInitFieldsWithTemplate(true);
+export function sanitizeKeychainSiteName(siteName: string | undefined): string {
+  if (siteName === undefined) return '';
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional keychain identifier sanitization
+  const controlCharacters = /[\u0000-\u001f\u007f]+/gu;
+  return siteName
+    .trim()
+    .replace(controlCharacters, '-')
+    .replace(/[:/\\]+/gu, '-')
+    .replace(/[^A-Za-z0-9._-]+/gu, '-')
+    .replace(/-+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
 }
 
-export function buildInitFieldsFromInherited(initials: InheritedProfileInitials): PromptField[] {
-  return buildInitFieldsWithTemplate(true, undefined, initials);
+export function buildKeychainServiceInitial(
+  siteName: string | undefined,
+  profileName: string,
+): string {
+  const sanitizedSiteName = sanitizeKeychainSiteName(siteName);
+  return sanitizedSiteName.length > 0
+    ? `aiftp:${sanitizedSiteName}-${profileName}`
+    : `aiftp:${profileName}`;
+}
+
+export function buildInitFields(siteName?: string): PromptField[] {
+  return buildInitFieldsWithTemplate(true, undefined, undefined, siteName);
+}
+
+export function buildInitFieldsFromInherited(
+  initials: InheritedProfileInitials,
+  siteName?: string,
+): PromptField[] {
+  return buildInitFieldsWithTemplate(true, undefined, initials, siteName);
 }
 
 /**
@@ -308,6 +351,7 @@ export function buildInitFieldsWithTemplate(
   skipTemplate: boolean,
   prefilledTemplate?: TemplateConfig,
   inherited?: InheritedProfileInitials,
+  siteName?: string,
 ): PromptField[] {
   const fields: PromptField[] = [
     {
@@ -422,7 +466,7 @@ export function buildInitFieldsWithTemplate(
           typeof answers.profile === 'string' && answers.profile.length > 0
             ? answers.profile
             : 'production';
-        return `aiftp:${profile}`;
+        return buildKeychainServiceInitial(siteName, profile);
       },
       validate: requireNonEmpty('Keychain service'),
     },

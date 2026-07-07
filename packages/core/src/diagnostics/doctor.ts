@@ -84,10 +84,17 @@ export interface NetworkProbeResult {
   addresses: string[];
 }
 
+export interface DoctorSiteEntry {
+  readonly name: string;
+  readonly path: string;
+  readonly default_profile?: string;
+}
+
 export interface DoctorDeps {
   readConfig(): Promise<Config | null>;
   readGitignore(): Promise<string | null>;
   hasKeychainEntry(service: string, account: string): Promise<boolean>;
+  listSites?(): Promise<readonly DoctorSiteEntry[]>;
   /**
    * Fetch the actual password for a profile from the keychain. Optional —
    * when undefined the FTPS probe receives an empty string and most real
@@ -296,6 +303,42 @@ function report(results: CheckResult[]): DoctorReport {
 
 function skipped(id: string, title: string, message: string): CheckResult {
   return { id, title, status: 'skip', message };
+}
+
+async function keychainCollisionResult(
+  deps: DoctorDeps,
+  profileName: string,
+  profile: ProfileConfig,
+): Promise<CheckResult> {
+  const passResult: CheckResult = {
+    id: 'keychain-collision',
+    title: 'Keychain service naming',
+    status: 'pass',
+    message: 'Keychain service naming is site-scoped or no registry collision was detected.',
+  };
+
+  if (profile.keychain_service !== `aiftp:${profileName}` || deps.listSites === undefined) {
+    return passResult;
+  }
+
+  try {
+    const matchingSites = (await deps.listSites()).filter(
+      (site) => site.default_profile === profileName,
+    );
+    if (matchingSites.length < 2) {
+      return passResult;
+    }
+    return {
+      id: 'keychain-collision',
+      title: 'Keychain service naming',
+      status: 'warn',
+      message:
+        'Multiple sites share this default profile and a site-generic keychain service name, which can cause credentials to overwrite each other.',
+      recommendation: 'Use the site-scoped aiftp:<site>-<profile> keychain service format.',
+    };
+  } catch {
+    return passResult;
+  }
 }
 
 /**
@@ -522,6 +565,7 @@ export async function runDoctor(
   if (!profile) {
     results.push(
       skipped('keychain', 'Keychain', 'Profile is unavailable.'),
+      skipped('keychain-collision', 'Keychain service naming', 'Profile is unavailable.'),
       skipped('dns', 'DNS', 'Profile is unavailable.'),
       skipped('tcp', 'TCP', 'Profile is unavailable.'),
       ...SKIPPED_FTPS_RESULTS,
@@ -547,6 +591,7 @@ export async function runDoctor(
           recommendation: 'Run aiftp auth set',
         },
   );
+  results.push(await keychainCollisionResult(deps, options.profile, profile));
 
   const network = await deps.probeNetwork(profile.host, profile.port);
   results.push(

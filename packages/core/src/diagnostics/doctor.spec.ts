@@ -134,6 +134,50 @@ describe('runDoctor: config-only checks', () => {
     expect(k?.status).toBe('fail');
     expect(k?.recommendation).toMatch(/aiftp auth set/);
   });
+
+  it('warns when a site-generic keychain service is shared by multiple sites with the same default profile', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:production' }),
+      listSites: async () => [
+        { name: 'alpha', path: '/sites/alpha', default_profile: 'production' },
+        { name: 'beta', path: '/sites/beta', default_profile: 'production' },
+      ],
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    const collision = report.results.find((r) => r.id === 'keychain-collision');
+    expect(collision?.status).toBe('warn');
+    expect(collision?.message).toMatch(/multiple sites/i);
+    expect(collision?.recommendation).toMatch(/aiftp:<site>-<profile>/);
+  });
+
+  it('passes the keychain collision check for site-scoped service names', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:alpha-production' }),
+      listSites: async () => [
+        { name: 'alpha', path: '/sites/alpha', default_profile: 'production' },
+        { name: 'beta', path: '/sites/beta', default_profile: 'production' },
+      ],
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    expect(report.results.find((r) => r.id === 'keychain-collision')?.status).toBe('pass');
+  });
+
+  it('passes the keychain collision check when site listing is unavailable', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:production' }),
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    expect(report.results.find((r) => r.id === 'keychain-collision')?.status).toBe('pass');
+  });
 });
 
 describe('runDoctor: network checks', () => {

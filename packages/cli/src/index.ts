@@ -19,6 +19,8 @@ import {
   type RollbackUploader,
   SftpClient,
   type SiteEntry,
+  SiteRegistry,
+  SiteRegistryDuplicateError,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -75,7 +77,9 @@ import {
   InitFromNotFoundError,
   buildInitFieldsFromInherited,
   buildInitFieldsWithTemplate,
+  buildKeychainServiceInitial,
   loadInitInheritance,
+  resolveInitSiteName,
 } from './init-flow.js';
 import { PromptFlow } from './prompt-framework/prompt-flow.js';
 import { type SitesCommandDeps, registerSitesCommand } from './sites-command.js';
@@ -575,6 +579,7 @@ async function editInitField(
   fieldIdx: number,
   prompt: CliPrompt,
   stderr: (line: string) => void,
+  siteName?: string,
 ): Promise<InitAnswers> {
   const field = INIT_SUMMARY_FIELDS[fieldIdx];
   if (!field) {
@@ -697,7 +702,7 @@ async function editInitField(
           // v0.10.4 (Codex Phase 2 S1): default to aiftp:${profile} derived from
           // the *current* profile name (per spec §4.4), not the previously-saved
           // keychain service. Makes #8 obvious to re-default after #1 changed.
-          initial: `aiftp:${current.profile}`,
+          initial: buildKeychainServiceInitial(siteName, current.profile),
           validate: textValidate('Keychain service'),
         },
       ];
@@ -816,6 +821,7 @@ async function runInitSummaryReview(
   initial: InitAnswers,
   prompt: CliPrompt,
   stderr: (line: string) => void,
+  siteName?: string,
 ): Promise<InitAnswers> {
   // Codex Should-add #24: non-TTY environment must fail clearly, not block on stdin.
   // Codex Phase 2 C3: \`isTTY !== true\` catches both \`false\` and \`undefined\`
@@ -852,7 +858,7 @@ async function runInitSummaryReview(
     }
 
     const oldProfile = answers.profile;
-    answers = await editInitField(answers, choice.fieldIndex - 1, prompt, stderr);
+    answers = await editInitField(answers, choice.fieldIndex - 1, prompt, stderr, siteName);
     if (choice.fieldIndex === 1 && answers.profile !== oldProfile) {
       stderr(
         `Profile name changed from "${oldProfile}" to "${answers.profile}". Keychain service (#8) is NOT auto-updated; edit it separately if needed.\n`,
@@ -1284,6 +1290,7 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         }
       },
       hasKeychainEntry: (service, account) => hasPassword(service, account),
+      listSites: async () => new SiteRegistry().list(),
       getKeychainPassword: async (service, account) => {
         try {
           return await getPassword(service, account);
@@ -1782,9 +1789,14 @@ export function createCli(options: CliOptions = {}): Command {
         throw new CommanderError(1, 'aiftp.unknown-template', message);
       }
 
+      const registry = options.sites?.createRegistry?.();
+      const initSiteName = await resolveInitSiteName({
+        cwd,
+        ...(registry === undefined ? {} : { registry }),
+      });
+
       let inheritance: Awaited<ReturnType<typeof loadInitInheritance>> | undefined;
       if (cmd.from !== undefined) {
-        const registry = options.sites?.createRegistry?.();
         try {
           inheritance = await loadInitInheritance(cmd.from, {
             cwd,
@@ -1814,8 +1826,8 @@ export function createCli(options: CliOptions = {}): Command {
       // so they can be reused / extended for templates (v0.11 Pillar β).
       const flowResult = await new PromptFlow(
         inheritance
-          ? buildInitFieldsFromInherited(inheritance.initials)
-          : buildInitFieldsWithTemplate(template !== undefined, template),
+          ? buildInitFieldsFromInherited(inheritance.initials, initSiteName)
+          : buildInitFieldsWithTemplate(template !== undefined, template, undefined, initSiteName),
         {
           prompt: (question) => prompt(question as PromptQuestion),
           stderr,
@@ -1864,7 +1876,7 @@ export function createCli(options: CliOptions = {}): Command {
       }
 
       // v0.10.4 (#6/#7/#8 reflective patch, Codex Phase 1 review): summary review
-      answers = await runInitSummaryReview(answers, prompt, stderr);
+      answers = await runInitSummaryReview(answers, prompt, stderr, initSiteName);
 
       if (answers.remoteRoot.startsWith('/')) {
         stderr(
@@ -1905,6 +1917,32 @@ export function createCli(options: CliOptions = {}): Command {
           answers.profile,
           generateKey().toString('base64'),
         );
+      }
+
+      if (registry !== undefined && initSiteName.trim().length > 0) {
+        const registration = await prompt([
+          {
+            type: 'confirm',
+            name: 'registerSite',
+            message: 'Register this site in the global registry? (Y/n)',
+            initial: true,
+          },
+        ]);
+        if (registration.registerSite !== false) {
+          try {
+            await registry.add({
+              name: initSiteName,
+              path: resolve(cwd),
+              default_profile: answers.profile,
+            });
+          } catch (error: unknown) {
+            if (error instanceof SiteRegistryDuplicateError) {
+              stderr(`Site ${initSiteName} is already registered; continuing.`);
+            } else {
+              throw error;
+            }
+          }
+        }
       }
 
       stdout(`Initialized aiftp profile ${answers.profile}`);

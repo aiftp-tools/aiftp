@@ -13,6 +13,16 @@ import {
   resolveInitFromRef,
 } from './init-flow.ts';
 
+function keychainField(fields: ReturnType<typeof buildInitFieldsWithTemplate>) {
+  const field = fields.find((f) => f.name === 'keychainService');
+  if (!field) throw new Error('keychainService field missing');
+  return field;
+}
+
+function resolveInitial(initial: unknown, answers: Record<string, unknown>): unknown {
+  return typeof initial === 'function' ? initial(answers) : initial;
+}
+
 describe('buildInitFields', () => {
   const fields = buildInitFields();
 
@@ -55,13 +65,36 @@ describe('buildInitFields', () => {
   });
 
   it('keychainService initial derives from profile in answers', () => {
-    const ks = fields.find((f) => f.name === 'keychainService');
+    const ks = keychainField(fields);
     expect(typeof ks?.initial).toBe('function');
     if (typeof ks?.initial === 'function') {
       expect(ks.initial({ profile: 'staging' })).toBe('aiftp:staging');
       expect(ks.initial({})).toBe('aiftp:production');
       expect(ks.initial({ profile: '' })).toBe('aiftp:production');
     }
+  });
+
+  it('keychainService initial includes a supplied site name before the profile', () => {
+    const ks = keychainField(buildInitFields('gwco'));
+    expect(resolveInitial(ks.initial, { profile: 'production' })).toBe('aiftp:gwco-production');
+  });
+
+  it('keychainService initial falls back to the legacy profile-only format without a site name', () => {
+    const emptySite = keychainField(buildInitFields(''));
+    const undefinedSite = keychainField(buildInitFields(undefined));
+
+    expect(resolveInitial(emptySite.initial, { profile: 'production' })).toBe('aiftp:production');
+    expect(resolveInitial(undefinedSite.initial, { profile: 'staging' })).toBe('aiftp:staging');
+  });
+
+  it('keychainService initial sanitizes dirty site names before composing the service id', () => {
+    const ks = keychainField(
+      buildInitFieldsWithTemplate(true, undefined, undefined, 'gw:co\nsite'),
+    );
+
+    expect(resolveInitial(ks.initial, { profile: 'production' })).toBe(
+      'aiftp:gw-co-site-production',
+    );
   });
 
   it('protocol initial is ftps (TLS encouraged by default)', () => {
@@ -129,10 +162,6 @@ describe('buildInitFieldsWithTemplate — localRoot initial', () => {
     const field = fields.find((f) => f.name === 'localRoot');
     if (!field) throw new Error('localRoot field missing');
     return field;
-  }
-
-  function resolveInitial(initial: unknown, answers: Record<string, unknown>): unknown {
-    return typeof initial === 'function' ? initial(answers) : initial;
   }
 
   it('uses template default "dist" when --template static is prefilled', () => {

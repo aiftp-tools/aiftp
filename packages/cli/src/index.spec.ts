@@ -1,9 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { type PushResult, type SiteEntry, type StatusResult, loadConfig } from '@aiftp-tools/core';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { basename, join } from 'node:path';
+import {
+  type PushResult,
+  type SiteEntry,
+  SiteRegistryDuplicateError,
+  type StatusResult,
+  loadConfig,
+} from '@aiftp-tools/core';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type CliBackupStore,
   type CliKeychain,
@@ -211,6 +217,134 @@ describe('cli', () => {
       password: 'secret-password',
     });
     expect(stored[1]?.service).toBe('aiftp:production:backup-key');
+    expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
+  });
+
+  it('init registers the current site when the registry prompt is accepted', async () => {
+    const add = vi.fn(async (entry: SiteEntry) => [entry]);
+    const registry = {
+      list: async () => [],
+      add,
+      remove: async () => [],
+    };
+
+    await parse(['init'], {
+      sites: { createRegistry: () => registry },
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        registerSite: true,
+      }),
+    });
+
+    expect(add).toHaveBeenCalledWith({
+      name: basename(cwd),
+      path: cwd,
+      default_profile: 'production',
+    });
+  });
+
+  it('init catches duplicate site registration and still exits successfully', async () => {
+    const add = vi.fn(async () => {
+      throw new SiteRegistryDuplicateError(basename(cwd));
+    });
+    const registry = {
+      list: async () => [],
+      add,
+      remove: async () => [],
+    };
+
+    await parse(['init'], {
+      sites: { createRegistry: () => registry },
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        registerSite: true,
+      }),
+    });
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
+    expect(stderr.join('\n')).toMatch(/already registered/i);
+  });
+
+  it('init does not register the current site when the registry prompt is declined', async () => {
+    const add = vi.fn(async (entry: SiteEntry) => [entry]);
+    const registry = {
+      list: async () => [],
+      add,
+      remove: async () => [],
+    };
+
+    await parse(['init'], {
+      sites: { createRegistry: () => registry },
+      prompt: prompt({
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        registerSite: false,
+      }),
+    });
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it('init skips site registration entirely when no registry is injected', async () => {
+    const promptCalls: string[] = [];
+    const recordingPrompt: CliPrompt = async (questions) => {
+      const first = Array.isArray(questions) ? questions[0] : questions;
+      if (typeof first?.name === 'string') {
+        promptCalls.push(first.name);
+      }
+      if (first?.name === 'registerSite') {
+        throw new Error('registerSite prompt must be skipped without DI registry');
+      }
+      return {
+        'template-select': 'none',
+        profile: 'production',
+        host: 'ftp.example.com',
+        port: 21,
+        protocol: 'ftps',
+        user: 'deploy-user',
+        remoteRoot: '/public_html',
+        localRoot: '.',
+        keychainService: 'aiftp:production',
+        serverKind: 'generic',
+        password: 'secret-password',
+        consent: true,
+        choice: 'Y',
+      };
+    };
+
+    await parse(['init'], { prompt: recordingPrompt });
+
+    expect(promptCalls).not.toContain('registerSite');
     expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
   });
 
