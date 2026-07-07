@@ -6,11 +6,11 @@
 [![CI](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml/badge.svg)](https://github.com/aiftp-tools/aiftp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**Status**: v0.11.0 — published to npm as `@aiftp-tools/{core,cli,mcp}`. Continuously verified on Star Server (Japan); Sakura / Xserver / Lolipop were verified end-to-end at v0.9.3 (2026-05-22), with those accounts since cancelled and re-verified on demand (see [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)). v0.11 adds WordPress-focused templates, SFTP support, and an expanded smoke CI.
+**Status**: v0.12.0 — published to npm as `@aiftp-tools/{core,cli,mcp}`. Continuously verified on Star Server (Japan); Sakura / Xserver / Lolipop were verified end-to-end at v0.9.3 (2026-05-22), with those accounts since cancelled and re-verified on demand (see [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)). v0.12 adds a multi-site registry (`aiftp sites`), config inheritance (`init --from`), a destination banner with MCP fail-closed site checks, and enforced SFTP host-key verification (TOFU).
 
 ```bash
 npm install -g @aiftp-tools/cli
-aiftp --version   # 0.11.0
+aiftp --version   # 0.12.0
 ```
 
 ## Two problems aiftp solves
@@ -92,6 +92,47 @@ Why this matters for the Japanese Web development market:
 | Two agents race on the same site | **Server-side lock file** |
 | Foreign-IP filter blocks cloud CI from reaching Japanese hosting | **Run locally from a Japanese IP — no infrastructure change needed** |
 | Hangs on long-running FTP operations through generic AI tool loops | **MCP exposes one `prepare/confirm` round-trip per push, not a per-file tool loop** |
+
+## What's new in v0.12 (site fleet)
+
+v0.12 targets the operator who runs **more than one site from one machine**
+— the exact shape of the 制作者 (Builder) persona once they have a few
+clients. It closes the credential-collision, wrong-destination, and
+config-duplication gaps that surface as soon as a second site exists.
+
+- **Site registry — `aiftp sites`** (F1) — a global pointer-only ledger at
+  `~/.aiftp/sites.toml` (absolute path + `default_profile` per site; **no
+  credentials — those stay in the OS Keychain**). `aiftp sites list`
+  (`--json` for machine-readable output), `sites add`, `sites remove`, and
+  `sites doctor` (`--connect` for live checks across every registered site).
+  Over MCP the registry is **read-only** (`aiftp_sites_list`); there is no
+  tool that can write it.
+- **Config inheritance — `aiftp init --from <site|path>`** (F2) — scaffold a
+  new site by inheriting the safe, non-identifying sections (port, protocol,
+  FTPS/passive mode, server kind, filename encoding). **host / user /
+  keychain service are deliberately NOT inherited**, so a new site can never
+  silently reuse another site's identity or credentials.
+- **Destination banner + MCP fail-closed** (F3) — `aiftp push` / `aiftp
+  rollback` print `⛳ 宛先: <site> (<label>)` before acting (shown even with
+  `--yes`; no host/credentials in the banner). Over MCP, an AI client's
+  declared `expected_site` is checked against the resolved working directory
+  and a mismatch is **rejected fail-closed** (`site-mismatch` — the real push
+  never starts), structurally preventing wrong-server deploys.
+- **Site-scoped Keychain naming** (F4) — the keychain service default is now
+  `aiftp:<site>-<profile>` instead of `aiftp:<profile>`, so reusing a common
+  profile name like `production` across projects no longer collides and
+  overwrites credentials. `doctor` warns (`keychain-collision`) when a
+  non-site-scoped name is shared by multiple registered sites. Existing
+  configs need no migration — only the init-time default changes.
+- **SFTP host-key verification enforced (TOFU)** — `.aiftp/known_hosts`
+  Trust-On-First-Use pinning closes the v0.11 limitation where SFTP host keys
+  were accepted unverified. A changed key is now rejected (MITM detection).
+- **WordPress `debug.log` exclude** — all four WordPress templates now exclude
+  `wp-content/debug.log`, so a stray WP_DEBUG_LOG file is never uploaded.
+
+**Quality gates (v0.12.0)**: 857 tests passed / 3 skipped / 0 failed,
+Branches coverage 89%+, biome lint clean, `tsc --noEmit` clean. See
+[CHANGELOG](CHANGELOG.md) for the full per-feature detail.
 
 ## What's new in v0.11 (templates, SFTP, smoke CI)
 
@@ -256,7 +297,7 @@ Branches coverage 83.29%, Statements 90.25%, biome lint clean.
 ```bash
 # 0. Install globally from npm (Node.js 22+ required)
 npm install -g @aiftp-tools/cli
-aiftp --version   # → 0.11.0
+aiftp --version   # → 0.12.0
 
 # 1. Initialize a new project (asks host, port, protocol, etc.;
 #    stores the password in macOS Keychain or Windows Credential Manager;
@@ -284,6 +325,32 @@ aiftp push
 aiftp backup list
 aiftp backup restore <snapshot-id> <path> --output restored.html
 ```
+
+### Managing multiple sites (v0.12)
+
+Once you run more than one site from the same machine, register each in the
+global site registry so every command knows exactly where it is pointing:
+
+```bash
+# Register the current project as a named site (pointer only — no credentials
+# are copied; those stay in the OS Keychain).
+aiftp sites add --name gwco --label glocalworks.co.jp --default-profile production
+
+# List everything the registry knows (redacted; add --json for machine output).
+aiftp sites list
+
+# Health-check every registered site's config at once (--connect adds live checks).
+aiftp sites doctor
+
+# Scaffold a new site by inheriting the safe sections (port / protocol / mode /
+# encoding) of an existing one. host / user / keychain are NOT inherited.
+aiftp init --from gwco
+```
+
+Every `aiftp push` / `aiftp rollback` then prints a destination banner
+(`⛳ 宛先: gwco (glocalworks.co.jp)`) before acting, and an AI agent driving
+aiftp over MCP can pass `expected_site` to have a wrong destination **rejected
+before any upload starts**.
 
 ## Supported servers
 
@@ -330,10 +397,13 @@ Or, when developing aiftp from a local clone:
 Tools the AI sees:
 
 - `aiftp_status` — show the local diff
+- `aiftp_sites_list` — list registered sites (redacted; read-only, no write tool)
 - `aiftp_push` (dry-run only) — preview
 - `aiftp_push_prepare` + `aiftp_push_confirm` — the two-step gate for real pushes
+  (accepts `expected_site`, rejected fail-closed on mismatch)
+- `aiftp_rollback` (dry-run) + `aiftp_rollback_prepare` + `aiftp_rollback_confirm`
 - `aiftp_backup_list` / `aiftp_backup_restore` / `aiftp_backup_verify` / `aiftp_backup_prune`
-- `aiftp_log`, `aiftp_list_remote`
+- `aiftp_log`, `aiftp_list_remote`, `aiftp_init_template_list`
 
 Resources:
 
@@ -364,24 +434,32 @@ pnpm typecheck
 pnpm lint
 ```
 
-## Security limitations (v0.11)
+## Security posture (v0.12)
 
-**Known limitation — SFTP host key verification is NOT enforced in v0.11.** `SftpClient.connect()` accepts any host key the server presents on the first connection, and does NOT pin / compare against a `known_hosts` file. This means a man-in-the-middle attacker on the path between the client and the SFTP server could intercept the connection and capture password authentication credentials or operate as a signing oracle for SSH key authentication.
+**SFTP host-key verification is now enforced (TOFU).** As of v0.12,
+`SftpClient` pins the server's host key to `.aiftp/known_hosts` on the first
+connection (Trust-On-First-Use) and compares against it on every subsequent
+connection. A **changed host key is rejected**, surfacing the man-in-the-middle
+case that v0.11 could not detect. This closes the prior known limitation
+(tracked in [docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md), Finding 3).
 
-**Risk mitigation in v0.11**:
-- Run aiftp on a trusted network path (the same posture you would use for FTPS without TLS pinning).
-- Prefer SSH key authentication over password authentication when possible (an attacker who intercepts the SFTP transport still cannot extract the private key, only obtain signed challenges).
-- Verify the server's host key fingerprint out-of-band against the hosting provider's documentation before the first connection.
+- On the very first connection there is no pinned key to compare against, so
+  the TOFU model still assumes the initial connection is not already
+  intercepted — verify the fingerprint out-of-band on first use if the network
+  path is untrusted.
+- Prefer SSH key authentication over password authentication where possible.
 
-**Planned in v0.12**: `.aiftp/known_hosts` Trust-On-First-Use (TOFU) pinning with explicit prompt on host key change. Tracked in: [docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md](docs/superpowers/specs/2026-05-26-v0.11-security-codex-review.md) (Finding 3).
-
-Other security boundaries (encryption at rest, hard-exclude of secret files, prepare→confirm 2-step gate, Keychain-only credential storage, profile name + remote_root + ssh_key_path traversal rejection) are all enforced in v0.11.
+All other security boundaries are enforced: encryption at rest, hard-exclude of
+secret files (`.env`, `wp-config.php`, `*.pem`, `db.php`), the prepare→confirm
+two-step gate, Keychain-only credential storage, MCP `expected_site`
+fail-closed destination checks, site-scoped Keychain naming, and profile name +
+remote_root + ssh_key_path traversal rejection.
 
 ## Status / roadmap
 
 | | |
 |---|---|
-| **Released** | v0.11.0 (2026-05-26) — see [CHANGELOG](CHANGELOG.md) |
+| **Released** | v0.12.0 (2026-07-07) — see [CHANGELOG](CHANGELOG.md) |
 | **npm** | `@aiftp-tools/cli` · `@aiftp-tools/core` · `@aiftp-tools/mcp` |
 | **Spec** | [docs/spec.md (in parent dir)](../docs/spec.md) |
 | **Init UX design spec (v0.10.4)** | [docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md](docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md) |
