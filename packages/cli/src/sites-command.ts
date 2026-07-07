@@ -123,7 +123,9 @@ export function registerSitesCommand(program: Command, deps: SitesCommandDeps): 
     .command('list')
     .description('List registered sites')
     .option('--json', 'emit resolved sites as JSON')
-    .action(async (options: ListOptions) => list(options));
+    .action(async (options: ListOptions, command: Command) =>
+      list({ json: options.json ?? command.parent?.opts<ListOptions>().json }),
+    );
 
   sites
     .command('add [path]')

@@ -492,6 +492,128 @@ describe('mcp', () => {
     expect(pushCalls).toBe(0);
   });
 
+  it('aiftp_push_prepare fail-closes expected_site in a two-site registry before side effects', async () => {
+    await writeConfig();
+    const clientBPath = join(cwd, 'client-b');
+    const unregisteredPath = join(cwd, 'unregistered');
+    await mkdir(clientBPath, { recursive: true });
+    await mkdir(unregisteredPath, { recursive: true });
+    await writeFile(
+      join(unregisteredPath, '.aiftp.toml'),
+      [
+        'schema = 1',
+        '',
+        '[profile.production]',
+        'host = "ftp.unregistered-secret.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "unregistered-user"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:unregistered-secret"',
+        'server_kind = "starserver"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const registryEntries: SiteEntry[] = [
+      { name: 'gwco', label: 'example-corp.co.jp', path: cwd },
+      { name: 'client-b', label: 'client-b.example', path: clientBPath },
+    ];
+
+    let matchPushCalls = 0;
+    const matchResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async () => {
+            matchPushCalls += 1;
+            return createPushResult({
+              dryRun: true,
+              diff: { added: [], modified: [], removed: [], unchanged: [] },
+              planned: [],
+              nextState: { schema: 1, files: {} },
+            });
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'gwco',
+      },
+    );
+    const matchParsed = parseText(matchResult) as { ok: boolean; destination: unknown };
+    expect(matchResult.isError).not.toBe(true);
+    expect(matchParsed.ok).toBe(true);
+    expect(matchParsed.destination).toMatchObject({ site: 'gwco', label: 'example-corp.co.jp' });
+    expect(matchPushCalls).toBe(1);
+
+    let mismatchPushCalls = 0;
+    const mismatchResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async () => {
+            mismatchPushCalls += 1;
+            return createPushResult();
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'client-b',
+      },
+    );
+    const mismatchSerialized = JSON.stringify(mismatchResult.content);
+    expect(mismatchResult.isError).toBe(true);
+    expect(mismatchSerialized).toContain('site-mismatch');
+    expect(mismatchSerialized).toContain('gwco');
+    expect(mismatchSerialized).toContain('example-corp.co.jp');
+    expect(mismatchSerialized).not.toContain('plan_id');
+    expect(mismatchSerialized).not.toContain('ftp.example.com');
+    expect(mismatchSerialized).not.toContain('deploy-user');
+    expect(mismatchSerialized).not.toContain('aiftp:production');
+    expect(mismatchPushCalls).toBe(0);
+
+    let unregisteredPushCalls = 0;
+    const unregisteredResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd: unregisteredPath,
+        runtime: {
+          runPush: async () => {
+            unregisteredPushCalls += 1;
+            return createPushResult();
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'gwco',
+      },
+    );
+    const unregisteredSerialized = JSON.stringify(unregisteredResult.content);
+    expect(unregisteredResult.isError).toBe(true);
+    expect(unregisteredSerialized).toContain('site-mismatch');
+    expect(unregisteredSerialized).toContain('current working directory is not registered');
+    expect(unregisteredSerialized).not.toContain('plan_id');
+    expect(unregisteredSerialized).not.toContain('ftp.unregistered-secret.example.com');
+    expect(unregisteredSerialized).not.toContain('unregistered-user');
+    expect(unregisteredSerialized).not.toContain('aiftp:unregistered-secret');
+    expect(unregisteredPushCalls).toBe(0);
+  });
+
   it('aiftp_push_prepare evicts the oldest outstanding plan when the store reaches its cap', async () => {
     await writeConfig({ warnOnProdProfile: false });
     const dryRunResult = createPushResult({
