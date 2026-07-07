@@ -8,7 +8,7 @@
  * the remaining methods land in Task 22.
  */
 
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type * as Sftp from 'ssh2-sftp-client';
@@ -28,10 +28,22 @@ const mockInstances: Array<{
   rename: ReturnType<typeof vi.fn>;
   mkdir: ReturnType<typeof vi.fn>;
 }> = [];
+let mockConnectHostKey: Buffer | null = null;
 
 vi.mock('ssh2-sftp-client', () => ({
   default: class MockSftp {
-    connect = vi.fn().mockResolvedValue(undefined);
+    connect = vi.fn().mockImplementation(async (config: Sftp.ConnectOptions) => {
+      if (config.hostVerifier && mockConnectHostKey !== null) {
+        const valid = await new Promise<boolean>((resolve) => {
+          config.hostVerifier?.(mockConnectHostKey ?? Buffer.from('server-key-a'), (result) =>
+            resolve(result),
+          );
+        });
+        if (!valid) {
+          throw new Error('All configured authentication methods failed');
+        }
+      }
+    });
     end = vi.fn().mockResolvedValue(true);
     list = vi.fn().mockResolvedValue([]);
     put = vi.fn().mockResolvedValue('uploaded');
@@ -55,6 +67,7 @@ async function loadSftpClient(): Promise<typeof import('./sftp-client.ts')> {
 describe('SftpClient — Task 21 skeleton', () => {
   beforeEach(() => {
     mockInstances.length = 0;
+    mockConnectHostKey = null;
   });
 
   afterEach(() => {
@@ -187,6 +200,7 @@ describe('SftpClient — Task 21 skeleton', () => {
 describe('SftpClient — Task 22 full interface', () => {
   beforeEach(() => {
     mockInstances.length = 0;
+    mockConnectHostKey = null;
   });
 
   afterEach(() => {
@@ -399,6 +413,7 @@ describe('SftpClient — Task 23 SSH key authentication', () => {
 
   beforeEach(() => {
     mockInstances.length = 0;
+    mockConnectHostKey = null;
     chmodSync(keyPath, 0o600);
   });
 
@@ -520,5 +535,95 @@ describe('SftpClient — Task 23 SSH key authentication', () => {
       sshKeyPath: join(tmpDir, 'does-not-exist'),
     });
     await expect(client.connect()).rejects.toThrow(/no such file|ENOENT/i);
+  });
+});
+
+describe('SftpClient — host key TOFU pinning', () => {
+  let tmpDir: string;
+  let knownHostsPath: string;
+
+  beforeEach(() => {
+    mockInstances.length = 0;
+    tmpDir = mkdtempSync(join(tmpdir(), 'aiftp-sftp-known-hosts-'));
+    knownHostsPath = join(tmpDir, '.aiftp', 'known_hosts');
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function hostVerifierResult(
+    knownHostsSource: string | null,
+    serverKey: Buffer,
+  ): Promise<boolean> {
+    if (knownHostsSource !== null) {
+      mkdirSync(join(tmpDir, '.aiftp'), { recursive: true });
+      writeFileSync(knownHostsPath, knownHostsSource, { flag: 'wx' });
+    }
+    const { SftpClient } = await loadSftpClient();
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      port: 22,
+      user: 'deploy',
+      password: 'secret',
+      knownHostsPath,
+    });
+    await client.connect();
+    const connectOpts = mockInstances[0].connect.mock.calls[0][0] as Sftp.ConnectOptions;
+    return await new Promise<boolean>((resolve) => {
+      connectOpts.hostVerifier?.(serverKey, (valid) => resolve(valid));
+    });
+  }
+
+  it('hostVerifier callbacks true when pinning a first-seen host key', async () => {
+    await expect(hostVerifierResult(null, Buffer.from('server-key-a'))).resolves.toBe(true);
+  });
+
+  it('hostVerifier callbacks true when the host key matches the pin', async () => {
+    const { fingerprintHostKey, serializeEntry } = await import('./sftp-known-hosts.js');
+    const source = `# aiftp known_hosts\n${serializeEntry(
+      'sftp.example.com',
+      22,
+      fingerprintHostKey(Buffer.from('server-key-a')),
+    )}\n`;
+
+    await expect(hostVerifierResult(source, Buffer.from('server-key-a'))).resolves.toBe(true);
+  });
+
+  it('hostVerifier callbacks false when the host key mismatches the pin', async () => {
+    const { fingerprintHostKey, serializeEntry } = await import('./sftp-known-hosts.js');
+    const source = `# aiftp known_hosts\n${serializeEntry(
+      'sftp.example.com',
+      22,
+      fingerprintHostKey(Buffer.from('server-key-a')),
+    )}\n`;
+
+    await expect(hostVerifierResult(source, Buffer.from('server-key-b'))).resolves.toBe(false);
+  });
+
+  it('connect throws a clear MITM-related error on host key mismatch', async () => {
+    const { fingerprintHostKey, serializeEntry } = await import('./sftp-known-hosts.js');
+    const source = `# aiftp known_hosts\n${serializeEntry(
+      'sftp.example.com',
+      22,
+      fingerprintHostKey(Buffer.from('server-key-a')),
+    )}\n`;
+    mkdirSync(join(tmpDir, '.aiftp'), { recursive: true });
+    writeFileSync(knownHostsPath, source, { flag: 'wx' });
+    mockInstances.length = 0;
+    mockConnectHostKey = null;
+    const { SftpClient } = await loadSftpClient();
+    mockInstances.length = 0;
+    mockConnectHostKey = Buffer.from('server-key-b');
+    const client = new SftpClient({
+      host: 'sftp.example.com',
+      port: 22,
+      user: 'deploy',
+      password: 'secret',
+      knownHostsPath,
+    });
+
+    await expect(client.connect()).rejects.toThrow(/host key mismatch|MITM|known=.*server=/i);
   });
 });

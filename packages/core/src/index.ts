@@ -226,7 +226,15 @@ export {
   type UploadResult,
 } from './ftp-client.js';
 
-export { SftpClient, type SftpClientOptions } from './sftp-client.js';
+export { SftpClient, type SftpClientOptions, type SftpHostKeyStatus } from './sftp-client.js';
+export {
+  fingerprintHostKey,
+  hostId,
+  parseKnownHosts,
+  serializeEntry,
+  verifyHostKey,
+  type VerifyHostKeyResult,
+} from './sftp-known-hosts.js';
 export {
   buildDeployClientOptions,
   createDeployClient,

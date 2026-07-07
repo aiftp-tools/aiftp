@@ -1485,29 +1485,39 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
           await client.connect();
           try {
             await client.list(profile.remote_root);
+            const hostKeyStatus = client.getHostKeyStatus();
             return {
               portReachable: true,
               keyPermissionsOk,
               keyMode,
               handshakeOk: true,
+              hostKeyVerified:
+                hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
               remoteRootOk: true,
             };
           } catch (error: unknown) {
+            const hostKeyStatus = client.getHostKeyStatus();
             return {
               portReachable: true,
               keyPermissionsOk,
               keyMode,
               handshakeOk: true,
+              hostKeyVerified:
+                hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
               remoteRootOk: false,
               errorMessage: error instanceof Error ? error.message : String(error),
             };
           }
         } catch (error: unknown) {
+          const hostKeyStatus = client.getHostKeyStatus();
           return {
             portReachable: true,
             keyPermissionsOk,
             keyMode,
             handshakeOk: false,
+            hostKeyVerified:
+              hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
+            hostKeyChanged: hostKeyStatus?.outcome === 'mismatch',
             remoteRootOk: false,
             errorMessage: error instanceof Error ? error.message : String(error),
           };

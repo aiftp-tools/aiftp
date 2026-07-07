@@ -72,6 +72,10 @@ export interface SftpProbeResult {
   keyMode?: string;
   /** SftpClient.connect() succeeded — TCP + SSH transport + auth all ok. */
   handshakeOk: boolean;
+  /** Host key was pinned or matched through TOFU known_hosts verification. */
+  hostKeyVerified?: boolean;
+  /** Host key did not match the existing known_hosts pin. */
+  hostKeyChanged?: boolean;
   /** stat(remote_root) succeeded after handshake. */
   remoteRootOk: boolean;
   /** Captured error message from connect() / stat() when not ok. */
@@ -180,6 +184,12 @@ const SKIPPED_SFTP_RESULTS: CheckResult[] = [
     message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
   },
   {
+    id: 'sftp-host-key',
+    title: 'SFTP host key',
+    status: 'skip',
+    message: 'Profile uses FTP/FTPS; SFTP checks do not apply.',
+  },
+  {
     id: 'sftp-handshake',
     title: 'SFTP handshake',
     status: 'skip',
@@ -203,6 +213,12 @@ const UNAVAILABLE_SFTP_RESULTS: CheckResult[] = [
   {
     id: 'ssh-key-permissions',
     title: 'SSH key permissions',
+    status: 'skip',
+    message: 'SFTP probe is not available.',
+  },
+  {
+    id: 'sftp-host-key',
+    title: 'SFTP host key',
     status: 'skip',
     message: 'SFTP probe is not available.',
   },
@@ -250,10 +266,36 @@ function sftpResults(profile: ProfileConfig, probe: SftpProbeResult): CheckResul
         : `Run \`chmod 600 ${profile.ssh_key_path ?? '<ssh_key_path>'}\`.`,
     });
   }
+  if (probe.hostKeyChanged === true) {
+    out.push({
+      id: 'sftp-host-key',
+      title: 'SFTP host key',
+      status: 'fail',
+      message: 'SFTP host key mismatch; host key changed, possible MITM.',
+      recommendation:
+        'Inspect ~/.aiftp/known_hosts and verify the server host key with your hosting provider before retrying.',
+    });
+  } else if (probe.hostKeyVerified === true) {
+    out.push({
+      id: 'sftp-host-key',
+      title: 'SFTP host key',
+      status: 'pass',
+      message: 'SFTP host key is pinned in ~/.aiftp/known_hosts.',
+    });
+  } else {
+    out.push({
+      id: 'sftp-host-key',
+      title: 'SFTP host key',
+      status: 'warn',
+      message: 'SFTP host key is not yet pinned; verify it out-of-band before trusting it.',
+      recommendation:
+        'Run doctor once on a trusted network and compare the host key fingerprint with your hosting provider.',
+    });
+  }
   out.push({
     id: 'sftp-handshake',
     title: 'SFTP handshake',
-    status: probe.handshakeOk ? 'warn' : 'fail',
+    status: probe.handshakeOk ? (probe.hostKeyVerified === true ? 'pass' : 'warn') : 'fail',
     // v0.11 security review (CWE-295) — `pass` would imply we verified
     // the server's identity. We did not (no known_hosts / TOFU in
     // v0.11). Downgrade to `warn` so the operator sees the limitation
@@ -261,11 +303,14 @@ function sftpResults(profile: ProfileConfig, probe: SftpProbeResult): CheckResul
     // host key out-of-band. Will become `pass` in v0.12 once TOFU
     // pinning lands.
     message: probe.handshakeOk
-      ? 'SSH transport + SFTP subsystem ready. NOTE: host key was not verified against known_hosts (v0.11 limitation — see README "Security limitations").'
+      ? probe.hostKeyVerified === true
+        ? 'SSH transport + SFTP subsystem ready; host key verified against known_hosts.'
+        : 'SSH transport + SFTP subsystem ready. NOTE: host key was not verified against known_hosts (v0.11 limitation — see README "Security limitations").'
       : (probe.errorMessage ?? 'SFTP connect failed.'),
-    recommendation: probe.handshakeOk
-      ? 'Verify the server host key fingerprint with your hosting provider before trusting this connection on an untrusted network. v0.12 will add automatic TOFU pinning.'
-      : undefined,
+    recommendation:
+      probe.handshakeOk && probe.hostKeyVerified !== true
+        ? 'Verify the server host key fingerprint with your hosting provider before trusting this connection on an untrusted network. v0.12 will add automatic TOFU pinning.'
+        : undefined,
   });
   out.push({
     id: 'sftp-remote-root',
