@@ -1751,6 +1751,7 @@ export function createCli(options: CliOptions = {}): Command {
   const runtime = options.runtime ?? {};
   const stdout = options.stdout ?? ((line: string) => console.log(line));
   const stderr = options.stderr ?? ((line: string) => console.error(line));
+  const createSiteRegistry = options.sites?.createRegistry ?? (() => new SiteRegistry());
 
   const program = new Command();
   program.name('aiftp').description('AI-first FTP/FTPS deploy tool').version(VERSION);
@@ -1799,10 +1800,10 @@ export function createCli(options: CliOptions = {}): Command {
         throw new CommanderError(1, 'aiftp.unknown-template', message);
       }
 
-      const registry = options.sites?.createRegistry?.();
+      const registry = createSiteRegistry();
       const initSiteName = await resolveInitSiteName({
         cwd,
-        ...(registry === undefined ? {} : { registry }),
+        registry,
       });
 
       let inheritance: Awaited<ReturnType<typeof loadInitInheritance>> | undefined;
@@ -1810,7 +1811,7 @@ export function createCli(options: CliOptions = {}): Command {
         try {
           inheritance = await loadInitInheritance(cmd.from, {
             cwd,
-            ...(registry === undefined ? {} : { registry }),
+            registry,
           });
         } catch (error: unknown) {
           if (error instanceof InitFromNotFoundError) {
@@ -1929,7 +1930,7 @@ export function createCli(options: CliOptions = {}): Command {
         );
       }
 
-      if (registry !== undefined && initSiteName.trim().length > 0) {
+      if (initSiteName.trim().length > 0) {
         const registration = await prompt([
           {
             type: 'confirm',
@@ -2036,7 +2037,7 @@ export function createCli(options: CliOptions = {}): Command {
           cwd,
           cmd.profile,
           profile,
-          options.sites?.createRegistry?.(),
+          createSiteRegistry(),
         );
         stderr(banner);
         // v0.6.0 #7: Always surface the deploy target before any FTP
@@ -2984,7 +2985,7 @@ export function createCli(options: CliOptions = {}): Command {
           cwd,
           profileName,
           profile,
-          options.sites?.createRegistry?.(),
+          createSiteRegistry(),
         );
         stderr(banner);
         const dryRun = cmd.dryRun === true;

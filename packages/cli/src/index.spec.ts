@@ -35,14 +35,20 @@ afterAll(() => {
 
 describe('cli', () => {
   let cwd: string;
+  let home: string;
+  let originalHome: string | undefined;
   let stdout: string[];
   let stderr: string[];
   let stored: Array<{ service: string; account: string; password: string }>;
   let deleted: Array<{ service: string; account: string }>;
 
   beforeEach(async () => {
+    originalHome = process.env.HOME;
     cwd = join(tmpdir(), `aiftp-cli-test-${randomUUID()}`);
+    home = join(tmpdir(), `aiftp-cli-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
+    await mkdir(home, { recursive: true });
+    process.env.HOME = home;
     stdout = [];
     stderr = [];
     stored = [];
@@ -50,14 +56,24 @@ describe('cli', () => {
   });
 
   afterEach(async () => {
+    if (originalHome === undefined) {
+      Reflect.deleteProperty(process.env, 'HOME');
+    } else {
+      process.env.HOME = originalHome;
+    }
     await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   });
 
   function prompt(answers: Record<string, unknown>): CliPrompt {
     // v0.10.4: default summary review choice to 'Y' so existing tests stay green.
     // Existing tests don't pass `choice`; the init field prompts ignore it.
-    return async () =>
-      'choice' in answers ? answers : { 'template-select': 'none', ...answers, choice: 'Y' };
+    return async () => ({
+      'template-select': 'none',
+      registerSite: false,
+      ...answers,
+      choice: 'choice' in answers ? answers.choice : 'Y',
+    });
   }
 
   function keychain(existing = new Set<string>()): CliKeychain {
@@ -315,16 +331,14 @@ describe('cli', () => {
     expect(add).not.toHaveBeenCalled();
   });
 
-  it('init skips site registration entirely when no registry is injected', async () => {
+  it('init uses the default site registry and respects declined registration without DI registry', async () => {
     const promptCalls: string[] = [];
     const recordingPrompt: CliPrompt = async (questions) => {
       const first = Array.isArray(questions) ? questions[0] : questions;
       if (typeof first?.name === 'string') {
         promptCalls.push(first.name);
       }
-      if (first?.name === 'registerSite') {
-        throw new Error('registerSite prompt must be skipped without DI registry');
-      }
+      if (first?.name === 'registerSite') return { registerSite: false };
       return {
         'template-select': 'none',
         profile: 'production',
@@ -344,7 +358,8 @@ describe('cli', () => {
 
     await parse(['init'], { prompt: recordingPrompt });
 
-    expect(promptCalls).not.toContain('registerSite');
+    expect(promptCalls).toContain('registerSite');
+    await expect(readFile(join(home, '.aiftp', 'sites.toml'), 'utf8')).rejects.toThrow();
     expect(stdout.join('\n')).toContain('Initialized aiftp profile production');
   });
 
@@ -1261,6 +1276,34 @@ describe('cli', () => {
     const banner = destinationBannerLines();
     expect(banner).toEqual([
       '⛳ 宛先: gwco (example-corp.co.jp)',
+      '   ftps://production → /public_html   [server: starserver]',
+      '   local: .',
+    ]);
+    expect(banner.join('\n')).not.toContain('ftp.example.com');
+  });
+
+  it('push resolves the registered site name from the default site registry when no registry is injected', async () => {
+    await mkdir(join(home, '.aiftp'), { recursive: true });
+    await writeFile(
+      join(home, '.aiftp', 'sites.toml'),
+      [
+        'schema_version = 1',
+        '',
+        '[sites.gwco]',
+        `path = ${JSON.stringify(cwd)}`,
+        'label = "glocalworks.co.jp"',
+        'default_profile = "production"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    await writeConfig();
+    await parse(['push', '--profile', 'production', '--dry-run']);
+
+    const banner = destinationBannerLines();
+    expect(banner).toEqual([
+      '⛳ 宛先: gwco (glocalworks.co.jp)',
       '   ftps://production → /public_html   [server: starserver]',
       '   local: .',
     ]);
@@ -2639,19 +2682,31 @@ describe('parseSummaryChoice (v0.10.4)', () => {
 
 describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
   const cwd = join(tmpdir(), `aiftp-cli-summary-test-${randomUUID()}`);
+  let home: string;
+  let originalHome: string | undefined;
   let stored: Array<{ service: string; account: string; password: string }>;
   let stderrLines: string[];
   let stdoutLines: string[];
 
   beforeEach(async () => {
+    originalHome = process.env.HOME;
+    home = join(tmpdir(), `aiftp-cli-summary-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
+    await mkdir(home, { recursive: true });
+    process.env.HOME = home;
     stored = [];
     stderrLines = [];
     stdoutLines = [];
   });
 
   afterEach(async () => {
+    if (originalHome === undefined) {
+      Reflect.deleteProperty(process.env, 'HOME');
+    } else {
+      process.env.HOME = originalHome;
+    }
     await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   });
 
   const baseAnswers = {
@@ -2712,18 +2767,21 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
     let i = 0;
     let initBatchConsumed = new Set<string>();
     return async (question: unknown) => {
-      if (i >= answers.length) {
-        throw new Error(`promptSeq exhausted at call ${i + 1} (only ${answers.length} provided)`);
-      }
-      const fixture = answers[i] ?? {};
-
+      const firstQuestion = Array.isArray(question) ? question[0] : question;
       const askedName =
-        !Array.isArray(question) && typeof question === 'object' && question !== null
-          ? (question as { name?: string }).name
+        typeof firstQuestion === 'object' && firstQuestion !== null
+          ? (firstQuestion as { name?: string }).name
           : undefined;
       if (askedName === 'template-select') {
         return { 'template-select': 'none' };
       }
+      if (askedName === 'registerSite') {
+        return { registerSite: false };
+      }
+      if (i >= answers.length) {
+        throw new Error(`promptSeq exhausted at call ${i + 1} (only ${answers.length} provided)`);
+      }
+      const fixture = answers[i] ?? {};
       const fixtureHasFullInitBatch = INIT_FIELDS_V011.every((f) => f in fixture);
       const isInitFieldRequest =
         askedName !== undefined && (INIT_FIELDS_V011 as readonly string[]).includes(askedName);
@@ -2923,6 +2981,7 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
       const first = Array.isArray(questions) ? questions[0] : questions;
       if (first?.name === 'template-select') return { 'template-select': 'none' };
       if (first?.name === 'overwriteBackupKey') return { overwriteBackupKey: false };
+      if (first?.name === 'registerSite') return { registerSite: false };
       if (first?.name === 'choice') {
         choiceCallNum += 1;
         if (choiceCallNum === 1) return { choice: '8' };
