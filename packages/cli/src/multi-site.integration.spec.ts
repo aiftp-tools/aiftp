@@ -281,10 +281,10 @@ describe('multi-site CLI integration', () => {
     const inheritedConfig = await loadConfig(join(newSitePath, '.aiftp.toml'));
     expect(recordedInitials).toMatchObject({
       port: 990,
-      protocol: 'ftps',
-      ftpsMode: 'implicit',
+      protocol: 0,
+      ftpsMode: 1,
       passiveMode: false,
-      serverKind: 'lolipop',
+      serverKind: 1,
     });
     expect(recordedInitials.host).toBeUndefined();
     expect(recordedInitials.user).toBeUndefined();
