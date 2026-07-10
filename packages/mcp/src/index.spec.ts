@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type PushResult, type ResolvedSite, type SiteEntry, VERSION } from '@aiftp-tools/core';
+import {
+  type PushResult,
+  type ResolvedSite,
+  type SiteEntry,
+  SiteRegistry,
+  VERSION,
+} from '@aiftp-tools/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   type AiftpBackupStore,
@@ -29,14 +35,26 @@ type TestSnapshotFile = Awaited<
 
 describe('mcp', () => {
   let cwd: string;
+  let home: string;
+  let originalHome: string | undefined;
 
   beforeEach(async () => {
+    originalHome = process.env.HOME;
     cwd = join(tmpdir(), `aiftp-mcp-test-${randomUUID()}`);
+    home = join(tmpdir(), `aiftp-mcp-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
+    await mkdir(home, { recursive: true });
+    process.env.HOME = home;
   });
 
   afterEach(async () => {
+    if (originalHome === undefined) {
+      Reflect.deleteProperty(process.env, 'HOME');
+    } else {
+      process.env.HOME = originalHome;
+    }
     await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   });
 
   async function writeConfig(
@@ -343,6 +361,39 @@ describe('mcp', () => {
     const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
       profile: 'production',
       expected_site: 'corporate-site',
+    });
+    const parsed = parseText(result) as { ok: boolean; plan_id: string };
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(pushCalls).toBe(1);
+  });
+
+  it('aiftp_push_prepare resolves expected_site from the default site registry', async () => {
+    await writeConfig();
+    await new SiteRegistry().add({
+      name: 'gwco',
+      label: 'Glocalworks Production',
+      path: cwd,
+      default_profile: 'production',
+    });
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        });
+      },
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'gwco',
     });
     const parsed = parseText(result) as { ok: boolean; plan_id: string };
 

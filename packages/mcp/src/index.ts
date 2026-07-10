@@ -1303,13 +1303,9 @@ async function resolveDestination(
   let matchedEntry: SiteEntry | undefined;
   let registryReadFailed = false;
   try {
-    const registry = app.runtime.createSiteRegistry?.();
-    if (!registry) {
-      registryReadFailed = true;
-    } else {
-      const entries = await registry.list();
-      matchedEntry = entries.find((entry) => resolve(entry.path) === resolve(app.cwd));
-    }
+    const registry = app.runtime.createSiteRegistry?.() ?? new SiteRegistry();
+    const entries = await registry.list();
+    matchedEntry = entries.find((entry) => resolve(entry.path) === resolve(app.cwd));
   } catch {
     registryReadFailed = true;
   }
