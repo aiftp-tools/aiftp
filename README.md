@@ -459,7 +459,7 @@ remote_root + ssh_key_path traversal rejection.
 
 | | |
 |---|---|
-| **Released** | v0.12.0 (2026-07-07) — see [CHANGELOG](CHANGELOG.md) |
+| **Released** | v0.12.0 (2026-07-11) — see [CHANGELOG](CHANGELOG.md) |
 | **npm** | `@aiftp-tools/cli` · `@aiftp-tools/core` · `@aiftp-tools/mcp` |
 | **Spec** | [docs/spec.md (in parent dir)](../docs/spec.md) |
 | **Init UX design spec (v0.10.4)** | [docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md](docs/superpowers/specs/2026-05-24-init-input-validation-recovery-design.md) |
