@@ -37,14 +37,17 @@ describe('mcp', () => {
   let cwd: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(async () => {
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     cwd = join(tmpdir(), `aiftp-mcp-test-${randomUUID()}`);
     home = join(tmpdir(), `aiftp-mcp-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
     await mkdir(home, { recursive: true });
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(async () => {
@@ -52,6 +55,11 @@ describe('mcp', () => {
       Reflect.deleteProperty(process.env, 'HOME');
     } else {
       process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      Reflect.deleteProperty(process.env, 'USERPROFILE');
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
     }
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

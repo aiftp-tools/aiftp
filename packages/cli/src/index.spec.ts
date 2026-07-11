@@ -37,6 +37,7 @@ describe('cli', () => {
   let cwd: string;
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
   let stdout: string[];
   let stderr: string[];
   let stored: Array<{ service: string; account: string; password: string }>;
@@ -44,11 +45,13 @@ describe('cli', () => {
 
   beforeEach(async () => {
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     cwd = join(tmpdir(), `aiftp-cli-test-${randomUUID()}`);
     home = join(tmpdir(), `aiftp-cli-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
     await mkdir(home, { recursive: true });
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     stdout = [];
     stderr = [];
     stored = [];
@@ -60,6 +63,11 @@ describe('cli', () => {
       Reflect.deleteProperty(process.env, 'HOME');
     } else {
       process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      Reflect.deleteProperty(process.env, 'USERPROFILE');
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
     }
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -2684,16 +2692,19 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
   const cwd = join(tmpdir(), `aiftp-cli-summary-test-${randomUUID()}`);
   let home: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
   let stored: Array<{ service: string; account: string; password: string }>;
   let stderrLines: string[];
   let stdoutLines: string[];
 
   beforeEach(async () => {
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     home = join(tmpdir(), `aiftp-cli-summary-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
     await mkdir(home, { recursive: true });
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     stored = [];
     stderrLines = [];
     stdoutLines = [];
@@ -2704,6 +2715,11 @@ describe('init summary review (v0.10.4, 25 cases per spec §6.1)', () => {
       Reflect.deleteProperty(process.env, 'HOME');
     } else {
       process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      Reflect.deleteProperty(process.env, 'USERPROFILE');
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
     }
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

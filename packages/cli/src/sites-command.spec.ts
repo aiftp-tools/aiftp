@@ -1,4 +1,4 @@
-import { basename, join } from 'node:path';
+import { basename, resolve } from 'node:path';
 import {
   type DoctorReport,
   type ResolvedSite,
@@ -18,6 +18,11 @@ const passingDoctorReport: DoctorReport = {
   results: [],
   summary: { pass: 1, warn: 0, fail: 0, skip: 0 },
 };
+
+const CURRENT_SITE_PATH = resolve('/work/current-site');
+const ALPHA_SITE_PATH = resolve('/sites/alpha');
+const BETA_SITE_PATH = resolve('/sites/beta');
+const OLD_ALPHA_SITE_PATH = resolve('/sites/old-alpha');
 
 function resolved(entry: SiteEntry, overrides: Partial<ResolvedSite> = {}): ResolvedSite {
   return {
@@ -71,7 +76,7 @@ describe('registerSitesCommand', () => {
       writeErr: (text) => stderr.push(text.trimEnd()),
     });
     registerSitesCommand(program, {
-      cwd: '/work/current-site',
+      cwd: CURRENT_SITE_PATH,
       stdout: (line) => stdout.push(line),
       stderr: (line) => stderr.push(line),
       keychain: { hasPassword: async () => false },
@@ -91,8 +96,8 @@ describe('registerSitesCommand', () => {
 
   it('lists two resolved sites as a table for both list forms', async () => {
     entries = [
-      { name: 'alpha', path: '/sites/alpha', label: 'Alpha', default_profile: 'staging' },
-      { name: 'beta', path: '/sites/beta', label: 'Beta' },
+      { name: 'alpha', path: ALPHA_SITE_PATH, label: 'Alpha', default_profile: 'staging' },
+      { name: 'beta', path: BETA_SITE_PATH, label: 'Beta' },
     ];
     resolveSite.mockImplementation(async (entry) =>
       entry.name === 'alpha'
@@ -113,7 +118,7 @@ describe('registerSitesCommand', () => {
   });
 
   it('emits the resolved site array as JSON', async () => {
-    entries = [{ name: 'alpha', path: '/sites/alpha' }];
+    entries = [{ name: 'alpha', path: ALPHA_SITE_PATH }];
 
     await parse(['sites', '--json']);
 
@@ -135,24 +140,24 @@ describe('registerSitesCommand', () => {
 
     expect(registry.add).toHaveBeenCalledWith({
       name: 'alpha-prod',
-      path: '/sites/alpha',
+      path: ALPHA_SITE_PATH,
       label: 'Alpha',
       default_profile: 'staging',
     });
-    expect(stdout).toContain('Registered site alpha-prod at /sites/alpha.');
+    expect(stdout).toContain(`Registered site alpha-prod at ${ALPHA_SITE_PATH}.`);
   });
 
   it('defaults add path to cwd and name to the directory basename', async () => {
     await parse(['sites', 'add']);
 
     expect(registry.add).toHaveBeenCalledWith({
-      name: basename('/work/current-site'),
-      path: '/work/current-site',
+      name: basename(CURRENT_SITE_PATH),
+      path: CURRENT_SITE_PATH,
     });
   });
 
   it('reports duplicate names to stderr and throws CommanderError', async () => {
-    entries = [{ name: 'alpha', path: '/sites/old-alpha' }];
+    entries = [{ name: 'alpha', path: OLD_ALPHA_SITE_PATH }];
 
     const result = parse(['sites', 'add', '/sites/alpha', '--name', 'alpha']);
 
@@ -165,7 +170,7 @@ describe('registerSitesCommand', () => {
   });
 
   it('removes an existing site and prints confirmation', async () => {
-    entries = [{ name: 'alpha', path: '/sites/alpha' }];
+    entries = [{ name: 'alpha', path: ALPHA_SITE_PATH }];
 
     await parse(['sites', 'remove', 'alpha']);
 
@@ -181,8 +186,8 @@ describe('registerSitesCommand', () => {
 
   it('doctor reports config and credential status without connecting by default', async () => {
     entries = [
-      { name: 'alpha', path: '/sites/alpha' },
-      { name: 'beta', path: '/sites/beta' },
+      { name: 'alpha', path: ALPHA_SITE_PATH },
+      { name: 'beta', path: BETA_SITE_PATH },
     ];
     resolveSite.mockImplementation(async (entry) =>
       entry.name === 'alpha'
@@ -203,10 +208,10 @@ describe('registerSitesCommand', () => {
     entries = [
       {
         name: 'alpha',
-        path: join('/sites', 'alpha'),
+        path: ALPHA_SITE_PATH,
         default_profile: 'staging',
       },
-      { name: 'beta', path: join('/sites', 'beta') },
+      { name: 'beta', path: BETA_SITE_PATH },
     ];
     runDoctor.mockResolvedValueOnce(passingDoctorReport).mockResolvedValueOnce({
       ok: false,
@@ -216,8 +221,8 @@ describe('registerSitesCommand', () => {
 
     await parse(['sites', 'doctor', '--connect']);
 
-    expect(runDoctor).toHaveBeenNthCalledWith(1, { cwd: '/sites/alpha', profile: 'staging' });
-    expect(runDoctor).toHaveBeenNthCalledWith(2, { cwd: '/sites/beta', profile: 'production' });
+    expect(runDoctor).toHaveBeenNthCalledWith(1, { cwd: ALPHA_SITE_PATH, profile: 'staging' });
+    expect(runDoctor).toHaveBeenNthCalledWith(2, { cwd: BETA_SITE_PATH, profile: 'production' });
     expect(stdout.join('\n')).toContain('alpha: pass');
     expect(stdout.join('\n')).toContain('beta: fail');
     expect(stdout.join('\n')).toContain('summary: pass=1 warn=0 fail=1');

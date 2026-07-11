@@ -224,7 +224,7 @@ describe('init --from inheritance', () => {
       },
     });
 
-    expect(path).toBe('/sites/source/.aiftp.toml');
+    expect(path).toBe(join('/sites/source', '.aiftp.toml'));
   });
 
   it('resolves a directory path to <dir>/.aiftp.toml', async () => {

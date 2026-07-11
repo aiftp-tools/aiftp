@@ -19,11 +19,14 @@ const FIRST_SITE: SiteEntry = {
 describe('SiteRegistry', () => {
   let temporaryHome: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(async () => {
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     temporaryHome = await mkdtemp(join(tmpdir(), 'aiftp-sites-home-'));
     process.env.HOME = temporaryHome;
+    process.env.USERPROFILE = temporaryHome;
   });
 
   afterEach(async () => {
@@ -31,6 +34,11 @@ describe('SiteRegistry', () => {
       Reflect.deleteProperty(process.env, 'HOME');
     } else {
       process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      Reflect.deleteProperty(process.env, 'USERPROFILE');
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
     }
     await rm(temporaryHome, { recursive: true, force: true });
   });
