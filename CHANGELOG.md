@@ -12,7 +12,50 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-(Pending work for v0.12+ and v0.11.x.)
+(Pending work for v0.12.x and beyond.)
+
+---
+
+## [0.12.0] — 2026-07-11
+
+**Feature release** — 「サイト台帳 (site fleet)」。1 台のマシンで複数のレンタルサーバー / サイトを AI エージェント経由で運用する際の資格情報衝突・誤送信・設定重複を解消する 4 機能 (F1〜F4) と、v0.11 で残課題だった SFTP ホスト鍵検証 (TOFU) を実装。本人ドッグフード (glocalworks.co.jp) で顕在化した痛点「複数サイトの資格情報管理が煩雑」への直接対応。
+
+### Added
+
+#### F1 — サイト台帳 (site registry)
+
+- **グローバル台帳** `~/.aiftp/sites.toml` — 登録済みサイトへの **ポインタのみ** (絶対パス + `default_profile`) を保持。**資格情報は一切書かない** (資格情報は従来どおり OS Keychain のみ)。原子的書き込み (temp + rename)。
+- **`aiftp sites` サブコマンド** — `list` (登録一覧、`--json` で機械可読出力) / `add [path]` (`--name` / `--label` / `--default-profile`) / `remove <name>` / `doctor` (全登録サイトの設定検査、`--connect` で実接続チェック)。
+- **MCP `aiftp_sites_list`** — read-only tool。AI クライアントが登録サイト一覧を取得可能。台帳を **書き換える MCP tool は提供しない** (登録は CLI 経由のみ)。
+
+#### F2 — `aiftp init --from <ref>` (設定継承)
+
+- 既存サイト (台帳名) またはパスから、`.aiftp.toml` の defaults + カスタマイズ済みセクション (port / protocol / FTPS mode / passive mode / server kind / file-name encoding) を継承して新規サイトを初期化。
+- **host / user / keychain_service は継承しない** — サイト固有値の取り違え・資格情報の相互汚染を防ぐ。`--from` と `--template` は排他。
+
+#### F3 — 宛先バナー + MCP fail-closed 照合
+
+- **宛先バナー** — `aiftp push` / `aiftp rollback` 実行時に `⛳ 宛先: <site> (<label>)` を表示。`--yes` でも表示され、cwd が未登録なら profile 名にフォールバック。**host 等の資格情報はバナーに出さない**。
+- **MCP `expected_site` fail-closed** — AI クライアントが宣言した `expected_site` と cwd の解決結果が一致しない場合、`site-mismatch` で拒否 (実 push は起動しない・plan_id や秘密は漏らさない)。AI の宛先取り違え事故を構造的に遮断。
+
+#### F4 — Keychain サービス命名のサイト固有化
+
+- keychain サービスの既定値を `aiftp:<profile>` → **`aiftp:<site>-<profile>`** に変更。複数プロジェクトで同じ profile 名 (例 `production`) を使っても keychain サービス名が衝突せず、資格情報の相互上書きを防ぐ。`<site>` は制御文字等をサニタイズ、解決不能時は従来形式にフォールバック (既存 config の migration は不要 — 変わるのは init 時の提案既定値のみ)。
+- **`doctor` に `keychain-collision` warn** — サイト非固有な `aiftp:<profile>` 形式を使い、かつ同一 `default_profile` を持つサイトが台帳に複数ある場合に警告。
+
+#### セキュリティ — SFTP ホスト鍵 TOFU ピンニング (CWE-295)
+
+- **`.aiftp/known_hosts` Trust-On-First-Use** — SFTP 初回接続時にホスト鍵をピン留めし、以降は照合。**鍵が変化した場合は明示的に拒否** (MITM 検知)。v0.11 の既知の制限 (ホスト鍵を無検証で受理) を解消。
+
+#### WordPress テンプレート
+
+- 全 4 WordPress テンプレ (`wordpress-swell` / `wordpress-lightning` / `wordpress-cocoon` / `wordpress-standard`) の `excludeAdd` に **`wp-content/debug.log`** を追加。WP_DEBUG_LOG が残したデバッグログの誤アップロードを防止。
+
+### Fixed
+
+- **`aiftp sites list --json`** が table 形式を返していた不具合を修正 — 子コマンドが親スコープの `--json` フラグを継承していなかった (Commander.js の親子オプション解決)。
+
+開発: 2026-07-06 〜 07。spec → 実装計画 → Claude 実装 / Codex 独立レビュー ループ → 多サイト統合 E2E テスト。品質ゲート: 857 tests passed / 3 skipped / 0 failed、Branches coverage 89%+、biome lint clean、`tsc --noEmit` clean。
 
 ---
 

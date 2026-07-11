@@ -13,6 +13,8 @@
  */
 
 import { lstatSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import Sftp from 'ssh2-sftp-client';
 import {
   FtpAuthError,
@@ -24,6 +26,7 @@ import {
   type UploadResult,
 } from './ftp-client.js';
 import { safeExpandLocalPath } from './path-utils.js';
+import { type VerifyHostKeyResult, verifyHostKey } from './sftp-known-hosts.js';
 
 export interface SftpClientOptions {
   host: string;
@@ -51,6 +54,12 @@ export interface SftpClientOptions {
    */
   timeoutMs?: number;
   /**
+   * Path to aiftp's SFTP host-key pin store. Defaults to
+   * ~/.aiftp/known_hosts. Exposed for tests and controlled environments;
+   * TOFU verification is always enabled.
+   */
+  knownHostsPath?: string;
+  /**
    * Optional logger for verbose debugging.
    */
   onLog?: (line: string) => void;
@@ -58,6 +67,14 @@ export interface SftpClientOptions {
 
 const DEFAULT_PORT = 22;
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+export type SftpHostKeyStatus =
+  | VerifyHostKeyResult
+  | {
+      outcome: 'failed';
+      fingerprint?: string;
+      message: string;
+    };
 
 function mapType(t: string): ListEntry['type'] {
   if (t === 'd') return 'directory';
@@ -177,6 +194,8 @@ function loadSshKey(path: string): Buffer {
  */
 export class SftpClient {
   private client: Sftp | null = null;
+  private hostKeyFailureMessage: string | null = null;
+  private hostKeyStatus: SftpHostKeyStatus | null = null;
 
   constructor(private readonly options: SftpClientOptions) {
     if (!options.host) {
@@ -189,10 +208,29 @@ export class SftpClient {
   }
 
   async connect(): Promise<void> {
+    this.hostKeyFailureMessage = null;
+    this.hostKeyStatus = null;
     const config = this.buildConnectConfig();
     const sftp = new Sftp();
-    await sftp.connect(config);
-    this.client = sftp;
+    try {
+      await sftp.connect(config);
+      this.client = sftp;
+    } catch (error: unknown) {
+      if (this.hostKeyFailureMessage !== null) {
+        throw new FtpConnectionError(
+          `connect(${this.options.host}:${this.options.port ?? DEFAULT_PORT}): ${this.hostKeyFailureMessage}`,
+          { cause: error },
+        );
+      }
+      throw mapSftpError(
+        error,
+        `connect(${this.options.host}:${this.options.port ?? DEFAULT_PORT})`,
+      );
+    }
+  }
+
+  getHostKeyStatus(): SftpHostKeyStatus | null {
+    return this.hostKeyStatus;
   }
 
   /**
@@ -207,6 +245,33 @@ export class SftpClient {
       port: this.options.port ?? DEFAULT_PORT,
       username: this.options.user,
       readyTimeout: this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      hostVerifier: (key: Buffer, callback: (valid: boolean) => void) => {
+        void verifyHostKey({
+          knownHostsPath: this.options.knownHostsPath ?? join(homedir(), '.aiftp', 'known_hosts'),
+          host: this.options.host,
+          port: this.options.port ?? DEFAULT_PORT,
+          key,
+        })
+          .then((result) => {
+            this.hostKeyStatus = result;
+            if (result.outcome === 'mismatch') {
+              this.hostKeyFailureMessage = `host key mismatch (possible MITM): known=${result.knownFingerprint} server=${result.fingerprint}`;
+              callback(false);
+              return;
+            }
+            callback(true);
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            this.hostKeyStatus = {
+              outcome: 'failed',
+              message,
+            };
+            this.hostKeyFailureMessage =
+              'could not persist host key pin (check ~/.aiftp permissions)';
+            callback(false);
+          });
+      },
     };
     if (this.options.sshKeyPath) {
       config.privateKey = loadSshKey(this.options.sshKeyPath);

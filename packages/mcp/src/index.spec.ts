@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type PushResult, VERSION } from '@aiftp-tools/core';
+import {
+  type PushResult,
+  type ResolvedSite,
+  type SiteEntry,
+  SiteRegistry,
+  VERSION,
+} from '@aiftp-tools/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   type AiftpBackupStore,
@@ -29,14 +35,34 @@ type TestSnapshotFile = Awaited<
 
 describe('mcp', () => {
   let cwd: string;
+  let home: string;
+  let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeEach(async () => {
+    originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     cwd = join(tmpdir(), `aiftp-mcp-test-${randomUUID()}`);
+    home = join(tmpdir(), `aiftp-mcp-home-${randomUUID()}`);
     await mkdir(cwd, { recursive: true });
+    await mkdir(home, { recursive: true });
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
   });
 
   afterEach(async () => {
+    if (originalHome === undefined) {
+      Reflect.deleteProperty(process.env, 'HOME');
+    } else {
+      process.env.HOME = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      Reflect.deleteProperty(process.env, 'USERPROFILE');
+    } else {
+      process.env.USERPROFILE = originalUserProfile;
+    }
     await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   });
 
   async function writeConfig(
@@ -277,6 +303,374 @@ describe('mcp', () => {
     expect(parsed.expected_file_count).toBe(2);
     expect(parsed.expected_remote_root).toBe('/public_html');
     expect(parsed.profile).toBe('production');
+  });
+
+  it('aiftp_push_prepare returns a redacted destination for the registered cwd', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () =>
+        createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        }),
+      createSiteRegistry: () => ({
+        list: async () => [
+          {
+            name: 'corporate-site',
+            label: 'Corporate Production',
+            path: cwd,
+            default_profile: 'production',
+          },
+        ],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+    });
+    const parsed = parseText(result) as { destination: Record<string, unknown> };
+
+    expect(parsed.destination).toEqual({
+      site: 'corporate-site',
+      label: 'Corporate Production',
+      profile: 'production',
+      remote_root: '/public_html',
+      server_kind: 'starserver',
+    });
+    expect(parsed.destination).not.toHaveProperty('host');
+    expect(parsed.destination).not.toHaveProperty('user');
+    expect(parsed.destination).not.toHaveProperty('keychain_service');
+    const serialized = JSON.stringify(result.content);
+    expect(serialized).not.toContain('ftp.example.com');
+    expect(serialized).not.toContain('deploy-user');
+    expect(serialized).not.toContain('aiftp:production');
+  });
+
+  it('aiftp_push_prepare accepts expected_site matching the registered site name', async () => {
+    await writeConfig();
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        });
+      },
+      createSiteRegistry: () => ({
+        list: async () => [{ name: 'corporate-site', label: 'Corporate Production', path: cwd }],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'corporate-site',
+    });
+    const parsed = parseText(result) as { ok: boolean; plan_id: string };
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(pushCalls).toBe(1);
+  });
+
+  it('aiftp_push_prepare resolves expected_site from the default site registry', async () => {
+    await writeConfig();
+    await new SiteRegistry().add({
+      name: 'gwco',
+      label: 'Glocalworks Production',
+      path: cwd,
+      default_profile: 'production',
+    });
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        });
+      },
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'gwco',
+    });
+    const parsed = parseText(result) as { ok: boolean; plan_id: string };
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(pushCalls).toBe(1);
+  });
+
+  it('aiftp_push_prepare accepts expected_site matching the registered site label', async () => {
+    await writeConfig();
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        });
+      },
+      createSiteRegistry: () => ({
+        list: async () => [{ name: 'corporate-site', label: 'Corporate Production', path: cwd }],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'Corporate Production',
+    });
+    const parsed = parseText(result) as { ok: boolean; plan_id: string };
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.plan_id).toMatch(/^[0-9a-f-]{20,}$/u);
+    expect(pushCalls).toBe(1);
+  });
+
+  it('aiftp_push_prepare rejects an expected_site mismatch before plan computation', async () => {
+    await writeConfig();
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult();
+      },
+      createSiteRegistry: () => ({
+        list: async () => [{ name: 'corporate-site', label: 'Corporate Production', path: cwd }],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'different-site',
+    });
+    const serialized = JSON.stringify(result.content);
+
+    expect(result.isError).toBe(true);
+    expect(serialized).toContain('site-mismatch');
+    expect(serialized).toContain('corporate-site');
+    expect(serialized).toContain('Corporate Production');
+    expect(serialized).not.toContain('ftp.example.com');
+    expect(serialized).not.toContain('deploy-user');
+    expect(serialized).not.toContain('aiftp:production');
+    expect(serialized).not.toContain('plan_id');
+    expect(pushCalls).toBe(0);
+  });
+
+  it('aiftp_push_prepare rejects expected_site when the cwd is not registered', async () => {
+    await writeConfig();
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult();
+      },
+      createSiteRegistry: () => ({
+        list: async () => [{ name: 'other-site', path: join(cwd, 'other') }],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'corporate-site',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('site-mismatch');
+    expect(JSON.stringify(result.content)).not.toContain('plan_id');
+    expect(pushCalls).toBe(0);
+  });
+
+  it('aiftp_push_prepare keeps destination display available when the registry read fails', async () => {
+    await writeConfig();
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () =>
+        createPushResult({
+          dryRun: true,
+          diff: { added: [], modified: [], removed: [], unchanged: [] },
+          planned: [],
+          nextState: { schema: 1, files: {} },
+        }),
+      createSiteRegistry: () => ({
+        list: async () => {
+          throw new Error('registry unavailable');
+        },
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+    });
+    const parsed = parseText(result) as { destination: Record<string, unknown> };
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.destination).toEqual({
+      profile: 'production',
+      remote_root: '/public_html',
+      server_kind: 'starserver',
+    });
+  });
+
+  it('aiftp_push_prepare rejects expected_site when the registry read fails', async () => {
+    await writeConfig();
+    let pushCalls = 0;
+    const runtime: AiftpMcpRuntime = {
+      runPush: async () => {
+        pushCalls += 1;
+        return createPushResult();
+      },
+      createSiteRegistry: () => ({
+        list: async () => {
+          throw new Error('registry unavailable');
+        },
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_push_prepare', {
+      profile: 'production',
+      expected_site: 'corporate-site',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('site-mismatch');
+    expect(JSON.stringify(result.content)).not.toContain('plan_id');
+    expect(pushCalls).toBe(0);
+  });
+
+  it('aiftp_push_prepare fail-closes expected_site in a two-site registry before side effects', async () => {
+    await writeConfig();
+    const clientBPath = join(cwd, 'client-b');
+    const unregisteredPath = join(cwd, 'unregistered');
+    await mkdir(clientBPath, { recursive: true });
+    await mkdir(unregisteredPath, { recursive: true });
+    await writeFile(
+      join(unregisteredPath, '.aiftp.toml'),
+      [
+        'schema = 1',
+        '',
+        '[profile.production]',
+        'host = "ftp.unregistered-secret.example.com"',
+        'port = 21',
+        'protocol = "ftps"',
+        'user = "unregistered-user"',
+        'remote_root = "/public_html"',
+        'local_root = "."',
+        'keychain_service = "aiftp:unregistered-secret"',
+        'server_kind = "starserver"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const registryEntries: SiteEntry[] = [
+      { name: 'gwco', label: 'example-corp.co.jp', path: cwd },
+      { name: 'client-b', label: 'client-b.example', path: clientBPath },
+    ];
+
+    let matchPushCalls = 0;
+    const matchResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async () => {
+            matchPushCalls += 1;
+            return createPushResult({
+              dryRun: true,
+              diff: { added: [], modified: [], removed: [], unchanged: [] },
+              planned: [],
+              nextState: { schema: 1, files: {} },
+            });
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'gwco',
+      },
+    );
+    const matchParsed = parseText(matchResult) as { ok: boolean; destination: unknown };
+    expect(matchResult.isError).not.toBe(true);
+    expect(matchParsed.ok).toBe(true);
+    expect(matchParsed.destination).toMatchObject({ site: 'gwco', label: 'example-corp.co.jp' });
+    expect(matchPushCalls).toBe(1);
+
+    let mismatchPushCalls = 0;
+    const mismatchResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async () => {
+            mismatchPushCalls += 1;
+            return createPushResult();
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'client-b',
+      },
+    );
+    const mismatchSerialized = JSON.stringify(mismatchResult.content);
+    expect(mismatchResult.isError).toBe(true);
+    expect(mismatchSerialized).toContain('site-mismatch');
+    expect(mismatchSerialized).toContain('gwco');
+    expect(mismatchSerialized).toContain('example-corp.co.jp');
+    expect(mismatchSerialized).not.toContain('plan_id');
+    expect(mismatchSerialized).not.toContain('ftp.example.com');
+    expect(mismatchSerialized).not.toContain('deploy-user');
+    expect(mismatchSerialized).not.toContain('aiftp:production');
+    expect(mismatchPushCalls).toBe(0);
+
+    let unregisteredPushCalls = 0;
+    const unregisteredResult = await callAiftpTool(
+      createAiftpMcp({
+        cwd: unregisteredPath,
+        runtime: {
+          runPush: async () => {
+            unregisteredPushCalls += 1;
+            return createPushResult();
+          },
+          createSiteRegistry: () => ({
+            list: async () => registryEntries,
+          }),
+        },
+      }),
+      'aiftp_push_prepare',
+      {
+        profile: 'production',
+        expected_site: 'gwco',
+      },
+    );
+    const unregisteredSerialized = JSON.stringify(unregisteredResult.content);
+    expect(unregisteredResult.isError).toBe(true);
+    expect(unregisteredSerialized).toContain('site-mismatch');
+    expect(unregisteredSerialized).toContain('current working directory is not registered');
+    expect(unregisteredSerialized).not.toContain('plan_id');
+    expect(unregisteredSerialized).not.toContain('ftp.unregistered-secret.example.com');
+    expect(unregisteredSerialized).not.toContain('unregistered-user');
+    expect(unregisteredSerialized).not.toContain('aiftp:unregistered-secret');
+    expect(unregisteredPushCalls).toBe(0);
   });
 
   it('aiftp_push_prepare evicts the oldest outstanding plan when the store reaches its cap', async () => {
@@ -757,6 +1151,146 @@ describe('mcp', () => {
     expect(entry.user).toBeUndefined();
     expect(entry.remote_root).toBeUndefined();
     expect(entry.keychain_service).toBeUndefined();
+  });
+
+  it('aiftp_sites_list returns resolved registered site summaries', async () => {
+    const entries: readonly SiteEntry[] = [
+      {
+        name: 'corporate',
+        label: 'Corporate site',
+        path: '/srv/corporate',
+        default_profile: 'production',
+      },
+      {
+        name: 'campaign',
+        path: '/srv/campaign',
+      },
+    ];
+    const resolvedByName: Readonly<Record<string, ResolvedSite>> = {
+      corporate: {
+        ...entries[0],
+        name: 'corporate',
+        path: '/srv/corporate',
+        profiles: ['production', 'staging'],
+        protocol: 'ftps',
+        credentialsStatus: 'present',
+        lastPushAt: '2026-07-06T01:02:03.000Z',
+        health: 'ok',
+      },
+      campaign: {
+        name: 'campaign',
+        path: '/srv/campaign',
+        profiles: [],
+        credentialsStatus: 'unknown',
+        health: 'missing',
+      },
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => entries }),
+        resolveSite: async (entry) => resolvedByName[entry.name] as ResolvedSite,
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+
+    expect(parseText(result)).toEqual({
+      ok: true,
+      sites: [
+        {
+          name: 'corporate',
+          label: 'Corporate site',
+          path: '/srv/corporate',
+          profiles: ['production', 'staging'],
+          default_profile: 'production',
+          protocol: 'ftps',
+          credentialsStatus: 'present',
+          lastPushAt: '2026-07-06T01:02:03.000Z',
+          health: 'ok',
+        },
+        {
+          name: 'campaign',
+          path: '/srv/campaign',
+          profiles: [],
+          credentialsStatus: 'unknown',
+          health: 'missing',
+        },
+      ],
+    });
+  });
+
+  it('aiftp_sites_list returns REDACTED summaries without config or credential fields', async () => {
+    const entry: SiteEntry = { name: 'secure', path: '/srv/secure' };
+    const resolvedWithSecrets = {
+      ...entry,
+      profiles: ['production'],
+      protocol: 'sftp' as const,
+      credentialsStatus: 'present' as const,
+      health: 'ok' as const,
+      host: 'ftp.example.com',
+      user: 'deploy-user',
+      port: 22,
+      remote_root: '/public_html',
+      keychain_service: 'aiftp:production',
+      password: 'must-not-leak',
+      account: 'deploy-user',
+      ssh_key_path: '/Users/example/.ssh/id_ed25519',
+      ftps_mode: 'explicit',
+      rawProfile: { host: 'nested.example.com' },
+    };
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => [entry] }),
+        resolveSite: async () => resolvedWithSecrets,
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+    const rawText = result.content[0]?.text ?? '';
+    const parsed = JSON.parse(rawText) as { sites: Array<Record<string, unknown>> };
+    const site = parsed.sites[0] as Record<string, unknown>;
+
+    for (const key of [
+      'host',
+      'user',
+      'port',
+      'remote_root',
+      'keychain_service',
+      'password',
+      'account',
+      'ssh_key_path',
+      'ftps_mode',
+      'rawProfile',
+    ]) {
+      expect(site[key]).toBeUndefined();
+    }
+    expect(rawText).not.toMatch(
+      /keychain_service|remote_root|ssh_key_path|ftps_mode|rawProfile|"host"|"user"|"port"|"password"|"account"/u,
+    );
+  });
+
+  it('aiftp_sites_list returns an empty array for an empty registry', async () => {
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        createSiteRegistry: () => ({ list: async () => [] }),
+        resolveSite: async () => {
+          throw new Error('resolveSite must not run for an empty registry');
+        },
+      },
+    });
+
+    const result = await callAiftpTool(app, 'aiftp_sites_list', {});
+
+    expect(parseText(result)).toEqual({ ok: true, sites: [] });
+  });
+
+  it('exposes aiftp_sites_list read-only tool', () => {
+    const app = createAiftpMcp({ cwd });
+
+    expect(app.tools).toContain('aiftp_sites_list');
   });
 
   it('exposes aiftp_init_template_list read-only tool', () => {
@@ -1729,6 +2263,44 @@ describe('mcp', () => {
     expect(parsed.planned).toEqual(['index.html']);
     expect(parsed.skipped.map((s) => s.path).sort()).toEqual(['.env', 'wp-config.php']);
     expect(parsed.skipped.every((s) => s.status === 'skipped-hard-exclude')).toBe(true);
+  });
+
+  it('aiftp_rollback_prepare returns a redacted destination for the registered cwd', async () => {
+    await writeConfig();
+    const { runtime: rollbackRuntime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const runtime: AiftpMcpRuntime = {
+      ...rollbackRuntime,
+      createSiteRegistry: () => ({
+        list: async () => [
+          {
+            name: 'corporate-site',
+            label: 'Corporate Production',
+            path: cwd,
+            default_profile: 'production',
+          },
+        ],
+      }),
+    };
+
+    const result = await callAiftpTool(createAiftpMcp({ cwd, runtime }), 'aiftp_rollback_prepare', {
+      steps: 1,
+    });
+    const parsed = parseText(result) as { destination: Record<string, unknown> };
+
+    expect(parsed.destination).toEqual({
+      site: 'corporate-site',
+      label: 'Corporate Production',
+      profile: 'production',
+      remote_root: '/public_html',
+      server_kind: 'starserver',
+    });
+    expect(parsed.destination).not.toHaveProperty('host');
+    expect(parsed.destination).not.toHaveProperty('user');
+    expect(parsed.destination).not.toHaveProperty('keychain_service');
+    const serialized = JSON.stringify(result.content);
+    expect(serialized).not.toContain('ftp.example.com');
+    expect(serialized).not.toContain('deploy-user');
+    expect(serialized).not.toContain('aiftp:production');
   });
 
   it('aiftp_rollback_confirm uploads files matching the plan; bad token refused', async () => {

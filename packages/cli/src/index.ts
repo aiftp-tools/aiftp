@@ -18,6 +18,9 @@ import {
   type RollbackResult,
   type RollbackUploader,
   SftpClient,
+  type SiteEntry,
+  SiteRegistry,
+  SiteRegistryDuplicateError,
   type SnapshotMeta,
   type StatusOptions,
   type StatusResult,
@@ -35,6 +38,7 @@ import {
   createWatchDebouncer,
   deletePassword,
   extractHookPaths,
+  formatDestinationBanner,
   generateKey,
   getPassword,
   getTemplate,
@@ -67,8 +71,18 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
-import { buildInitFieldsWithTemplate } from './init-flow.js';
+import {
+  type InheritedSections,
+  InitFromInvalidError,
+  InitFromNotFoundError,
+  buildInitFieldsFromInherited,
+  buildInitFieldsWithTemplate,
+  buildKeychainServiceInitial,
+  loadInitInheritance,
+  resolveInitSiteName,
+} from './init-flow.js';
 import { PromptFlow } from './prompt-framework/prompt-flow.js';
+import { type SitesCommandDeps, registerSitesCommand } from './sites-command.js';
 
 export { VERSION };
 
@@ -140,6 +154,7 @@ export interface CliRollbackOptions {
 interface InitCommandOptions {
   force?: boolean;
   template?: string;
+  from?: string;
 }
 
 interface ManagedUploader {
@@ -154,6 +169,7 @@ export interface CliOptions {
   runtime?: CliRuntime;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
+  sites?: Pick<SitesCommandDeps, 'createRegistry' | 'resolveSite'>;
 }
 
 interface InitAnswers {
@@ -166,6 +182,8 @@ interface InitAnswers {
   localRoot: string;
   keychainService: string;
   serverKind: 'starserver' | 'lolipop' | 'sakura' | 'xserver' | 'generic';
+  ftpsMode?: 'explicit' | 'implicit';
+  passiveMode?: boolean;
   password: string;
   consent: boolean;
 }
@@ -197,6 +215,37 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function resolveDestinationBanner(
+  cwd: string,
+  profileName: string,
+  profile: {
+    protocol: string;
+    remote_root: string;
+    local_root: string;
+    server_kind: string;
+  },
+  registry?: { list(): Promise<readonly SiteEntry[]> },
+): Promise<string> {
+  let site: SiteEntry | undefined;
+  if (registry) {
+    try {
+      site = (await registry.list()).find((entry) => resolve(entry.path) === resolve(cwd));
+    } catch {
+      site = undefined;
+    }
+  }
+
+  return formatDestinationBanner({
+    profile: profileName,
+    protocol: profile.protocol,
+    remoteRoot: profile.remote_root,
+    serverKind: profile.server_kind,
+    localRoot: profile.local_root,
+    siteName: site?.name,
+    label: site?.label,
+  });
+}
+
 function quote(value: string): string {
   return JSON.stringify(value);
 }
@@ -205,7 +254,111 @@ function renderStringArray(values: readonly string[]): string {
   return `[${values.map((value) => quote(value)).join(', ')}]`;
 }
 
-function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
+type TomlValue = string | number | boolean | readonly string[] | readonly number[];
+
+function renderTomlValue(value: TomlValue): string {
+  if (typeof value === 'string') return quote(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => (typeof item === 'string' ? quote(item) : item)).join(', ')}]`;
+  }
+  return String(value);
+}
+
+function appendTomlSection(
+  lines: string[],
+  name: string,
+  fields: ReadonlyArray<readonly [string, TomlValue | undefined]>,
+): void {
+  const defined = fields.filter(
+    (entry): entry is readonly [string, TomlValue] => entry[1] !== undefined,
+  );
+  if (defined.length === 0) return;
+  lines.push(
+    `[${name}]`,
+    ...defined.map(([key, value]) => `${key} = ${renderTomlValue(value)}`),
+    '',
+  );
+}
+
+function appendInheritedSections(
+  lines: string[],
+  inherited: InheritedSections | undefined,
+  quirks: InheritedSections['quirks'],
+  starserver: boolean,
+): void {
+  appendTomlSection(lines, 'safety', [
+    ['require_tls', inherited?.safety?.require_tls],
+    ['verify_certificate', inherited?.safety?.verify_certificate],
+    ['confirm_on_delete', inherited?.safety?.confirm_on_delete],
+    ['max_files_per_push', inherited?.safety?.max_files_per_push],
+    ['max_total_size_mb', inherited?.safety?.max_total_size_mb],
+    [
+      'require_full_backup_before_first_push',
+      inherited?.safety?.require_full_backup_before_first_push,
+    ],
+    ['warn_on_prod_profile', inherited?.safety?.warn_on_prod_profile],
+    ['prod_profile_patterns', inherited?.safety?.prod_profile_patterns],
+    ['syntax_check', inherited?.safety?.syntax_check],
+    ['server_lock', inherited?.safety?.server_lock],
+    ['lock_timeout_min', inherited?.safety?.lock_timeout_min],
+    ['verify_after_upload', inherited?.safety?.verify_after_upload],
+    ['deletion_policy', inherited?.safety?.deletion_policy],
+  ]);
+  appendTomlSection(lines, 'backup', [
+    ['auto_before_push', inherited?.backup?.auto_before_push],
+    ['retention_count', inherited?.backup?.retention_count],
+    ['max_disk_mb', inherited?.backup?.max_disk_mb],
+    ['on_limit_exceeded', inherited?.backup?.on_limit_exceeded],
+    ['full_backup_on_first_push', inherited?.backup?.full_backup_on_first_push],
+    ['full_backup_schedule', inherited?.backup?.full_backup_schedule],
+    ['full_backup_retention', inherited?.backup?.full_backup_retention],
+    ['encrypt', inherited?.backup?.encrypt],
+    ['encryption_algorithm', inherited?.backup?.encryption_algorithm],
+    ['key_storage', inherited?.backup?.key_storage],
+    ['cloud_backup', inherited?.backup?.cloud_backup],
+  ]);
+  appendTomlSection(lines, 'backup.hard_exclude', [
+    ['additional_patterns', inherited?.backup?.hard_exclude?.additional_patterns],
+  ]);
+  appendTomlSection(lines, 'connection', [
+    ['max_concurrent', inherited?.connection?.max_concurrent],
+    ['throttle_per_minute', inherited?.connection?.throttle_per_minute],
+    ['retry_count', inherited?.connection?.retry_count],
+    ['retry_backoff_ms', inherited?.connection?.retry_backoff_ms],
+    ['timeout_ms', inherited?.connection?.timeout_ms],
+    ['resume_partial_upload', inherited?.connection?.resume_partial_upload],
+  ]);
+  appendTomlSection(lines, 'encoding', [['file_name', inherited?.encoding?.file_name]]);
+  if (starserver) {
+    lines.push(
+      '# Star Server quirk: certificate CN is *.star.ne.jp while customer',
+      '# hosts are usually *.stars.ne.jp, so TLS hostname verification',
+      '# fails by default. We disable hostname-only checking here. aiftp',
+      '# still requires a valid certificate chain.',
+    );
+  }
+  appendTomlSection(lines, 'quirks', [
+    ['ignore_pasv_address', quirks?.ignore_pasv_address],
+    ['use_mlsd', quirks?.use_mlsd],
+    ['tls_check_hostname', quirks?.tls_check_hostname],
+    ['noop_interval_sec', quirks?.noop_interval_sec],
+  ]);
+  appendTomlSection(lines, 'walk', [['follow_symlinks', inherited?.walk?.follow_symlinks]]);
+  appendTomlSection(lines, 'preflight', [
+    ['php_lint', inherited?.preflight?.php_lint],
+    ['json_check', inherited?.preflight?.json_check],
+  ]);
+  appendTomlSection(lines, 'exclude', [
+    ['patterns', inherited?.exclude?.patterns],
+    ['use_defaults', inherited?.exclude?.use_defaults],
+  ]);
+}
+
+function renderConfig(
+  answers: InitAnswers,
+  template?: TemplateConfig,
+  inherited?: InheritedSections,
+): string {
   const defaults = template?.defaults;
   // v0.11 Pillar β review Phase 2-1: the user's localRoot answer always wins.
   // The template default is wired into init-flow.ts as the field's initial
@@ -223,6 +376,8 @@ function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
     `local_root = ${quote(answers.localRoot)}`,
     `keychain_service = ${quote(answers.keychainService)}`,
     `server_kind = ${quote(answers.serverKind)}`,
+    ...(answers.ftpsMode === undefined ? [] : [`ftps_mode = ${quote(answers.ftpsMode)}`]),
+    ...(answers.passiveMode === undefined ? [] : [`passive_mode = ${answers.passiveMode}`]),
     '',
   ];
 
@@ -257,22 +412,11 @@ function renderConfig(answers: InitAnswers, template?: TemplateConfig): string {
     }
   }
 
-  if (answers.serverKind === 'starserver') {
-    // Star Server presents `*.star.ne.jp` cert for `*.stars.ne.jp` hosts.
-    // We pre-set the documented quirk so the operator does not have to
-    // hand-edit the file after the first hostname-mismatch error. The
-    // CLI emits a stderr warning when this happens so the trade-off is
-    // explicit, not silent.
-    lines.push(
-      '[quirks]',
-      '# Star Server quirk: certificate CN is *.star.ne.jp while customer',
-      '# hosts are usually *.stars.ne.jp, so TLS hostname verification',
-      '# fails by default. We disable hostname-only checking here. aiftp',
-      '# still requires a valid certificate chain.',
-      'tls_check_hostname = false',
-      '',
-    );
-  }
+  const effectiveQuirks =
+    answers.serverKind === 'starserver'
+      ? { ...inherited?.quirks, tls_check_hostname: false }
+      : inherited?.quirks;
+  appendInheritedSections(lines, inherited, effectiveQuirks, answers.serverKind === 'starserver');
 
   return lines.join('\n');
 }
@@ -435,6 +579,7 @@ async function editInitField(
   fieldIdx: number,
   prompt: CliPrompt,
   stderr: (line: string) => void,
+  siteName?: string,
 ): Promise<InitAnswers> {
   const field = INIT_SUMMARY_FIELDS[fieldIdx];
   if (!field) {
@@ -557,7 +702,7 @@ async function editInitField(
           // v0.10.4 (Codex Phase 2 S1): default to aiftp:${profile} derived from
           // the *current* profile name (per spec §4.4), not the previously-saved
           // keychain service. Makes #8 obvious to re-default after #1 changed.
-          initial: `aiftp:${current.profile}`,
+          initial: buildKeychainServiceInitial(siteName, current.profile),
           validate: textValidate('Keychain service'),
         },
       ];
@@ -676,6 +821,7 @@ async function runInitSummaryReview(
   initial: InitAnswers,
   prompt: CliPrompt,
   stderr: (line: string) => void,
+  siteName?: string,
 ): Promise<InitAnswers> {
   // Codex Should-add #24: non-TTY environment must fail clearly, not block on stdin.
   // Codex Phase 2 C3: \`isTTY !== true\` catches both \`false\` and \`undefined\`
@@ -712,7 +858,7 @@ async function runInitSummaryReview(
     }
 
     const oldProfile = answers.profile;
-    answers = await editInitField(answers, choice.fieldIndex - 1, prompt, stderr);
+    answers = await editInitField(answers, choice.fieldIndex - 1, prompt, stderr, siteName);
     if (choice.fieldIndex === 1 && answers.profile !== oldProfile) {
       stderr(
         `Profile name changed from "${oldProfile}" to "${answers.profile}". Keychain service (#8) is NOT auto-updated; edit it separately if needed.\n`,
@@ -771,6 +917,14 @@ function parseInitAnswers(raw: Record<string, unknown>): InitAnswers {
     localRoot: sanitizeFieldInput(raw.localRoot, 'localRoot'),
     keychainService: sanitizeFieldInput(raw.keychainService, 'keychainService'),
     serverKind: requireString(raw.serverKind, 'serverKind') as InitAnswers['serverKind'],
+    ...(raw.ftpsMode === undefined
+      ? {}
+      : {
+          ftpsMode: requireString(raw.ftpsMode, 'ftpsMode') as NonNullable<InitAnswers['ftpsMode']>,
+        }),
+    ...(raw.passiveMode === undefined
+      ? {}
+      : { passiveMode: requireBoolean(raw.passiveMode, 'passiveMode') }),
     password: pw,
     consent: requireBoolean(raw.consent, 'consent'),
   };
@@ -1136,6 +1290,7 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
         }
       },
       hasKeychainEntry: (service, account) => hasPassword(service, account),
+      listSites: async () => new SiteRegistry().list(),
       getKeychainPassword: async (service, account) => {
         try {
           return await getPassword(service, account);
@@ -1330,29 +1485,39 @@ async function defaultRunDoctor(context: CliDoctorContext): Promise<DoctorReport
           await client.connect();
           try {
             await client.list(profile.remote_root);
+            const hostKeyStatus = client.getHostKeyStatus();
             return {
               portReachable: true,
               keyPermissionsOk,
               keyMode,
               handshakeOk: true,
+              hostKeyVerified:
+                hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
               remoteRootOk: true,
             };
           } catch (error: unknown) {
+            const hostKeyStatus = client.getHostKeyStatus();
             return {
               portReachable: true,
               keyPermissionsOk,
               keyMode,
               handshakeOk: true,
+              hostKeyVerified:
+                hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
               remoteRootOk: false,
               errorMessage: error instanceof Error ? error.message : String(error),
             };
           }
         } catch (error: unknown) {
+          const hostKeyStatus = client.getHostKeyStatus();
           return {
             portReachable: true,
             keyPermissionsOk,
             keyMode,
             handshakeOk: false,
+            hostKeyVerified:
+              hostKeyStatus?.outcome === 'pinned' || hostKeyStatus?.outcome === 'matched',
+            hostKeyChanged: hostKeyStatus?.outcome === 'mismatch',
             remoteRootOk: false,
             errorMessage: error instanceof Error ? error.message : String(error),
           };
@@ -1586,6 +1751,7 @@ export function createCli(options: CliOptions = {}): Command {
   const runtime = options.runtime ?? {};
   const stdout = options.stdout ?? ((line: string) => console.log(line));
   const stderr = options.stderr ?? ((line: string) => console.error(line));
+  const createSiteRegistry = options.sites?.createRegistry ?? (() => new SiteRegistry());
 
   const program = new Command();
   program.name('aiftp').description('AI-first FTP/FTPS deploy tool').version(VERSION);
@@ -1595,12 +1761,28 @@ export function createCli(options: CliOptions = {}): Command {
     writeErr: (text) => stderr(text.trimEnd()),
   });
 
+  registerSitesCommand(program, {
+    cwd,
+    stdout,
+    stderr,
+    keychain,
+    runDoctor: runtime.runDoctor ?? defaultRunDoctor,
+    ...options.sites,
+  });
+
   program
     .command('init')
     .description('Create .aiftp.toml and register credentials')
     .option('-f, --force', 'overwrite an existing .aiftp.toml')
     .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
+    .option('--from <ref>', 'inherit defaults and customized sections from a site or path')
     .action(async (cmd: InitCommandOptions) => {
+      if (cmd.from !== undefined && cmd.template !== undefined) {
+        const message = 'init --from and --template cannot be used together.';
+        stderr(message);
+        throw new CommanderError(1, 'aiftp.from-template-conflict', message);
+      }
+
       if (cmd.template === 'list') {
         for (const template of listTemplates()) {
           stderr(`${template.id} - ${template.description}`);
@@ -1618,6 +1800,32 @@ export function createCli(options: CliOptions = {}): Command {
         throw new CommanderError(1, 'aiftp.unknown-template', message);
       }
 
+      const registry = createSiteRegistry();
+      const initSiteName = await resolveInitSiteName({
+        cwd,
+        registry,
+      });
+
+      let inheritance: Awaited<ReturnType<typeof loadInitInheritance>> | undefined;
+      if (cmd.from !== undefined) {
+        try {
+          inheritance = await loadInitInheritance(cmd.from, {
+            cwd,
+            registry,
+          });
+        } catch (error: unknown) {
+          if (error instanceof InitFromNotFoundError) {
+            stderr(error.message);
+            throw new CommanderError(1, 'aiftp.from-not-found', error.message);
+          }
+          if (error instanceof InitFromInvalidError) {
+            stderr(error.message);
+            throw new CommanderError(1, 'aiftp.from-invalid', error.message);
+          }
+          throw error;
+        }
+      }
+
       const configPath = join(cwd, '.aiftp.toml');
       if ((await exists(configPath)) && !cmd.force) {
         throw new Error('.aiftp.toml already exists. Use --force to overwrite.');
@@ -1628,7 +1836,9 @@ export function createCli(options: CliOptions = {}): Command {
       // v0.10.4 summary review (C). Field definitions live in init-flow.ts
       // so they can be reused / extended for templates (v0.11 Pillar β).
       const flowResult = await new PromptFlow(
-        buildInitFieldsWithTemplate(template !== undefined, template),
+        inheritance
+          ? buildInitFieldsFromInherited(inheritance.initials, initSiteName)
+          : buildInitFieldsWithTemplate(template !== undefined, template, undefined, initSiteName),
         {
           prompt: (question) => prompt(question as PromptQuestion),
           stderr,
@@ -1677,7 +1887,7 @@ export function createCli(options: CliOptions = {}): Command {
       }
 
       // v0.10.4 (#6/#7/#8 reflective patch, Codex Phase 1 review): summary review
-      answers = await runInitSummaryReview(answers, prompt, stderr);
+      answers = await runInitSummaryReview(answers, prompt, stderr, initSiteName);
 
       if (answers.remoteRoot.startsWith('/')) {
         stderr(
@@ -1691,7 +1901,7 @@ export function createCli(options: CliOptions = {}): Command {
         );
       }
 
-      await writeFile(configPath, renderConfig(answers, selectedTemplate), {
+      await writeFile(configPath, renderConfig(answers, selectedTemplate, inheritance?.sections), {
         encoding: 'utf8',
         mode: 0o600,
       });
@@ -1718,6 +1928,32 @@ export function createCli(options: CliOptions = {}): Command {
           answers.profile,
           generateKey().toString('base64'),
         );
+      }
+
+      if (initSiteName.trim().length > 0) {
+        const registration = await prompt([
+          {
+            type: 'confirm',
+            name: 'registerSite',
+            message: 'Register this site in the global registry? (Y/n)',
+            initial: true,
+          },
+        ]);
+        if (registration.registerSite !== false) {
+          try {
+            await registry.add({
+              name: initSiteName,
+              path: resolve(cwd),
+              default_profile: answers.profile,
+            });
+          } catch (error: unknown) {
+            if (error instanceof SiteRegistryDuplicateError) {
+              stderr(`Site ${initSiteName} is already registered; continuing.`);
+            } else {
+              throw error;
+            }
+          }
+        }
       }
 
       stdout(`Initialized aiftp profile ${answers.profile}`);
@@ -1797,6 +2033,13 @@ export function createCli(options: CliOptions = {}): Command {
         if (!profile) {
           throw new Error(`Profile not found: ${cmd.profile}`);
         }
+        const banner = await resolveDestinationBanner(
+          cwd,
+          cmd.profile,
+          profile,
+          createSiteRegistry(),
+        );
+        stderr(banner);
         // v0.6.0 #7: Always surface the deploy target before any FTP
         // activity. The point is that the operator (or AI agent) reading
         // the terminal can spot a typo'd profile or wrong host before
@@ -2734,9 +2977,17 @@ export function createCli(options: CliOptions = {}): Command {
             'Could not resolve a default profile. Pass --profile, set AIFTP_PROFILE, or run `aiftp profile use <name>`.',
           );
         }
-        if (!config.profile[profileName]) {
+        const profile = config.profile[profileName];
+        if (!profile) {
           throw new Error(`Profile not found: ${profileName}`);
         }
+        const banner = await resolveDestinationBanner(
+          cwd,
+          profileName,
+          profile,
+          createSiteRegistry(),
+        );
+        stderr(banner);
         const dryRun = cmd.dryRun === true;
         const cliOptions: CliRollbackOptions = {
           cwd,

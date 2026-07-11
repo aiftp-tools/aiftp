@@ -134,6 +134,50 @@ describe('runDoctor: config-only checks', () => {
     expect(k?.status).toBe('fail');
     expect(k?.recommendation).toMatch(/aiftp auth set/);
   });
+
+  it('warns when a site-generic keychain service is shared by multiple sites with the same default profile', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:production' }),
+      listSites: async () => [
+        { name: 'alpha', path: '/sites/alpha', default_profile: 'production' },
+        { name: 'beta', path: '/sites/beta', default_profile: 'production' },
+      ],
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    const collision = report.results.find((r) => r.id === 'keychain-collision');
+    expect(collision?.status).toBe('warn');
+    expect(collision?.message).toMatch(/multiple sites/i);
+    expect(collision?.recommendation).toMatch(/aiftp:<site>-<profile>/);
+  });
+
+  it('passes the keychain collision check for site-scoped service names', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:alpha-production' }),
+      listSites: async () => [
+        { name: 'alpha', path: '/sites/alpha', default_profile: 'production' },
+        { name: 'beta', path: '/sites/beta', default_profile: 'production' },
+      ],
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    expect(report.results.find((r) => r.id === 'keychain-collision')?.status).toBe('pass');
+  });
+
+  it('passes the keychain collision check when site listing is unavailable', async () => {
+    const deps: DoctorDeps = {
+      ...happyDeps(),
+      readConfig: async () => makeConfig({ keychain_service: 'aiftp:production' }),
+    };
+
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    expect(report.results.find((r) => r.id === 'keychain-collision')?.status).toBe('pass');
+  });
 });
 
 describe('runDoctor: network checks', () => {
@@ -367,16 +411,12 @@ describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
     };
   }
 
-  it('emits the 4 SFTP checks (handshake = warn, others = pass) when probeSftp reports happy path', async () => {
-    // v0.11 security review: `sftp-handshake` reports `warn` (not `pass`)
-    // on success because the host key was not verified against
-    // known_hosts. The warning surfaces the v0.11 limitation every
-    // time `aiftp doctor` runs. v0.12 will upgrade this to `pass`
-    // once TOFU pinning lands.
+  it('emits SFTP checks and keeps handshake warn when host key is not yet verified', async () => {
     const report = await runDoctor(sftpHappyDeps(), { profile: 'production' });
     const ids = report.results.map((r) => r.id);
     expect(ids).toContain('ssh-port-reachable');
     expect(ids).toContain('ssh-key-permissions');
+    expect(ids).toContain('sftp-host-key');
     expect(ids).toContain('sftp-handshake');
     expect(ids).toContain('sftp-remote-root');
     for (const id of ['ssh-port-reachable', 'ssh-key-permissions', 'sftp-remote-root']) {
@@ -386,6 +426,51 @@ describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
     expect(handshake?.status).toBe('warn');
     expect(handshake?.message).toMatch(/host key.*not verified|known_hosts/i);
     expect(handshake?.recommendation).toMatch(/fingerprint|TOFU|v0\.12/i);
+    const hostKey = report.results.find((r) => r.id === 'sftp-host-key');
+    expect(hostKey?.status).toBe('warn');
+    expect(hostKey?.message).toMatch(/not yet pinned|out-of-band/i);
+  });
+
+  it('passes sftp-host-key and sftp-handshake when the host key is verified', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: true,
+        keyMode: '0o600',
+        handshakeOk: true,
+        remoteRootOk: true,
+        hostKeyVerified: true,
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    expect(report.results.find((r) => r.id === 'sftp-host-key')?.status).toBe('pass');
+    expect(report.results.find((r) => r.id === 'sftp-host-key')?.message).toMatch(
+      /pinned.*known_hosts/i,
+    );
+    expect(report.results.find((r) => r.id === 'sftp-handshake')?.status).toBe('pass');
+    expect(report.results.find((r) => r.id === 'sftp-handshake')?.message).not.toMatch(/v0\.11/i);
+  });
+
+  it('fails sftp-host-key when the host key changed', async () => {
+    const deps: DoctorDeps = {
+      ...sftpHappyDeps(),
+      probeSftp: async () => ({
+        portReachable: true,
+        keyPermissionsOk: true,
+        keyMode: '0o600',
+        handshakeOk: false,
+        remoteRootOk: false,
+        hostKeyChanged: true,
+        errorMessage: 'host key mismatch (possible MITM)',
+      }),
+    };
+    const report = await runDoctor(deps, { profile: 'production' });
+
+    const hostKey = report.results.find((r) => r.id === 'sftp-host-key');
+    expect(hostKey?.status).toBe('fail');
+    expect(hostKey?.message).toMatch(/mismatch|MITM/i);
   });
 
   it('marks ftp-* checks as skip on a sftp profile', async () => {
@@ -404,6 +489,7 @@ describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
     for (const id of [
       'ssh-port-reachable',
       'ssh-key-permissions',
+      'sftp-host-key',
       'sftp-handshake',
       'sftp-remote-root',
     ]) {
@@ -472,6 +558,7 @@ describe('runDoctor: SFTP probe checks (v0.11 Pillar γ Task 27)', () => {
     for (const id of [
       'ssh-port-reachable',
       'ssh-key-permissions',
+      'sftp-host-key',
       'sftp-handshake',
       'sftp-remote-root',
     ]) {

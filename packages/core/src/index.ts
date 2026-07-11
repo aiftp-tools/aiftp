@@ -166,6 +166,8 @@ export {
   type UploadedFileResult,
 } from './deploy.js';
 
+export * from './deploy/destination-banner.js';
+
 export {
   decryptBuffer,
   decryptFile,
@@ -224,7 +226,15 @@ export {
   type UploadResult,
 } from './ftp-client.js';
 
-export { SftpClient, type SftpClientOptions } from './sftp-client.js';
+export { SftpClient, type SftpClientOptions, type SftpHostKeyStatus } from './sftp-client.js';
+export {
+  fingerprintHostKey,
+  hostId,
+  parseKnownHosts,
+  serializeEntry,
+  verifyHostKey,
+  type VerifyHostKeyResult,
+} from './sftp-known-hosts.js';
 export {
   buildDeployClientOptions,
   createDeployClient,
@@ -247,3 +257,8 @@ export {
   type PhpLintResult,
   type PhpLintRunner,
 } from './preflight.js';
+
+// v0.12 F1: site registry + live resolution layer. Re-export the curated
+// sites barrel so the CLI (`aiftp sites`) and MCP (`aiftp_sites_list`)
+// consume SiteRegistry / resolveSite / SiteEntry from @aiftp-tools/core.
+export * from './sites/index.js';

@@ -222,21 +222,21 @@ describe('PromptFlow', () => {
   });
 
   describe('edge cases', () => {
-    it('forwards select.choices and the initial value to the prompt library', async () => {
+    it('maps a select string initial to the matching prompt choice index', async () => {
       const fields: PromptField[] = [
         {
           name: 'protocol',
           label: 'protocol',
           type: 'select',
-          initial: 'ftps',
+          initial: 'sftp',
           choices: [
             { title: 'FTPS', value: 'ftps' },
-            { title: 'FTP', value: 'ftp' },
             { title: 'SFTP', value: 'sftp' },
+            { title: 'FTP', value: 'ftp' },
           ],
         },
       ];
-      const prompt = vi.fn().mockResolvedValueOnce({ protocol: 'ftps' });
+      const prompt = vi.fn().mockResolvedValueOnce({ protocol: 'sftp' });
       await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
       expect(prompt).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -244,9 +244,67 @@ describe('PromptFlow', () => {
           type: 'select',
           message: 'protocol',
           choices: fields[0].choices,
-          initial: 'ftps',
+          initial: 1,
         }),
       );
+    });
+
+    it('falls back to the first select choice when a string initial is unknown', async () => {
+      const fields: PromptField[] = [
+        {
+          name: 'protocol',
+          label: 'protocol',
+          type: 'select',
+          initial: 'scp',
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'SFTP', value: 'sftp' },
+          ],
+        },
+      ];
+      const prompt = vi.fn().mockResolvedValueOnce({ protocol: 'ftps' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ initial: 0 }));
+    });
+
+    it('maps a function-form select initial after resolving it with prior answers', async () => {
+      const fields: PromptField[] = [
+        { name: 'preferredProtocol', label: 'preferredProtocol', type: 'text' },
+        {
+          name: 'protocol',
+          label: 'protocol',
+          type: 'select',
+          initial: (answers) => String(answers.preferredProtocol ?? 'ftps'),
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'SFTP', value: 'sftp' },
+          ],
+        },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ preferredProtocol: 'sftp' })
+        .mockResolvedValueOnce({ protocol: 'sftp' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenLastCalledWith(expect.objectContaining({ initial: 1 }));
+    });
+
+    it('keeps a numeric select initial unchanged', async () => {
+      const fields: PromptField<number>[] = [
+        {
+          name: 'protocol',
+          label: 'protocol',
+          type: 'select',
+          initial: 1,
+          choices: [
+            { title: 'FTPS', value: 'ftps' },
+            { title: 'SFTP', value: 'sftp' },
+          ],
+        },
+      ];
+      const prompt = vi.fn().mockResolvedValueOnce({ protocol: 'sftp' });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ initial: 1 }));
     });
 
     it('resolves function-form initial with prior answers', async () => {
@@ -267,6 +325,20 @@ describe('PromptFlow', () => {
       expect(prompt).toHaveBeenLastCalledWith(
         expect.objectContaining({ initial: 'aiftp:production' }),
       );
+    });
+
+    it('keeps non-select initial values unchanged', async () => {
+      const fields: PromptField[] = [
+        { name: 'profile', label: 'profile', type: 'text', initial: 'production' },
+        { name: 'port', label: 'port', type: 'number', initial: 21 },
+      ];
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({ profile: 'production' })
+        .mockResolvedValueOnce({ port: 21 });
+      await new PromptFlow(fields, { prompt, stderr: vi.fn() }).run();
+      expect(prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({ initial: 'production' }));
+      expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({ initial: 21 }));
     });
 
     it('forwards number bounds (min/max) to the prompt library', async () => {

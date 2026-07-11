@@ -21,7 +21,7 @@ For an installed package, use:
   "mcpServers": {
     "aiftp": {
       "command": "npx",
-      "args": ["-y", "aiftp", "mcp"]
+      "args": ["-y", "@aiftp-tools/cli", "mcp"]
     }
   }
 }
@@ -29,14 +29,31 @@ For an installed package, use:
 
 Available tools:
 
+Read-only (safe, no confirmation):
+
 - `aiftp_status`
-- `aiftp_push`
-- `aiftp_backup_list`
-- `aiftp_backup_restore`
-- `aiftp_backup_verify`
-- `aiftp_backup_prune`
 - `aiftp_log`
 - `aiftp_list_remote`
+- `aiftp_profile_current`
+- `aiftp_profile_list`
+- `aiftp_profile_test`
+- `aiftp_sites_list` — list sites registered in the global registry (`~/.aiftp/sites.toml`), redacted (no credentials)
+- `aiftp_init_template_list`
+- `aiftp_backup_list`
+- `aiftp_backup_verify`
+
+State-changing (two-step `prepare` → `confirm` token gate):
+
+- `aiftp_push` (dry-run preview) · `aiftp_push_prepare` · `aiftp_push_confirm`
+- `aiftp_rollback` (dry-run preview) · `aiftp_rollback_prepare` · `aiftp_rollback_confirm`
+- `aiftp_backup_restore` · `aiftp_backup_restore_prepare` · `aiftp_backup_restore_confirm`
+- `aiftp_backup_prune`
+- `aiftp_import_filezilla` · `aiftp_import_filezilla_prepare` · `aiftp_import_filezilla_confirm`
+- `aiftp_config_migrate` · `aiftp_config_migrate_prepare` · `aiftp_config_migrate_confirm`
+
+The registry is **read-only over MCP**: there is no tool to write or mutate
+`~/.aiftp/sites.toml` from an AI client. Registration happens only through the
+`aiftp sites add` / `aiftp init` CLI paths.
 
 Available resources:
 

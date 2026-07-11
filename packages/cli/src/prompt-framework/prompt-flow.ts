@@ -118,10 +118,17 @@ export class PromptFlow {
     if (field.min !== undefined) question.min = field.min;
     if (field.max !== undefined) question.max = field.max;
     if (field.initial !== undefined) {
-      question.initial =
+      const resolvedInitial =
         typeof field.initial === 'function'
           ? (field.initial as (a: Record<string, unknown>) => unknown)(answers)
           : field.initial;
+      if (field.type === 'select' && typeof resolvedInitial !== 'number') {
+        const choiceIndex =
+          field.choices?.findIndex((choice) => choice.value === resolvedInitial) ?? -1;
+        question.initial = choiceIndex >= 0 ? choiceIndex : 0;
+      } else {
+        question.initial = resolvedInitial;
+      }
     }
     return question;
   }
