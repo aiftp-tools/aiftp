@@ -534,6 +534,14 @@ const INIT_SUMMARY_FIELDS = [
 const MAX_INIT_EDIT_LOOPS = 10;
 const SUMMARY_VALUE_PREVIEW_LIMIT = 80;
 
+function assertInteractiveInitStdin(): void {
+  // `isTTY !== true` catches both `false` and `undefined`, the latter being
+  // what Node reports when stdin is a pipe or redirected file.
+  if (process.stdin.isTTY !== true) {
+    throw new Error('aiftp init: non-interactive stdin not supported; re-run in a real terminal');
+  }
+}
+
 const SERVER_KIND_LABELS: Record<InitAnswers['serverKind'], string> = {
   starserver: 'StarServer',
   lolipop: 'Lolipop',
@@ -823,14 +831,7 @@ async function runInitSummaryReview(
   stderr: (line: string) => void,
   siteName?: string,
 ): Promise<InitAnswers> {
-  // Codex Should-add #24: non-TTY environment must fail clearly, not block on stdin.
-  // Codex Phase 2 C3: \`isTTY !== true\` catches both \`false\` and \`undefined\`
-  // (the latter is what Node returns when stdin is a pipe or redirected file).
-  if (process.stdin.isTTY !== true) {
-    throw new Error(
-      'aiftp init: non-interactive stdin not supported for summary review; re-run in a real terminal',
-    );
-  }
+  assertInteractiveInitStdin();
 
   let answers = initial;
   for (let loop = 0; loop < MAX_INIT_EDIT_LOOPS; loop += 1) {
@@ -1777,6 +1778,8 @@ export function createCli(options: CliOptions = {}): Command {
     .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
     .option('--from <ref>', 'inherit defaults and customized sections from a site or path')
     .action(async (cmd: InitCommandOptions) => {
+      assertInteractiveInitStdin();
+
       if (cmd.from !== undefined && cmd.template !== undefined) {
         const message = 'init --from and --template cannot be used together.';
         stderr(message);
