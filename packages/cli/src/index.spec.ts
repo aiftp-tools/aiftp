@@ -385,9 +385,9 @@ describe('cli', () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
     try {
-      await expect(parse(args, { prompt: promptSpy, sites: { createRegistry: () => registry } })).rejects.toThrow(
-        /non-interactive stdin not supported/,
-      );
+      await expect(
+        parse(args, { prompt: promptSpy, sites: { createRegistry: () => registry } }),
+      ).rejects.toThrow(/non-interactive stdin not supported/);
       expect(list).not.toHaveBeenCalled();
       expect(promptSpy).not.toHaveBeenCalled();
       expect(stored).toHaveLength(0);
