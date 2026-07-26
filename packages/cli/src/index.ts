@@ -3236,3 +3236,14 @@ export async function main(argv = process.argv): Promise<void> {
     throw error;
   }
 }
+
+export function reportCliError(
+  error: unknown,
+  report: (message: string) => void = console.error,
+): number {
+  if (error instanceof CommanderError) {
+    return error.exitCode;
+  }
+  report(error instanceof Error ? error.message : String(error));
+  return 1;
+}

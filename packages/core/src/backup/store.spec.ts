@@ -451,6 +451,52 @@ describe('BackupStore', () => {
       /Snapshot file not found/,
     );
   });
+
+  it('lists available manifest paths when restoreFile cannot find a file', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: ['index.html', 'assets/app.css'],
+      removed: [],
+    });
+
+    await expect(store.restoreFile(snapshot.id, 'does-not-exist.html')).rejects.toThrow(
+      'Snapshot file not found: does-not-exist.html. Available paths: assets/app.css, index.html',
+    );
+  });
+
+  it('limits missing-file path hints to 10 entries and summarizes the remainder', async () => {
+    const paths = Array.from({ length: 17 }, (_, index) => `pages/page-${index + 1}.html`);
+    for (const path of paths) {
+      sourceFiles.set(path, Buffer.from(path, 'utf8'));
+    }
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: paths,
+      removed: [],
+    });
+
+    await expect(store.restoreFile(snapshot.id, 'missing.html')).rejects.toThrow(
+      `Snapshot file not found: missing.html. Available paths: ${paths
+        .sort()
+        .slice(0, 10)
+        .join(', ')}, ... and 7 more`,
+    );
+  });
+
+  it('reports a sane missing-file message for an empty manifest', async () => {
+    const store = createStore();
+    const snapshot = await store.createAutoSnapshot({
+      added: [],
+      modified: [],
+      removed: [],
+    });
+
+    await expect(store.restoreFile(snapshot.id, 'missing.html')).rejects.toThrow(
+      'Snapshot file not found: missing.html. Available paths: none',
+    );
+  });
 });
 
 describe('isValidSnapshotId', () => {
