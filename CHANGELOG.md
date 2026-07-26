@@ -16,9 +16,14 @@ Release tags live in the GitHub repository:
 
 ---
 
-## [0.12.2] — 2026-07-26
+## [0.12.3] — 2026-07-27
 
 **Patch release** — MCP ローカル起動、CLI エラー表示、バックアップ復元エラー、CHANGELOG リンクを改善。
+
+> **0.12.2 は欠番。** 同一内容を 0.12.2 として公開したが、`npm publish` が
+> `workspace:*` を実バージョンへ変換しないため、`@aiftp-tools/{cli,mcp}@0.12.2`
+> は `npm install` できない成果物になっていた。`latest` は 0.12.1 へ巻き戻し済み。
+> npm はバージョン番号を再利用できないため、同じ変更を 0.12.3 として公開する。
 
 ### Added
 
@@ -950,7 +955,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.3
 [0.12.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.1
 [0.12.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.11.0
