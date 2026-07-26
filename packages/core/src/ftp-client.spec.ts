@@ -9,6 +9,7 @@ import {
   FtpConnectionError,
   FtpError,
   FtpNotFoundError,
+  FtpTimeoutError,
   FtpTlsError,
   mapFtpError,
 } from './ftp-client.js';
@@ -249,8 +250,20 @@ async function startTestServer(): Promise<TestServer> {
     url,
     anonymous: false,
     pasv_url: '127.0.0.1',
-    pasv_min: 50000,
-    pasv_max: 50100,
+    // The PASV range must sit OUTSIDE every platform's ephemeral port range,
+    // otherwise the OS can hand one of these ports to an unrelated outbound
+    // connection in the window between ftp-srv probing the port and binding
+    // it -- and ftp-srv hangs instead of erroring when that bind fails (see
+    // the `client-error` note below). Ephemeral ranges: Linux 32768-60999,
+    // Windows/macOS 49152-65535. 21000-21100 is below all of them and above
+    // the privileged <1024 range.
+    //
+    // The previous 50000-50100 sat inside all three, which is what made the
+    // ftp-srv PASV race surface on Windows CI (Windows allocates ephemeral
+    // ports sequentially, so a busy run sweeps straight through the range,
+    // while Linux/macOS randomize and spread collisions thinner).
+    pasv_min: 21000,
+    pasv_max: 21100,
     // Silence the bundled bunyan logger; we don't need its noise in test output.
     log: {
       trace() {},
@@ -280,6 +293,24 @@ async function startTestServer(): Promise<TestServer> {
     },
   );
 
+  // ftp-srv 4.6.3 swallows passive-mode setup failures: `Passive.setupServer`
+  // calls `dataServer.listen(port, host, cb)` and treats `cb`'s first argument
+  // as an error, but `net.Server.listen`'s callback is the 'listening' listener
+  // and never receives one. Errors arrive on the 'error' event, which ftp-srv
+  // only re-emits as `client-error` -- so a failed bind leaves that promise
+  // forever pending and the client hangs waiting for the reply.
+  //
+  // Note basic-ftp negotiates EPSV, not PASV, so the reply to grep for in a
+  // verbose log is `229 EPSV OK (|||port|)`. Both commands go through the same
+  // ftp-srv `Passive` connector, so the defect above applies either way.
+  //
+  // We cannot fix ftp-srv from here (4.6.3 is the last release, 2023-10-09),
+  // but surfacing `client-error` means the underlying EADDRINUSE shows up in
+  // the CI output instead of a bare "Test timed out".
+  server.on('client-error', ({ context, error }: { context: string; error: Error }) => {
+    console.error(`[ftp-srv client-error] context=${context}: ${error.message}`);
+  });
+
   await server.listen();
 
   return {
@@ -301,6 +332,46 @@ async function startTestServer(): Promise<TestServer> {
     },
   };
 }
+
+// Guard for the v0.12.0/v0.12.1 Windows flaky. The whole diagnosability fix
+// rests on one assumption: when a socket stalls, the client's own timeout
+// fires and raises a *typed* FtpTimeoutError rather than hanging until the
+// runner kills it. This pins that assumption down.
+//
+// A stalled greeting is the same failure shape as the ftp-srv PASV hang --
+// both leave the control socket idle waiting for a reply that never comes --
+// so if this passes, a future PASV stall reports a real error too.
+describe('FtpClient: a stalled server times out instead of hanging', () => {
+  it('connect against a server that never sends a greeting rejects with FtpTimeoutError', async () => {
+    const { createServer } = await import('node:net');
+    // Accepts the TCP connection and then deliberately never sends the 220
+    // greeting, so the control socket goes idle exactly as it does when
+    // ftp-srv leaves a PASV reply forever pending.
+    const silent = createServer(() => undefined);
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', () => resolve()));
+    const address = silent.address();
+    if (typeof address !== 'object' || address === null) {
+      throw new Error('failed to bind the silent test server');
+    }
+
+    try {
+      const client = new FtpClient({
+        host: '127.0.0.1',
+        port: address.port,
+        user: 'testuser',
+        password: 'testpass',
+        protocol: 'ftp',
+        requireTls: false,
+        timeoutMs: 300,
+      });
+
+      await expect(client.connect()).rejects.toThrow(FtpTimeoutError);
+      expect(client.isConnected()).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  });
+});
 
 describe.sequential('FtpClient: integration with ftp-srv (plain FTP)', () => {
   let server: TestServer | undefined;
@@ -347,7 +418,14 @@ describe.sequential('FtpClient: integration with ftp-srv (plain FTP)', () => {
       password: server.password,
       protocol: 'ftp',
       requireTls: false,
-      timeoutMs: 5_000,
+      // MUST stay well below vitest's testTimeout (5000ms by default). When the
+      // two are equal, vitest kills the test before the client's own timeout
+      // can raise a typed FtpTimeoutError, so every stall reports as an opaque
+      // "Test timed out in 5000ms" with no cause attached. That is exactly why
+      // the ftp-srv PASV hang went undiagnosed across v0.12.0 and v0.12.1.
+      // Normal loopback operations here run in ~10-30ms, so 2s is ~60x headroom
+      // while leaving 3s for the error to propagate and be asserted on.
+      timeoutMs: 2_000,
       ...overrides,
     });
   }
