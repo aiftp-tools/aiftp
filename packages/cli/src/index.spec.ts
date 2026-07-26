@@ -9,6 +9,7 @@ import {
   type StatusResult,
   loadConfig,
 } from '@aiftp-tools/core';
+import { CommanderError } from 'commander';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type CliBackupStore,
@@ -19,9 +20,44 @@ import {
   VERSION,
   createCli,
   __test__parseSummaryChoice as parseSummaryChoice,
+  reportCliError,
   __test__sanitizeFieldInput as sanitizeFieldInput,
 } from './index.js';
 import { computeInheritedSections } from './init-flow.js';
+
+describe('reportCliError', () => {
+  it('does not report a CommanderError with exit code 1', () => {
+    const report = vi.fn();
+
+    expect(reportCliError(new CommanderError(1, 'aiftp.failure', 'already reported'), report)).toBe(
+      1,
+    );
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it('does not report a CommanderError with exit code 0', () => {
+    const report = vi.fn();
+
+    expect(reportCliError(new CommanderError(0, 'commander.help', 'help text'), report)).toBe(0);
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it('reports a normal Error exactly once', () => {
+    const report = vi.fn();
+
+    expect(reportCliError(new Error('unexpected failure'), report)).toBe(1);
+    expect(report).toHaveBeenCalledOnce();
+    expect(report).toHaveBeenCalledWith('unexpected failure');
+  });
+
+  it('reports a non-Error thrown value exactly once', () => {
+    const report = vi.fn();
+
+    expect(reportCliError('unexpected string', report)).toBe(1);
+    expect(report).toHaveBeenCalledOnce();
+    expect(report).toHaveBeenCalledWith('unexpected string');
+  });
+});
 
 // v0.10.4: ensure process.stdin.isTTY is true so init summary review does not abort
 // during tests. Individual tests (e.g. #24 non-TTY) can override and restore via afterEach.

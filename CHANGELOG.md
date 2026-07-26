@@ -16,6 +16,25 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.12.2] — 2026-07-26
+
+**Patch release** — MCP ローカル起動、CLI エラー表示、バックアップ復元エラー、CHANGELOG リンクを改善。
+
+### Added
+
+- **MCP のローカル起動手順に Node 直接実行例を追加** — `pnpm` のログによる stdio 汚染を避ける推奨設定として、ビルド済みの `packages/cli/dist/bin.js` を `node` で直接起動する。
+- **`restoreFile()` のファイル未検出エラーにパス一覧を追加** — manifest 内の remote-relative path を最大10件表示し、残りがある場合は件数を要約する。
+
+### Fixed
+
+- **`aiftp init` の引数エラーが2回表示される問題を修正** — action site で報告済みの `CommanderError` は CLI entry point で再表示せず、終了コードだけを反映する。help/version の exit code 0 は成功扱いを維持する。
+
+### Changed
+
+- **CHANGELOG の比較・リリースリンクを現行タグまで補完** — `[Unreleased]` の比較起点を v0.12.1 に更新し、実在する v0.10.0〜v0.12.1 のリリースリンクを追加する。
+
+---
+
 ## [0.12.1] — 2026-07-26
 
 **Patch release** — v0.12.0 で入った `aiftp init` の非対話 stdin ガード回帰を修正。
@@ -931,7 +950,15 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.1
+[0.12.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.0
+[0.11.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.11.0
+[0.10.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.10.4
+[0.10.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.10.3
+[0.10.2]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.10.2
+[0.10.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.10.1
+[0.10.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.10.0
 [0.9.5]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.5
 [0.9.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.4
 [0.9.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.9.3

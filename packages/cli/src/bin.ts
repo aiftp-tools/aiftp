@@ -1,8 +1,6 @@
 #!/usr/bin/env node
-import { main } from './index.js';
+import { main, reportCliError } from './index.js';
 
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
-  process.exitCode = 1;
+  process.exitCode = reportCliError(error);
 });

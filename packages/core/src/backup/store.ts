@@ -359,7 +359,15 @@ export class BackupStore {
     const manifest = await this.readManifest(id);
     const file = manifest.files.find((entry) => entry.path === normalizedPath);
     if (!file) {
-      throw new BackupError(`Snapshot file not found: ${normalizedPath}`);
+      const availablePaths = manifest.files.slice(0, 10).map((entry) => entry.path);
+      const remainingCount = manifest.files.length - availablePaths.length;
+      const pathHint =
+        availablePaths.length === 0
+          ? 'none'
+          : `${availablePaths.join(', ')}${remainingCount > 0 ? `, ... and ${remainingCount} more` : ''}`;
+      throw new BackupError(
+        `Snapshot file not found: ${normalizedPath}. Available paths: ${pathHint}`,
+      );
     }
     if (file.operation === 'added') {
       throw new BackupError(`Cannot restore added file tombstone: ${normalizedPath}`);

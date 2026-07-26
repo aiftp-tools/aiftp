@@ -3,6 +3,24 @@
 `aiftp mcp` starts the aiftp MCP server over stdio. Add this to the MCP client
 configuration for a local checkout:
 
+Run `pnpm build` first so the CLI entry point exists in `packages/cli/dist/`.
+
+Recommended (launch Node directly to keep MCP stdio clean):
+
+```json
+{
+  "mcpServers": {
+    "aiftp": {
+      "command": "node",
+      "args": ["<repo>/packages/cli/dist/bin.js", "mcp"]
+    }
+  }
+}
+```
+
+The following pnpm-based configuration can fail because pnpm logging may pollute
+stdio and break the MCP connection:
+
 ```json
 {
   "mcpServers": {
