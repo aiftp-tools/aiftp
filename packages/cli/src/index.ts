@@ -1778,8 +1778,6 @@ export function createCli(options: CliOptions = {}): Command {
     .option('--template <id>', 'apply a built-in template, or use "list" to show templates')
     .option('--from <ref>', 'inherit defaults and customized sections from a site or path')
     .action(async (cmd: InitCommandOptions) => {
-      assertInteractiveInitStdin();
-
       if (cmd.from !== undefined && cmd.template !== undefined) {
         const message = 'init --from and --template cannot be used together.';
         stderr(message);
@@ -1792,6 +1790,11 @@ export function createCli(options: CliOptions = {}): Command {
         }
         return;
       }
+
+      // Everything above is argument validation or the non-prompting
+      // `--template list` output, so the interactive gate belongs here:
+      // before any prompt, site-registry lookup, or credential write.
+      assertInteractiveInitStdin();
 
       const template =
         cmd.template === undefined || cmd.template.length === 0
