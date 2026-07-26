@@ -396,6 +396,32 @@ describe('cli', () => {
     }
   });
 
+  it('allows init --template list on non-TTY stdin', async () => {
+    // `--template list` only prints the built-in templates and returns; it
+    // never prompts, so the interactive-stdin gate must not block it. AI
+    // agents and shell pipes rely on reading this list non-interactively.
+    const promptSpy = vi.fn<CliPrompt>(async () => {
+      throw new Error('init --template list must not prompt');
+    });
+    const list = vi.fn(async () => []);
+    const registry = { list, add: async () => [], remove: async () => [] };
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+    try {
+      await parse(['init', '--template', 'list'], {
+        prompt: promptSpy,
+        sites: { createRegistry: () => registry },
+      });
+      expect(stderr.join('\n')).toContain('static');
+      expect(list).not.toHaveBeenCalled();
+      expect(promptSpy).not.toHaveBeenCalled();
+      expect(stored).toHaveLength(0);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+    }
+  });
+
   it('init --from <dir> inherits customized sections while prompting site-specific fields', async () => {
     const sourceDirectory = join(cwd, 'source-site');
     await writeInheritanceSource(sourceDirectory, [
