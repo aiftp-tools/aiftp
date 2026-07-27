@@ -104,6 +104,23 @@ function isExecError(error: unknown): error is ExecError {
  */
 function defaultExec(): ExecFn {
   return async (cmd, args) => {
+    // v0.12.4: fail closed when a test forgot to inject a fake keychain.
+    // Reaching the real OS keychain from a unit test spawns `security`
+    // (macOS) or `powershell` + `Add-Type -TypeDefinition` (Windows, which
+    // compiles C# at runtime). Under CI load the Windows path exceeded
+    // vitest's 5s default timeout and produced a Windows-only flake whose
+    // only symptom was "Test timed out in 5000ms".
+    //
+    // The check sits inside `defaultExec` so it fires only when a real
+    // child process is about to be spawned -- injected exec stubs and the
+    // unsupported-platform guard in `backend()` are unaffected. Both
+    // variables are required so a stray variable in a real user's shell
+    // cannot disable their keychain (vitest.config.ts sets both).
+    if (process.env.NODE_ENV === 'test' && process.env.AIFTP_TEST_NO_REAL_KEYCHAIN === '1') {
+      throw new KeychainError(
+        `Refusing a real OS keychain call during tests: ${cmd}. Inject a fake instead (see AiftpMcpRuntime.hasPassword / createBackupStore). The Windows backend spawns PowerShell + Add-Type and can exceed vitest's 5s timeout under CI load.`,
+      );
+    }
     try {
       const { stdout, stderr } = await execFileAsync(cmd, [...args], { maxBuffer: MAX_BUFFER });
       return { stdout, stderr, code: 0 };

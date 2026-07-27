@@ -12,7 +12,14 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-(Pending work for v0.12.x and beyond.)
+### Fixed
+
+- **Windows CI の flaky テストを根絶** — `aiftp_push_confirm rejects a stale plan_id` が Windows Node 22 でのみ 5000ms タイムアウトしていた。原因は MCP のユニットテスト 2 件が fake を注入し忘れて実 OS キーチェーンに到達していたこと。Windows のキーチェーン読み取りは `powershell` を起動して `Add-Type -TypeDefinition` で C# を実行時コンパイルするため、CI の並列負荷下で vitest 既定の 5 秒タイムアウトを超えていた。あわせて、テスト中に実 OS キーチェーンへ到達したら即座に失敗する fail-closed ガードを追加し、同種の漏れが Windows 限定の flaky ではなく全環境で即時に露見するようにした。ユーザー環境での事故を防ぐため、ガードは `NODE_ENV=test` と `AIFTP_TEST_NO_REAL_KEYCHAIN=1` の両方が揃ったときのみ作動する。
+- **`stale plan_id` テストが 1 回目の confirm の失敗を隠していた問題** — plan の consume が実 push より前に起きるため、1 回目の confirm が失敗してもリプレイ拒否のアサーションは緑のままだった。実際には state スタブが不正な `schema: 2` を返しており常に失敗していた。1 回目の成功を明示的に検証するようにした。
+
+### Added
+
+- **`AiftpMcpRuntime.hasPassword`（任意）** — `aiftp_profile_list` が返す `credentialsStatus` の資格情報プローブを差し替えられるようにした。既定は従来どおり実 OS キーチェーンなので本番挙動は不変。core の `ResolveSiteDeps.hasPassword` と同じ依存注入パターン。
 
 ---
 
