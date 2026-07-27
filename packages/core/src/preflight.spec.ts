@@ -150,4 +150,31 @@ describe('preflight checks', () => {
     expect(report.ok).toBe(true);
     expect(report.warnings.map((issue: PreflightIssue) => issue.kind)).toEqual(['html']);
   });
+
+  // v0.12.4 (Task 10 Part B): before this, CLI and MCP called
+  // `checkAll(paths)` with no options, so the `[preflight]` values a
+  // template wrote into `.aiftp.toml` never took effect.
+  it('skips the JSON check when jsonCheck is disabled', async () => {
+    const invalidJson = await writeLocal('broken.json', '{"oops"\n');
+
+    expect((await checkAll([invalidJson], { jsonCheck: false })).ok).toBe(true);
+    expect((await checkAll([invalidJson], { jsonCheck: true })).ok).toBe(false);
+  });
+
+  it('skips the PHP lint without invoking the runner when phpLint is disabled', async () => {
+    const php = await writeLocal('index.php', '<?php echo 1;\n');
+    let invoked = 0;
+    const phpRunner = async (): Promise<{ available: boolean; ok: boolean; message?: string }> => {
+      invoked += 1;
+      return { available: true, ok: false, message: 'syntax error' };
+    };
+
+    const disabled = await checkAll([php], { phpLint: false, phpRunner });
+    expect(disabled.ok).toBe(true);
+    expect(invoked).toBe(0);
+
+    const enabled = await checkAll([php], { phpLint: true, phpRunner });
+    expect(enabled.ok).toBe(false);
+    expect(invoked).toBe(1);
+  });
 });

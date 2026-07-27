@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -70,6 +70,30 @@ sftp.example.com 2222 def456
       expect((await stat(knownHostsPath)).mode & 0o777).toBe(0o600);
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'repairs permissive modes on a pre-existing directory and known_hosts file',
+    async () => {
+      // v0.12.4 (LOW-2): mkdir/appendFile only apply `mode` when they CREATE
+      // the entry. On machines upgraded from older versions -- or where the
+      // state was hand-made -- ~/.aiftp could already be 0755 and known_hosts
+      // 0644, and the pin path would silently leave them that way.
+      await mkdir(join(tempDir, '.aiftp'), { recursive: true });
+      await chmod(join(tempDir, '.aiftp'), 0o755);
+      await writeFile(knownHostsPath, '# aiftp known_hosts\n', { encoding: 'utf8' });
+      await chmod(knownHostsPath, 0o644);
+
+      await verifyHostKey({
+        knownHostsPath,
+        host: 'sftp.example.com',
+        port: 22,
+        key: Buffer.from('server-key-a'),
+      });
+
+      expect((await stat(join(tempDir, '.aiftp'))).mode & 0o777).toBe(0o700);
+      expect((await stat(knownHostsPath)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('returns matched without rewriting when the fingerprint already exists', async () => {
     const first = await verifyHostKey({

@@ -172,8 +172,15 @@ const walkSchema = z
 
 const preflightSchema = z
   .object({
+    // v0.12.4 (Task 10 Part B): these are now actually wired into the push
+    // path. `php_lint` stays opt-in because it shells out to `php -l` once
+    // per file, which is slow (slowest on Windows) and useless without a
+    // PHP toolchain. `json_check` defaults ON: it is a pure in-process
+    // JSON.parse and it is the check that stops a corrupt file from
+    // reaching production. Honouring the old `false` default would have
+    // silently removed a safety net that every user has today.
     php_lint: z.boolean().default(false),
-    json_check: z.boolean().default(false),
+    json_check: z.boolean().default(true),
   })
   .strict();
 

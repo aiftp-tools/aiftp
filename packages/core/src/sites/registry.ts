@@ -1,17 +1,50 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { parse as parseToml, stringify as stringifyToml } from '@iarna/toml';
 import { z } from 'zod';
 import type { SiteEntry } from './types.js';
 
 export const SITE_REGISTRY_SCHEMA_VERSION = 1 as const;
 
+/**
+ * v0.12.4 (LOW-1): site names are an allowlist, not "any non-empty string".
+ * `aiftp init --from <x>` resolves a registered site name BEFORE trying `x`
+ * as a filesystem path, so a hand-edited registry entry named like a path
+ * (`../prod`, `client/a`) silently shadows the operator's intended argument
+ * and redirects config inheritance. Path separators, `:`, control
+ * characters, and bare `.` / `..` are all rejected.
+ */
+const SITE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+
+const siteNameSchema = z
+  .string()
+  .min(1, 'name must not be empty')
+  .regex(
+    SITE_NAME_PATTERN,
+    'name must contain only letters, digits, dot, underscore, or hyphen (no path separators or control characters)',
+  )
+  .refine((name) => name !== '.' && name !== '..', 'name must not be a path reference');
+
+/**
+ * Registry paths must already be absolute and normalized. `sites add` writes
+ * them through `resolve()`, so well-formed registries round-trip unchanged;
+ * this only rejects hand-edited relative or traversal-shaped values.
+ */
+const sitePathSchema = z
+  .string()
+  .min(1, 'path must not be empty')
+  .refine((value) => isAbsolute(value), 'path must be absolute')
+  .refine(
+    (value) => normalize(value) === value,
+    'path must be normalized (no "." or ".." segments)',
+  );
+
 export const siteEntrySchema = z
   .object({
-    name: z.string().min(1, 'name must not be empty'),
-    path: z.string().min(1, 'path must not be empty'),
+    name: siteNameSchema,
+    path: sitePathSchema,
     label: z.string().min(1, 'label must not be empty').optional(),
     default_profile: z.string().min(1, 'default_profile must not be empty').optional(),
   })
@@ -22,7 +55,7 @@ const sitePointerSchema = siteEntrySchema.omit({ name: true });
 export const siteRegistrySchema = z
   .object({
     schema_version: z.literal(SITE_REGISTRY_SCHEMA_VERSION),
-    sites: z.record(z.string().min(1), sitePointerSchema).default({}),
+    sites: z.record(siteNameSchema, sitePointerSchema).default({}),
   })
   .strict();
 

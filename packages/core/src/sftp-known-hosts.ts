@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 const HEADER = '# aiftp known_hosts - do not edit by hand';
@@ -70,12 +70,22 @@ export async function verifyHostKey(options: VerifyHostKeyOptions): Promise<Veri
     return { outcome: 'mismatch', fingerprint, knownFingerprint: known };
   }
 
-  await mkdir(dirname(options.knownHostsPath), { recursive: true, mode: 0o700 });
+  const knownHostsDir = dirname(options.knownHostsPath);
+  await mkdir(knownHostsDir, { recursive: true, mode: 0o700 });
   const prefix = source.trim() === '' ? `${HEADER}\n` : '';
   await appendFile(
     options.knownHostsPath,
     `${prefix}${serializeEntry(options.host, options.port, fingerprint)}\n`,
     { encoding: 'utf8', mode: 0o600 },
   );
+  // v0.12.4 (LOW-2): `mode` on mkdir/appendFile only takes effect when the
+  // entry is CREATED. A ~/.aiftp left at 0755 by an older version, or a
+  // hand-made known_hosts at 0644, would keep those modes forever. Repair
+  // them explicitly. Windows has no POSIX mode bits, so skip it there
+  // rather than fail the pin.
+  if (process.platform !== 'win32') {
+    await chmod(knownHostsDir, 0o700);
+    await chmod(options.knownHostsPath, 0o600);
+  }
   return { outcome: 'pinned', fingerprint };
 }

@@ -97,6 +97,26 @@ export async function computeDiff(
   excluder: Excluder,
   options: WalkOptions = {},
 ): Promise<Diff> {
+  // v0.12.4: a missing / non-directory `local_root` used to surface as a raw
+  // `ENOENT: no such file or directory, scandir '<abs path>'`, which tells
+  // neither a human nor an AI agent which setting is wrong. Fail with the
+  // setting name and the resolved path instead.
+  let rootStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    rootStat = await stat(localRoot);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(
+        `local_root does not exist: ${localRoot}. Check the "local_root" setting in .aiftp.toml (it is resolved relative to the project directory).`,
+      );
+    }
+    throw error;
+  }
+  if (!rootStat.isDirectory()) {
+    throw new Error(
+      `local_root is not a directory: ${localRoot}. Check the "local_root" setting in .aiftp.toml.`,
+    );
+  }
   const localFiles = sortPaths(await walkFiles(localRoot, excluder, '', options));
   const localSet = new Set(localFiles);
   const stateFiles = sortPaths(

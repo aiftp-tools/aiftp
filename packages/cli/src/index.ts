@@ -1206,6 +1206,11 @@ async function defaultRunRollback(
   const backupStore = await createDefaultBackupStore({
     cwd: options.cwd,
     profileName: options.profile,
+    // v0.12.4: propagate the injected keychain. Without this the rollback
+    // path silently fell back to the real OS keychain even when the caller
+    // supplied one -- the same class of test/runtime seam that produced the
+    // Windows CI flake in PR #15.
+    keychain,
   });
   const rollbackStore: RollbackBackupStore = {
     listSnapshots: () => backupStore.listSnapshots(),
@@ -2104,7 +2109,11 @@ export function createCli(options: CliOptions = {}): Command {
             files: cmd.only,
             dryRun: true,
             safety: pushSafety,
-            preflight: (paths) => checkAll(paths),
+            preflight: (paths) =>
+              checkAll(paths, {
+                phpLint: config.preflight.php_lint,
+                jsonCheck: config.preflight.json_check,
+              }),
           });
           const previewDeletes = preview.plannedDeletes ?? [];
           if (previewDeletes.length > 0) {
@@ -2170,7 +2179,11 @@ export function createCli(options: CliOptions = {}): Command {
             dryRun: cmd.dryRun === true,
             confirmDeletes,
             safety: pushSafety,
-            preflight: (paths) => checkAll(paths),
+            preflight: (paths) =>
+              checkAll(paths, {
+                phpLint: config.preflight.php_lint,
+                jsonCheck: config.preflight.json_check,
+              }),
           }).finally(() => managedUploader.close());
           const plannedDeletes = result.plannedDeletes ?? [];
           const deleted = result.deleted ?? [];
@@ -3242,6 +3255,10 @@ export function reportCliError(
   report: (message: string) => void = console.error,
 ): number {
   if (error instanceof CommanderError) {
+    // v0.12.4: deliberately NOT `error.exitCode || 1`. Commander throws a
+    // CommanderError with exitCode 0 for `--help` and `--version`, which are
+    // successes; forcing a non-zero code would make `aiftp --help` exit 1.
+    // Genuine failures always carry a non-zero exitCode already.
     return error.exitCode;
   }
   report(error instanceof Error ? error.message : String(error));

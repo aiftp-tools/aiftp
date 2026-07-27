@@ -39,6 +39,15 @@ export type PhpLintRunner = (path: string) => Promise<PhpLintResult>;
 export interface PreflightOptions {
   phpRunner?: PhpLintRunner;
   strictHtml?: boolean;
+  /**
+   * v0.12.4 (Task 10 Part B): honour `[preflight]` from `.aiftp.toml`.
+   * Before this, CLI and MCP called `checkAll(paths)` with no options, so a
+   * template's `php_lint` / `json_check` values were written into the config
+   * but never took effect. Omitted means "run the check", so existing
+   * callers that pass no options keep their current behaviour.
+   */
+  phpLint?: boolean;
+  jsonCheck?: boolean;
 }
 
 export class PreflightError extends Error {
@@ -158,10 +167,12 @@ export async function checkFile(
 ): Promise<PreflightResult> {
   const extension = extname(path).toLowerCase();
   if (extension === '.json') {
-    return checkJson(path);
+    return options.jsonCheck === false ? result(path, 'skip') : checkJson(path);
   }
   if (extension === '.php') {
-    return checkPhp(path, options.phpRunner ?? defaultPhpRunner);
+    return options.phpLint === false
+      ? result(path, 'skip')
+      : checkPhp(path, options.phpRunner ?? defaultPhpRunner);
   }
   if (extension === '.html' || extension === '.htm') {
     return checkHtml(path, options.strictHtml ?? false);
