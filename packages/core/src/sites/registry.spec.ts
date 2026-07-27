@@ -88,6 +88,55 @@ describe('SiteRegistry', () => {
     expect(await readFile(registryPath, 'utf8')).toBe(malformedSource);
   });
 
+  // v0.12.4 (LOW-1): a hand-edited registry could previously carry any
+  // non-empty string as a site name or path. A path-shaped name shadows the
+  // operator's intended `aiftp init --from <path>` argument (the registry
+  // name match wins before filesystem resolution), redirecting inheritance
+  // to a different config. Names are now an allowlist and paths must be
+  // absolute and already normalized.
+  it.each([
+    ['a path traversal name', '../prod'],
+    ['a slash-separated name', 'client/a'],
+    ['a colon-separated name', 'gw:co'],
+    ['a bare dot name', '.'],
+  ])('rejects %s in a hand-edited registry', async (_label, siteName) => {
+    const registryDirectory = join(temporaryHome, '.aiftp');
+    await mkdir(registryDirectory, { recursive: true });
+    await writeFile(
+      join(registryDirectory, 'sites.toml'),
+      ['schema_version = 1', '', `[sites."${siteName}"]`, 'path = "/projects/gwco"', ''].join('\n'),
+      'utf8',
+    );
+
+    const result = await new SiteRegistry().read();
+
+    expect(result.entries).toEqual([]);
+    expect(result.warning).toMatch(/Failed to validate site registry/);
+  });
+
+  // The relative case and the absolute-but-traversing case fail for
+  // different reasons, so both are covered. Note the path check is
+  // separator-agnostic on purpose: `normalize()` rewrites `/projects/gwco`
+  // to `\projects\gwco` on Windows, so an exact-match rule would reject
+  // valid slash-written absolute paths there.
+  it.each([
+    ['a relative path', 'projects/gwco'],
+    ['an absolute path with traversal segments', '/projects/../../etc/gwco'],
+  ])('rejects %s in a hand-edited registry', async (_label, sitePath) => {
+    const registryDirectory = join(temporaryHome, '.aiftp');
+    await mkdir(registryDirectory, { recursive: true });
+    await writeFile(
+      join(registryDirectory, 'sites.toml'),
+      ['schema_version = 1', '', '[sites.gwco]', `path = "${sitePath}"`, ''].join('\n'),
+      'utf8',
+    );
+
+    const result = await new SiteRegistry().read();
+
+    expect(result.entries).toEqual([]);
+    expect(result.warning).toMatch(/Failed to validate site registry/);
+  });
+
   it('writes atomically through a temporary file and leaves only the final registry', async () => {
     const registry = new SiteRegistry();
     const replacement: SiteEntry = { name: 'docs', path: '/projects/docs' };

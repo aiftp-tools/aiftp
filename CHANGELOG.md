@@ -17,9 +17,19 @@ Release tags live in the GitHub repository:
 - **Windows CI の flaky テストを根絶** — `aiftp_push_confirm rejects a stale plan_id` が Windows Node 22 でのみ 5000ms タイムアウトしていた。原因は MCP のユニットテスト 2 件が fake を注入し忘れて実 OS キーチェーンに到達していたこと。Windows のキーチェーン読み取りは `powershell` を起動して `Add-Type -TypeDefinition` で C# を実行時コンパイルするため、CI の並列負荷下で vitest 既定の 5 秒タイムアウトを超えていた。あわせて、テスト中に実 OS キーチェーンへ到達したら即座に失敗する fail-closed ガードを追加し、同種の漏れが Windows 限定の flaky ではなく全環境で即時に露見するようにした。ユーザー環境での事故を防ぐため、ガードは `NODE_ENV=test` と `AIFTP_TEST_NO_REAL_KEYCHAIN=1` の両方が揃ったときのみ作動する。
 - **`stale plan_id` テストが 1 回目の confirm の失敗を隠していた問題** — plan の consume が実 push より前に起きるため、1 回目の confirm が失敗してもリプレイ拒否のアサーションは緑のままだった。実際には state スタブが不正な `schema: 2` を返しており常に失敗していた。1 回目の成功を明示的に検証するようにした。
 
+- **`[preflight]` の設定が実際に効くようになった** — `php_lint` / `json_check` はテンプレートが `.aiftp.toml` に書き込んでいたが、CLI / MCP が `checkAll(paths)` を options なしで呼んでいたため **runtime に一切反映されていなかった**。設定を push 経路へ接続した。あわせて `json_check` の既定値を `false` → `true` に変更している（従来は設定が無視されて常に実行されていたため、`false` をそのまま honor すると全ユーザーの JSON 検証が黙って無効化されてしまう）。`php_lint` は `php -l` をファイルごとに起動して遅く、PHP 環境がなければ無意味なので既定 `false` のまま。
+- **`local_root` の設定ミスが読めるエラーになった** — 従来は `ENOENT: no such file or directory, scandir '<絶対パス>'` という生のエラーで、どの設定が悪いのか人にも AI にも分からなかった。設定名と解決後のパスを含むメッセージに変更。
+- **サイト台帳のサイト名・パス検証を厳格化（セキュリティ LOW-1）** — 手編集された `~/.aiftp/sites.toml` が任意の文字列をサイト名として受け付けていた。`aiftp init --from <x>` は `x` をファイルパスとして解決する **前に** 登録サイト名を照合するため、`../prod` や `client/a` のようなパス形状の名前が利用者の意図した引数を横取りし、設定の継承元をすり替えられた。サイト名を `^[A-Za-z0-9._-]+$` の許可リストに限定し、`path` は絶対かつ正規化済みを必須にした。`sites add` は元々 `resolve()` で書き込むため既存の正規レジストリは影響を受けない。
+- **`known_hosts` のパーミッションを修復するようにした（セキュリティ LOW-2）** — `mkdir` / `appendFile` の `mode` は**新規作成時にしか効かない**ため、旧バージョンや手作業で作られた `~/.aiftp`（0755）や `known_hosts`（0644）が緩いまま放置されていた。ピン留め時に 0700 / 0600 へ明示的に修復する（POSIX のみ）。
+- **CLI のロールバックが注入された keychain を伝播するようにした** — `defaultRunRollback` が `createDefaultBackupStore` に keychain を渡しておらず、呼び出し側が指定しても実 OS キーチェーンにフォールバックしていた。
+
 ### Added
 
 - **`AiftpMcpRuntime.hasPassword`（任意）** — `aiftp_profile_list` が返す `credentialsStatus` の資格情報プローブを差し替えられるようにした。既定は従来どおり実 OS キーチェーンなので本番挙動は不変。core の `ResolveSiteDeps.hasPassword` と同じ依存注入パターン。
+
+### Changed
+
+- **`aiftp_push_prepare` の説明に `diff.removed` と `plannedDeletes` の違いを明記** — `diff.removed` は「ローカルから消えたが state には残っている」観測結果、`plannedDeletes` は `safety.deletion_policy` 適用後に実際にリモートから削除される部分集合。前者が非空で後者が空なのは、削除が保留中なのではなくポリシーが抑止している状態を意味する。
 
 ---
 

@@ -392,7 +392,7 @@ const toolDescriptions = {
   aiftp_status: 'Show local deployment diff.',
   aiftp_push: 'Run a dry-run push. For a real push, use aiftp_push_prepare + aiftp_push_confirm.',
   aiftp_push_prepare:
-    'Prepare a real push: always pass expected_site to declare the intended destination site. Returns destination, plan_id, diff_hash, confirm_token, expected_file_count, and expected_remote_root. Pass the confirmation values back to aiftp_push_confirm within the TTL to actually upload.',
+    'Prepare a real push: always pass expected_site to declare the intended destination site. Returns destination, plan_id, diff_hash, confirm_token, expected_file_count, and expected_remote_root. Pass the confirmation values back to aiftp_push_confirm within the TTL to actually upload. NOTE on deletions: `diff.removed` lists files that vanished locally but are still tracked in state — it is an observation, not an action. `plannedDeletes` is the subset that will actually be deleted on the remote, after safety.deletion_policy is applied. `diff.removed` non-empty with `plannedDeletes` empty means the policy is suppressing the deletes, not that they are pending.',
   aiftp_push_confirm:
     'Confirm a previously-prepared real push. Requires the exact plan_id / diff_hash / confirm_token from aiftp_push_prepare.',
   aiftp_backup_list: 'List encrypted backup snapshots.',
@@ -696,7 +696,13 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
         verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
         deletionPolicy: config.safety.deletion_policy,
       },
-      preflight: (paths) => checkAll(paths),
+      // v0.12.4 (Task 10 Part B): honour the config's [preflight] toggles.
+      // Previously the template-written values had no runtime effect.
+      preflight: (paths) =>
+        checkAll(paths, {
+          phpLint: config.preflight.php_lint,
+          jsonCheck: config.preflight.json_check,
+        }),
     });
   })().finally(() => sharedFtpClient?.disconnect());
 
@@ -837,7 +843,13 @@ async function executePush(
         verifyAfterUpload: config.safety.verify_after_upload === 'off' ? 'off' : 'size',
         deletionPolicy: config.safety.deletion_policy,
       },
-      preflight: (paths) => checkAll(paths),
+      // v0.12.4 (Task 10 Part B): honour the config's [preflight] toggles.
+      // Previously the template-written values had no runtime effect.
+      preflight: (paths) =>
+        checkAll(paths, {
+          phpLint: config.preflight.php_lint,
+          jsonCheck: config.preflight.json_check,
+        }),
     });
   } finally {
     await sharedFtpClient?.disconnect();

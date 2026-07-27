@@ -166,4 +166,24 @@ describe('computeDiff', () => {
       unchanged: [],
     });
   });
+
+  // v0.12.4: a misconfigured local_root previously surfaced as a raw
+  // `ENOENT ... scandir '<abs path>'`, naming neither the setting at fault
+  // nor how to fix it. AI agents in particular could not act on it.
+  it('names the local_root setting when the directory does not exist', async () => {
+    const missing = join(tempDir, 'does-not-exist');
+
+    await expect(computeDiff(missing, { schema: 1, files: {} }, createExcluder())).rejects.toThrow(
+      /local_root does not exist/u,
+    );
+  });
+
+  it('names the local_root setting when it points at a file', async () => {
+    const filePath = join(tempDir, 'not-a-dir.txt');
+    await writeFile(filePath, 'x', 'utf8');
+
+    await expect(computeDiff(filePath, { schema: 1, files: {} }, createExcluder())).rejects.toThrow(
+      /local_root is not a directory/u,
+    );
+  });
 });
