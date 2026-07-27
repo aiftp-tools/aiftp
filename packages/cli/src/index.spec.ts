@@ -2666,10 +2666,18 @@ describe('cli', () => {
         }),
       });
       const passwords = stored.map((s) => s.password);
-      // No stored password should match a filesystem path
+      // The user's FTP password is stored; the other entry is the generated
+      // backup key.
+      expect(passwords).toContain('pw');
+      // Assert against the actual path values rather than a "starts with /"
+      // shape check. The backup key is standard base64, whose alphabet
+      // includes "/", so roughly 1 generated key in 64 begins with "/" --
+      // that made this test fail on CI about as often, with no real defect.
       for (const p of passwords) {
-        expect(p).not.toMatch(/^\//u);
+        expect(p).not.toBe('/var/www/html');
+        expect(p).not.toBe(cwd);
         expect(p).not.toMatch(/^~\//u);
+        expect(p).not.toMatch(/\.ssh|id_rsa|id_ed25519/u);
       }
       // The .gitignore should have .aiftp/ guard from the init flow.
       const gi = await readFile(join(cwd, '.gitignore'), 'utf8');
