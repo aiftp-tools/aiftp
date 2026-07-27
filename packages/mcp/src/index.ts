@@ -95,6 +95,14 @@ export interface AiftpMcpRuntime {
   createRollbackUploader?(context: AiftpMcpContext): Promise<RollbackUploader>;
   createSiteRegistry?(): { list(): Promise<readonly SiteEntry[]> };
   resolveSite?(entry: SiteEntry): Promise<ResolvedSite>;
+  /**
+   * v0.12.4: credential-presence probe used by `aiftp_profile_list`.
+   * Mirrors `ResolveSiteDeps.hasPassword` in core. Defaults to the real OS
+   * keychain, so tests MUST inject a fake -- the default spawns `security`
+   * (macOS) or PowerShell + `Add-Type` (Windows, which compiles C# at
+   * runtime and can exceed vitest's 5s timeout under CI load).
+   */
+  hasPassword?(service: string, account: string): Promise<boolean>;
 }
 
 export interface AiftpMcpOptions {
@@ -1245,6 +1253,7 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   const names = Object.keys(config.profile);
   const defaultName = await resolveDefaultProfile(app.cwd, { availableProfiles: names });
   const profiles: ProfileSummary[] = [];
+  const probe = app.runtime.hasPassword ?? hasPassword;
   for (const name of names) {
     const profile = config.profile[name];
     if (!profile) continue;
@@ -1254,7 +1263,7 @@ async function handleProfileList(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     // tell "missing password" apart from "Keychain access blocked".
     let credentialsStatus: CredentialsStatus;
     try {
-      credentialsStatus = (await hasPassword(profile.keychain_service, profile.user))
+      credentialsStatus = (await probe(profile.keychain_service, profile.user))
         ? 'present'
         : 'missing';
     } catch {

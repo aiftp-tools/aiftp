@@ -1019,20 +1019,43 @@ describe('mcp', () => {
       runPush: async (opts) =>
         opts.dryRun
           ? pushResult
-          : { ...pushResult, dryRun: false, nextState: { schema: 2, files: {} } },
+          : { ...pushResult, dryRun: false, nextState: { schema: 1, files: {} } },
+      // Required: the real (dry_run=false) confirm builds the default backup
+      // store, which reads the backup key from the real OS keychain.
+      createBackupStore: async () => ({
+        listSnapshots: async () => [],
+        verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+        prune: async () => [],
+        restoreFile: async () => Buffer.alloc(0),
+        createAutoSnapshot: async () => ({
+          id: 'stub-snap',
+          type: 'auto',
+          createdAt: '2026-05-19T00:00:00.000Z',
+          fileCount: 0,
+          totalBytes: 0,
+          files: [],
+        }),
+      }),
     };
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
     );
-    // First confirm consumes the plan.
-    await callAiftpTool(app, 'aiftp_push_confirm', {
-      profile: 'production',
-      plan_id: prepared.plan_id,
-      diff_hash: prepared.diff_hash,
-      confirm_token: prepared.confirm_token,
-      acknowledge_production: true,
-    });
+    // First confirm consumes the plan. It must actually SUCCEED: the plan is
+    // consumed before the side-effectful push (see handlePushConfirm), so a
+    // failing first confirm would still leave the replay assertion below
+    // green and hide the failure. v0.12.4 found exactly that -- the real
+    // push reached the real OS keychain looking for a backup key.
+    const first = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean };
+    expect(first).toMatchObject({ ok: true });
     // Second confirm with the same plan_id must fail.
     const replay = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',
@@ -1129,7 +1152,7 @@ describe('mcp', () => {
     // AI agent can call — those values combined with the credential probe
     // would otherwise leak attack-surface metadata to any MCP client.
     await writeConfig();
-    const app = createAiftpMcp({ cwd });
+    const app = createAiftpMcp({ cwd, runtime: { hasPassword: async () => true } });
     const result = await callAiftpTool(app, 'aiftp_profile_list', {});
     const parsed = parseText(result) as {
       profiles: Array<Record<string, unknown>>;
@@ -1143,8 +1166,11 @@ describe('mcp', () => {
       server_kind: 'starserver',
       isDefault: true,
     });
-    // Credentials probe is allowed but must be tri-state.
-    expect(['present', 'missing', 'unknown']).toContain(entry.credentialsStatus);
+    // Credentials probe is allowed but must be tri-state. The probe is
+    // injected so this stays deterministic -- the default reaches the real
+    // OS keychain, which made the result machine-dependent and, on Windows,
+    // spawned PowerShell + Add-Type (v0.12.4).
+    expect(entry.credentialsStatus).toBe('present');
     // Redacted (sensitive) fields:
     expect(entry.host).toBeUndefined();
     expect(entry.port).toBeUndefined();

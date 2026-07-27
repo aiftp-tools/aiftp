@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   KeychainError,
   KeychainNotFoundError,
@@ -79,6 +79,27 @@ describe('keychain: argument validation (cross-platform)', () => {
   });
 });
 
+describe.skipIf(onUnsupported)('keychain: test-mode guard against real OS keychain access', () => {
+  // v0.12.4: two MCP unit tests reached the real OS keychain because they
+  // forgot to inject a fake. On Windows that spawns `powershell` and
+  // compiles C# at runtime (`Add-Type -TypeDefinition`), which exceeded
+  // vitest's 5s default timeout under CI load and surfaced as a
+  // Windows-only flake with no error other than "Test timed out in 5000ms".
+  //
+  // The guard turns that whole bug class into an immediate, explicit
+  // failure on every platform. It lives inside `defaultExec()`, so it only
+  // fires when a real child process is about to be spawned -- injected
+  // fake exec functions are unaffected. Skipped on linux/*BSD because
+  // `backend()` throws KeychainPlatformError before `defaultExec()` is
+  // ever reached there.
+  it('getPassword refuses to spawn the real backend while the guard is armed', async () => {
+    await expect(getPassword('svc', 'account')).rejects.toBeInstanceOf(KeychainError);
+    await expect(getPassword('svc', 'account')).rejects.toThrow(
+      /Refusing a real OS keychain call/u,
+    );
+  });
+});
+
 describe.skipIf(!onUnsupported)('keychain: unsupported platform guard (linux / *bsd)', () => {
   // v0.3 added Windows support, so the guard only fires on platforms we
   // explicitly do not target. Linux desktops with libsecret etc. are a
@@ -98,6 +119,26 @@ describe.skipIf(!onUnsupported)('keychain: unsupported platform guard (linux / *
 
 describe.skipIf(!runIntegration)('keychain: integration (macOS, non-CI)', () => {
   let unavailableError: unknown;
+  let guardValue: string | undefined;
+
+  // This is the ONE block that is supposed to reach the real macOS
+  // Keychain, so it opts out of the v0.12.4 fail-closed guard armed by
+  // vitest.config.ts. `afterAll` runs even when a test in the block
+  // fails, so the variable is always restored for the rest of the file.
+  beforeAll(() => {
+    guardValue = process.env.AIFTP_TEST_NO_REAL_KEYCHAIN;
+    // biome-ignore lint/performance/noDelete: `= undefined` leaks an enumerable key into process.env and the guard would still see it.
+    delete (process.env as Record<string, string | undefined>).AIFTP_TEST_NO_REAL_KEYCHAIN;
+  });
+
+  afterAll(() => {
+    if (guardValue === undefined) {
+      // biome-ignore lint/performance/noDelete: keep process.env free of an enumerable undefined key.
+      delete (process.env as Record<string, string | undefined>).AIFTP_TEST_NO_REAL_KEYCHAIN;
+    } else {
+      process.env.AIFTP_TEST_NO_REAL_KEYCHAIN = guardValue;
+    }
+  });
 
   beforeAll(async () => {
     // Sanity check so a misconfigured env does not silently pollute.
