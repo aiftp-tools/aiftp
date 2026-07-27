@@ -114,12 +114,20 @@ describe('SiteRegistry', () => {
     expect(result.warning).toMatch(/Failed to validate site registry/);
   });
 
-  it('rejects a relative path in a hand-edited registry', async () => {
+  // The relative case and the absolute-but-traversing case fail for
+  // different reasons, so both are covered. Note the path check is
+  // separator-agnostic on purpose: `normalize()` rewrites `/projects/gwco`
+  // to `\projects\gwco` on Windows, so an exact-match rule would reject
+  // valid slash-written absolute paths there.
+  it.each([
+    ['a relative path', 'projects/gwco'],
+    ['an absolute path with traversal segments', '/projects/../../etc/gwco'],
+  ])('rejects %s in a hand-edited registry', async (_label, sitePath) => {
     const registryDirectory = join(temporaryHome, '.aiftp');
     await mkdir(registryDirectory, { recursive: true });
     await writeFile(
       join(registryDirectory, 'sites.toml'),
-      ['schema_version = 1', '', '[sites.gwco]', 'path = "projects/gwco"', ''].join('\n'),
+      ['schema_version = 1', '', '[sites.gwco]', `path = "${sitePath}"`, ''].join('\n'),
       'utf8',
     );
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, normalize } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseToml, stringify as stringifyToml } from '@iarna/toml';
 import { z } from 'zod';
 import type { SiteEntry } from './types.js';
@@ -28,17 +28,24 @@ const siteNameSchema = z
   .refine((name) => name !== '.' && name !== '..', 'name must not be a path reference');
 
 /**
- * Registry paths must already be absolute and normalized. `sites add` writes
- * them through `resolve()`, so well-formed registries round-trip unchanged;
- * this only rejects hand-edited relative or traversal-shaped values.
+ * Registry paths must be absolute and free of traversal segments. `sites add`
+ * writes them through `resolve()`, so well-formed registries round-trip
+ * unchanged; this only rejects hand-edited relative or traversal-shaped
+ * values.
+ *
+ * Deliberately NOT `normalize(value) === value`: on Windows `normalize()`
+ * rewrites `/projects/site` to `\projects\site`, so exact-match would reject
+ * perfectly valid slash-written absolute paths. Splitting on both separators
+ * targets the actual threat (`.` / `..` segments) and behaves the same on
+ * every platform.
  */
 const sitePathSchema = z
   .string()
   .min(1, 'path must not be empty')
   .refine((value) => isAbsolute(value), 'path must be absolute')
   .refine(
-    (value) => normalize(value) === value,
-    'path must be normalized (no "." or ".." segments)',
+    (value) => !value.split(/[\\/]/u).some((segment) => segment === '.' || segment === '..'),
+    'path must not contain "." or ".." segments',
   );
 
 export const siteEntrySchema = z
