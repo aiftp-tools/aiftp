@@ -12,6 +12,14 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
+(Pending work for v0.12.x and beyond.)
+
+---
+
+## [0.12.4] — 2026-07-27
+
+**Patch release** — Windows CI の flaky を根本解決し、`[preflight]` 設定を実際に効くよう接続、サイト台帳と `known_hosts` のセキュリティ強化、エラーメッセージの改善。**ユーザー向けの挙動変更は `[preflight]` の接続と `json_check` の既定値のみ**（下記参照）。
+
 ### Fixed
 
 - **Windows CI の flaky テストを根絶** — `aiftp_push_confirm rejects a stale plan_id` が Windows Node 22 でのみ 5000ms タイムアウトしていた。原因は MCP のユニットテスト 2 件が fake を注入し忘れて実 OS キーチェーンに到達していたこと。Windows のキーチェーン読み取りは `powershell` を起動して `Add-Type -TypeDefinition` で C# を実行時コンパイルするため、CI の並列負荷下で vitest 既定の 5 秒タイムアウトを超えていた。あわせて、テスト中に実 OS キーチェーンへ到達したら即座に失敗する fail-closed ガードを追加し、同種の漏れが Windows 限定の flaky ではなく全環境で即時に露見するようにした。ユーザー環境での事故を防ぐため、ガードは `NODE_ENV=test` と `AIFTP_TEST_NO_REAL_KEYCHAIN=1` の両方が揃ったときのみ作動する。
@@ -22,6 +30,7 @@ Release tags live in the GitHub repository:
 - **サイト台帳のサイト名・パス検証を厳格化（セキュリティ LOW-1）** — 手編集された `~/.aiftp/sites.toml` が任意の文字列をサイト名として受け付けていた。`aiftp init --from <x>` は `x` をファイルパスとして解決する **前に** 登録サイト名を照合するため、`../prod` や `client/a` のようなパス形状の名前が利用者の意図した引数を横取りし、設定の継承元をすり替えられた。サイト名を `^[A-Za-z0-9._-]+$` の許可リストに限定し、`path` は絶対かつ正規化済みを必須にした。`sites add` は元々 `resolve()` で書き込むため既存の正規レジストリは影響を受けない。
 - **`known_hosts` のパーミッションを修復するようにした（セキュリティ LOW-2）** — `mkdir` / `appendFile` の `mode` は**新規作成時にしか効かない**ため、旧バージョンや手作業で作られた `~/.aiftp`（0755）や `known_hosts`（0644）が緩いまま放置されていた。ピン留め時に 0700 / 0600 へ明示的に修復する（POSIX のみ）。
 - **CLI のロールバックが注入された keychain を伝播するようにした** — `defaultRunRollback` が `createDefaultBackupStore` に keychain を渡しておらず、呼び出し側が指定しても実 OS キーチェーンにフォールバックしていた。
+- **秘密値を「形」で検証していたテストの誤検知を解消** — Keychain に保存された値が「`/` で始まらないこと」を確認していたが、自動生成のバックアップ鍵は標準 base64（アルファベットに `/` を含む）なので **実測 1.4%（144/10000、理論 1/64）で実際の欠陥なく落ちていた**。実際のパス値と比較する形に修正。OS 非依存の問題で、たまたま Windows で顕在化していた。
 
 ### Added
 
@@ -972,7 +981,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.4
 [0.12.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.3
 [0.12.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.1
 [0.12.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.0
