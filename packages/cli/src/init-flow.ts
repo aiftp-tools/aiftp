@@ -28,10 +28,12 @@ import {
   type SiteEntry,
   SiteRegistry,
   type TemplateConfig,
+  buildKeychainService,
   configSchema,
   getTemplate,
   listTemplates,
   loadConfig,
+  sanitizeKeychainSiteName,
 } from '@aiftp-tools/core';
 import type { PromptField } from './prompt-framework/types.js';
 
@@ -287,28 +289,8 @@ function isStandardFtpPort(port: number, protocol: string): boolean {
   return port === 21;
 }
 
-export function sanitizeKeychainSiteName(siteName: string | undefined): string {
-  if (siteName === undefined) return '';
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional keychain identifier sanitization
-  const controlCharacters = /[\u0000-\u001f\u007f]+/gu;
-  return siteName
-    .trim()
-    .replace(controlCharacters, '-')
-    .replace(/[:/\\]+/gu, '-')
-    .replace(/[^A-Za-z0-9._-]+/gu, '-')
-    .replace(/-+/gu, '-')
-    .replace(/^-+|-+$/gu, '');
-}
-
-export function buildKeychainServiceInitial(
-  siteName: string | undefined,
-  profileName: string,
-): string {
-  const sanitizedSiteName = sanitizeKeychainSiteName(siteName);
-  return sanitizedSiteName.length > 0
-    ? `aiftp:${sanitizedSiteName}-${profileName}`
-    : `aiftp:${profileName}`;
-}
+export { sanitizeKeychainSiteName };
+export const buildKeychainServiceInitial = buildKeychainService;
 
 export function buildInitFields(siteName?: string): PromptField[] {
   return buildInitFieldsWithTemplate(true, undefined, undefined, siteName);
