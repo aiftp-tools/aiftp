@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { isValidProfileName } from '../config-edit.js';
 import type { SiteProtocol } from '../sites/types.js';
 import { type BootstrapInput, BootstrapValidationError } from './types.js';
@@ -31,13 +31,14 @@ export function validateBootstrapInput(raw: Partial<BootstrapInput>): BootstrapI
     );
   }
 
-  const localRoot = requireText(raw.localRoot, 'local_root', 'サイトフォルダ');
-  if (!isAbsolute(localRoot)) {
+  const localRootRaw = requireText(raw.localRoot, 'local_root', 'サイトフォルダ');
+  if (!isAbsolute(localRootRaw)) {
     throw new BootstrapValidationError(
       'bootstrap-invalid: local_root must be an absolute path',
       'Claude Desktop の設定 → 拡張機能 → aiftp で「サイトフォルダ」をフォルダ選択ボタンから選び直し、Claude Desktop を再起動してください。',
     );
   }
+  const localRoot = resolvePath(localRootRaw);
 
   const protocolRaw = raw.protocol === undefined ? 'ftps' : String(raw.protocol).trim();
   if (!PROTOCOLS.includes(protocolRaw as SiteProtocol)) {

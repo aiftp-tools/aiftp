@@ -1,6 +1,6 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
-import { join, resolve as resolvePath } from 'node:path';
-import { appendProfileBlock } from '../config-edit.js';
+import { join } from 'node:path';
+import { appendProfileBlock, findProfileBlockRange, setProfileField } from '../config-edit.js';
 import { ensureGitignoreEntry } from '../init/gitignore.js';
 import { buildKeychainService } from '../init/keychain-name.js';
 import { hasPassword, setPassword } from '../keychain.js';
@@ -30,10 +30,42 @@ async function defaultPathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * The Desktop settings form is authoritative: reconcile only the 5 fields
+ * bootstrap owns (host/user/protocol/remote_root/keychain_service) into an
+ * existing `.aiftp.toml`, leaving every other section (e.g. a user-added
+ * `[safety]` block, or a config whose only profile has a different name)
+ * completely untouched. Returns the reconciled source; the caller compares
+ * it against `current` to decide whether a write actually happened.
+ */
+function reconcileOwnedFields(
+  current: string,
+  profileName: string,
+  keychainService: string,
+  input: BootstrapInput,
+): string {
+  if (!findProfileBlockRange(current, profileName)) {
+    return current;
+  }
+  const owned: ReadonlyArray<readonly [string, string]> = [
+    ['host', input.host],
+    ['user', input.username],
+    ['protocol', input.protocol],
+    ['remote_root', input.remoteRoot],
+    ['keychain_service', keychainService],
+  ];
+  let next = current;
+  for (const [field, value] of owned) {
+    next = setProfileField(next, profileName, field, JSON.stringify(value));
+  }
+  return next;
+}
+
 export async function runBootstrap(
   rawInput: Partial<BootstrapInput>,
   deps: BootstrapDeps = {},
 ): Promise<BootstrapResult> {
+  // 1. validate
   const input = validateBootstrapInput(rawInput);
   const pathExists = deps.pathExists ?? defaultPathExists;
   const readTextFile = deps.readTextFile ?? ((path: string) => readFile(path, 'utf8'));
@@ -47,6 +79,7 @@ export async function runBootstrap(
   const ensureGitignore =
     deps.ensureGitignore ?? ((cwd: string) => ensureGitignoreEntry(cwd, { requireGitRepo: true }));
 
+  // 2. local_root existence check
   if (!(await pathExists(input.localRoot))) {
     throw new BootstrapValidationError(
       `bootstrap-invalid: local_root does not exist: ${input.localRoot}`,
@@ -57,12 +90,31 @@ export async function runBootstrap(
   const keychainService = buildKeychainService(input.siteName, input.profileName);
   const configPath = join(input.localRoot, '.aiftp.toml');
 
-  // 1. .aiftp.toml — never overwrite an existing file. A trainee (or the CLI)
-  //    may have edited it; the extension must not clobber that.
+  // 3. fleet registry conflict check — a pure read, so it can safely throw
+  //    before any side effect (.aiftp.toml write, keychain write) happens.
+  const registrySurface = createRegistry();
+  const entries = await registrySurface.list();
+  const existingEntry = entries.find((entry) => entry.name === input.siteName);
+  if (existingEntry && existingEntry.path !== input.localRoot) {
+    throw new BootstrapValidationError(
+      `bootstrap-conflict: site "${input.siteName}" is already registered for a different folder (${existingEntry.path})`,
+      'Claude Desktop の設定 → 拡張機能 → aiftp で「サイト名」を別の名前に変えるか、「サイトフォルダ」を登録済みのフォルダに合わせてください。',
+    );
+  }
+
+  // 4. .aiftp.toml — create it, or reconcile the bootstrap-owned fields in
+  //    place. Never overwrite a config whose matching profile does not
+  //    exist (a trainee or the CLI may own that file).
   let config: ConfigOutcome;
   if (await pathExists(configPath)) {
-    await readTextFile(configPath);
-    config = 'existing';
+    const current = await readTextFile(configPath);
+    const next = reconcileOwnedFields(current, input.profileName, keychainService, input);
+    if (next === current) {
+      config = 'existing';
+    } else {
+      await writeTextFile(configPath, next);
+      config = 'updated';
+    }
   } else {
     const source = appendProfileBlock('schema = 2', input.profileName, {
       host: input.host,
@@ -78,30 +130,23 @@ export async function runBootstrap(
     config = 'created';
   }
 
-  // 2. credential — copy the env-provided value into aiftp's own keychain
-  //    exactly once, then stop reading the env.
+  // 5. credential — the Desktop settings form is authoritative: a corrected
+  //    or rotated password must be able to reach the keychain. Re-storing
+  //    the same value on every launch is harmless. Whitespace-only input is
+  //    treated as "not supplied" (a stray space is not a real password).
   let credential: CredentialOutcome;
-  if (await credentialExists(keychainService, input.username)) {
-    credential = 'already-stored';
-  } else if (input.credential !== undefined && input.credential.length > 0) {
+  if (input.credential !== undefined && input.credential.trim().length > 0) {
     await storeCredential(keychainService, input.username, input.credential);
     credential = 'stored';
+  } else if (await credentialExists(keychainService, input.username)) {
+    credential = 'already-stored';
   } else {
     credential = 'missing';
   }
 
-  // 3. fleet registry
-  const registrySurface = createRegistry();
-  const entries = await registrySurface.list();
-  const existing = entries.find((entry) => entry.name === input.siteName);
+  // 6. fleet registry registration — only when step 3 found no existing entry.
   let registry: RegistryOutcome;
-  if (existing) {
-    if (resolvePath(existing.path) !== resolvePath(input.localRoot)) {
-      throw new BootstrapValidationError(
-        `bootstrap-conflict: site "${input.siteName}" is already registered for a different folder (${existing.path})`,
-        'Claude Desktop の設定 → 拡張機能 → aiftp で「サイト名」を別の名前に変えるか、「サイトフォルダ」を登録済みのフォルダに合わせてください。',
-      );
-    }
+  if (existingEntry) {
     registry = 'already-registered';
   } else {
     await registrySurface.add({
@@ -112,6 +157,7 @@ export async function runBootstrap(
     registry = 'registered';
   }
 
+  // 7. .gitignore
   const gitignore = await ensureGitignore(input.localRoot);
   const missing = credential === 'missing' ? ['credential'] : [];
 

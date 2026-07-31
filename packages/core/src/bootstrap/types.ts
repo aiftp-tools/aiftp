@@ -27,7 +27,7 @@ export interface BootstrapDeps {
   readonly ensureGitignore?: (cwd: string) => Promise<string>;
 }
 
-export type ConfigOutcome = 'created' | 'existing';
+export type ConfigOutcome = 'created' | 'updated' | 'existing';
 export type CredentialOutcome = 'stored' | 'already-stored' | 'missing';
 export type RegistryOutcome = 'registered' | 'already-registered';
 
