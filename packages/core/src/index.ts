@@ -272,3 +272,16 @@ export {
   type EnsureGitignoreOptions,
   type EnsureGitignoreOutcome,
 } from './init/gitignore.js';
+
+export {
+  type BootstrapDeps,
+  type BootstrapInput,
+  type BootstrapRegistrySurface,
+  type BootstrapResult,
+  BootstrapValidationError,
+  type ConfigOutcome,
+  type CredentialOutcome,
+  type RegistryOutcome,
+  runBootstrap,
+  validateBootstrapInput,
+} from './bootstrap/index.js';
