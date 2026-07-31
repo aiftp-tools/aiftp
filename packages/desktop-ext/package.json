@@ -1,0 +1,24 @@
+{
+  "name": "@aiftp-tools/desktop-ext",
+  "version": "0.12.4",
+  "private": true,
+  "description": "aiftp Claude Desktop extension (.mcpb) — build-only package, never published to npm",
+  "license": "MIT",
+  "author": "Tanaka Yuichiro <u16.tanaka@gmail.com>",
+  "type": "module",
+  "main": "./dist/server-entry.js",
+  "types": "./dist/server-entry.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:mcpb": "node scripts/build-mcpb.mjs"
+  },
+  "dependencies": {
+    "@aiftp-tools/cli": "workspace:*",
+    "@aiftp-tools/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^1.2.0"
+  },
+  "engines": { "node": ">=22.0.0" }
+}
