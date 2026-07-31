@@ -1,5 +1,14 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { access, appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import {
+  access,
+  appendFile,
+  mkdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   type DeployClient,
@@ -46,6 +55,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { buildSetupStatus } from './setup-status.js';
 
 export { VERSION };
 
@@ -108,6 +118,8 @@ export interface AiftpMcpRuntime {
 export interface AiftpMcpOptions {
   cwd?: string;
   runtime?: AiftpMcpRuntime;
+  /** Shared secret for the production push gate. Never echoed in tool output. */
+  confirmPhrase?: string;
 }
 
 export type AiftpToolName =
@@ -136,7 +148,8 @@ export type AiftpToolName =
   | 'aiftp_import_filezilla_confirm'
   | 'aiftp_rollback'
   | 'aiftp_rollback_prepare'
-  | 'aiftp_rollback_confirm';
+  | 'aiftp_rollback_confirm'
+  | 'aiftp_setup_status';
 
 export interface AiftpMcpApp {
   cwd: string;
@@ -144,6 +157,7 @@ export interface AiftpMcpApp {
   server: McpServer;
   tools: readonly AiftpToolName[];
   resources: readonly string[];
+  readonly confirmPhrase?: string;
 }
 
 /**
@@ -386,6 +400,7 @@ const toolSchemas = {
   aiftp_rollback: rollbackSchema,
   aiftp_rollback_prepare: rollbackPrepareSchema,
   aiftp_rollback_confirm: rollbackConfirmSchema,
+  aiftp_setup_status: noArgsSchema,
 } satisfies Record<AiftpToolName, z.ZodType>;
 
 const toolDescriptions = {
@@ -434,6 +449,8 @@ const toolDescriptions = {
     'Resolve the rollback target (by steps or explicit snapshot_id), apply the hard-exclude filter, and return planned files + skipped (auth-bearing) files + plan_id / diff_hash / confirm_token. No upload yet.',
   aiftp_rollback_confirm:
     'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials). Requires acknowledge_deletions: true when the prepare step returned one or more plannedDeletes.',
+  aiftp_setup_status:
+    'Report whether the Claude Desktop extension is fully configured: bootstrap, project directory, .aiftp.toml, keychain credential, fleet registration, production confirm phrase. Each failing check carries a Japanese `hint`. Credentials are never surfaced. Read-only.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -1342,6 +1359,22 @@ async function resolveDestination(
     matchedEntry,
     registryReadFailed,
   };
+}
+
+async function handleSetupStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
+  noArgsSchema.parse(rawArgs ?? {});
+  const report = await buildSetupStatus({
+    startup: process.env.AIFTP_DESKTOP_STARTUP,
+    confirmPhrase: app.confirmPhrase,
+    pathExists: async (path: string) => {
+      try {
+        return (await stat(path)) !== undefined;
+      } catch {
+        return false;
+      }
+    },
+  });
+  return textResult(report, report.ok ? undefined : true);
 }
 
 async function handleSitesList(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
@@ -2386,6 +2419,7 @@ const handlers = {
   aiftp_rollback: handleRollback,
   aiftp_rollback_prepare: handleRollbackPrepare,
   aiftp_rollback_confirm: handleRollbackConfirm,
+  aiftp_setup_status: handleSetupStatus,
 } satisfies Record<AiftpToolName, (app: AiftpMcpApp, args: unknown) => Promise<CallToolResult>>;
 
 export async function callAiftpTool(
@@ -2473,6 +2507,10 @@ export function createAiftpMcp(options: AiftpMcpOptions = {}): AiftpMcpApp {
     server: new McpServer({ name: 'aiftp', version: VERSION }),
     tools: Object.keys(handlers) as AiftpToolName[],
     resources: ['aiftp://config', 'aiftp://state/{profile}', 'aiftp://backups/{profile}'],
+    ...(() => {
+      const phrase = options.confirmPhrase ?? process.env.AIFTP_CONFIRM_PHRASE;
+      return phrase === undefined || phrase.length === 0 ? {} : { confirmPhrase: phrase };
+    })(),
   };
 
   for (const name of app.tools) {

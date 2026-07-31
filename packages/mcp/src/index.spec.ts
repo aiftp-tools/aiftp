@@ -2665,4 +2665,33 @@ describe('mcp', () => {
       files: {},
     });
   });
+
+  it('aiftp_setup_status reports the missing credential with a Japanese hint', async () => {
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: false,
+        siteName: 'gwco',
+        profileName: 'production',
+        keychainService: 'aiftp:gwco-production',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'missing',
+        registry: 'registered',
+        gitignore: 'skipped-not-a-repo',
+        missing: ['credential'],
+      },
+    });
+    await writeConfig();
+    const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026' });
+    const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+      ok: boolean;
+      checks: Array<Record<string, string>>;
+    };
+
+    expect(payload.ok).toBe(false);
+    const check = payload.checks.find((entry) => entry.id === 'credential');
+    expect(check?.message).toBe('bootstrap-incomplete: credential not stored');
+    expect(JSON.stringify(payload)).not.toContain('sakura-2026');
+    Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+  });
 });
