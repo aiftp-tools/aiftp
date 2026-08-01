@@ -2681,17 +2681,23 @@ describe('mcp', () => {
         missing: ['credential'],
       },
     });
-    await writeConfig();
-    const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026' });
-    const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
-      ok: boolean;
-      checks: Array<Record<string, string>>;
-    };
+    try {
+      await writeConfig();
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026' });
+      const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+        ok: boolean;
+        checks: Array<Record<string, string>>;
+      };
 
-    expect(payload.ok).toBe(false);
-    const check = payload.checks.find((entry) => entry.id === 'credential');
-    expect(check?.message).toBe('bootstrap-incomplete: credential not stored');
-    expect(JSON.stringify(payload)).not.toContain('sakura-2026');
-    Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+      expect(payload.ok).toBe(false);
+      const check = payload.checks.find((entry) => entry.id === 'credential');
+      expect(check?.message).toBe('bootstrap-incomplete: credential not stored');
+      expect(JSON.stringify(payload)).not.toContain('sakura-2026');
+    } finally {
+      // try/finally (not a trailing statement): if an assertion above
+      // throws, AIFTP_DESKTOP_STARTUP must still be cleared so it cannot
+      // leak into later tests in this file.
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
   });
 });
