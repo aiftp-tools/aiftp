@@ -60,4 +60,19 @@ describe('verifyConfirmation', () => {
     expect(verifyConfirmation('AB3K9P sakura no ki', multi)).toBe(true);
     expect(verifyConfirmation('AB3K9P sakura  no ki', multi)).toBe(false);
   });
+
+  it('verifies against a stored phrase that has baked-in surrounding whitespace', () => {
+    // A phrase saved via a Claude Desktop settings text field can easily
+    // pick up a stray leading/trailing space. hashConfirmation() must trim
+    // it the same way normalize() trims what the operator types, or no
+    // input could ever match (reviewer finding, 2026-08-02).
+    const hash = hashConfirmation('AB3K9P', ' sakura ');
+    expect(verifyConfirmation('AB3K9P sakura', hash)).toBe(true);
+  });
+
+  it('rejects a malformed expectedHash without throwing', () => {
+    expect(() => verifyConfirmation('AB3K9P sakura-2026', 'not-a-valid-hex-digest')).not.toThrow();
+    expect(verifyConfirmation('AB3K9P sakura-2026', 'not-a-valid-hex-digest')).toBe(false);
+    expect(verifyConfirmation('AB3K9P sakura-2026', '')).toBe(false);
+  });
 });

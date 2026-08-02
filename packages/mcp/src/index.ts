@@ -121,6 +121,17 @@ export interface AiftpMcpOptions {
   runtime?: AiftpMcpRuntime;
   /** Shared secret for the production push gate. Never echoed in tool output. */
   confirmPhrase?: string;
+  /**
+   * v0.13 (Task 5, B1/B3): explicit signal that this server is running
+   * inside the Claude Desktop extension. Deliberately NOT inferred from
+   * `AIFTP_DESKTOP_STARTUP` -- that env var is the startup-report
+   * transport, not a mode flag, and keying a safety gate off it would mean
+   * the gate silently loosens the day the transport changes. Production
+   * default: `process.env.AIFTP_DESKTOP === '1'`, set by
+   * packages/desktop-ext/src/server-entry.ts. Terminal / Claude Code users
+   * never set this, so it defaults to false.
+   */
+  desktopMode?: boolean;
 }
 
 export type AiftpToolName =
@@ -159,6 +170,13 @@ export interface AiftpMcpApp {
   tools: readonly AiftpToolName[];
   resources: readonly string[];
   readonly confirmPhrase?: string;
+  /**
+   * v0.13 (Task 5, B3): always populated by createAiftpMcp (never left
+   * undefined) so every read site can do a plain `=== true` check instead
+   * of juggling undefined-means-false. See AiftpMcpOptions.desktopMode for
+   * the production-default rule.
+   */
+  readonly desktopMode: boolean;
 }
 
 /**
@@ -1002,12 +1020,19 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     plannedDeletes,
     ttl_ms: PLAN_TTL_MS,
     prod_profile_warning: prodProfileWarning,
+    // v0.13 (Task 5, B4/B5): the message text must match which of the four
+    // (desktopMode, confirmPhrase) rows this plan falls into. Outside
+    // Desktop mode with no phrase configured (row 4), the message is
+    // byte-for-byte the original v0.12 text -- no mention of a confirm
+    // phrase or Claude Desktop, since that row's behaviour is unchanged.
     ...(prodProfileWarning
       ? {
           prod_profile_message:
-            app.confirmPhrase === undefined
-              ? `Profile "${profileName}" matches safety.prod_profile_patterns. No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
-              : `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`,
+            app.confirmPhrase !== undefined
+              ? `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`
+              : app.desktopMode === true
+                ? `Profile "${profileName}" matches safety.prod_profile_patterns. No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
+                : `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
         }
       : {}),
     ...(confirmationChallenge === undefined
@@ -1056,34 +1081,46 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
       `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
     );
   }
-  // v0.13 (Task 5): production pushes must be gated behind a human
-  // confirmation phrase — the replacement for MCP elicitation (unavailable
-  // in Claude Desktop). Fail-closed: a missing `confirmationHash` on a
-  // production plan means no phrase was configured at prepare time, and
-  // the push must not proceed on `acknowledge_production` alone. This is a
-  // deliberate v0.13 behaviour change from v0.12 — see task-5-report.md.
+  // v0.13 (Task 5, amended by 「Task 5 修正条項」B4): production pushes are
+  // gated behind a human confirmation phrase — the replacement for MCP
+  // elicitation (unavailable in Claude Desktop). `plan.confirmationHash` is
+  // set whenever a phrase was configured at prepare time (rows 1 & 3),
+  // regardless of desktopMode, so the gate below applies uniformly. It is
+  // ONLY when a production plan has NO confirmationHash that desktopMode
+  // decides the outcome: fail closed inside Claude Desktop (row 2, where a
+  // missing phrase is a misconfiguration), but preserve the v0.12
+  // acknowledge_production-only behaviour on the terminal (row 4, where a
+  // missing phrase is normal and expected — existing npm users never
+  // configure one).
   if (plan.prodProfileWarning) {
     if (plan.confirmationHash === undefined) {
-      throw new Error(
-        'confirm-phrase-not-configured: production pushes require a human confirmation phrase, and none is configured. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。(CLI: set AIFTP_CONFIRM_PHRASE.)',
-      );
+      if (app.desktopMode === true) {
+        throw new Error(
+          'confirm-phrase-not-configured: production pushes require a human confirmation phrase, and none is configured. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。',
+        );
+      }
+      // desktopMode is false: row 4, v0.12 behaviour preserved on purpose.
+      // Skip the rest of this block entirely — acknowledge_production
+      // alone (already checked above) is sufficient, and the confirm
+      // phrase is never mentioned.
+    } else {
+      if (args.confirmation === undefined) {
+        throw new Error(
+          'confirmation-required: this production plan needs the human confirmation phrase. Ask the operator to type "<challenge> <phrase>" in chat, then pass it verbatim as `confirmation`.',
+        );
+      }
+      if (!verifyConfirmation(args.confirmation, plan.confirmationHash)) {
+        throw new Error(
+          'confirmation-mismatch: the confirmation phrase did not match. Call aiftp_push_prepare again to obtain a fresh challenge.',
+        );
+      }
+      await appendLogEntry(app.cwd, {
+        at: new Date().toISOString(),
+        event: 'confirm-phrase-accepted',
+        profile: plan.profile,
+        plan_id: plan.planId,
+      });
     }
-    if (args.confirmation === undefined) {
-      throw new Error(
-        'confirmation-required: this production plan needs the human confirmation phrase. Ask the operator to type "<challenge> <phrase>" in chat, then pass it verbatim as `confirmation`.',
-      );
-    }
-    if (!verifyConfirmation(args.confirmation, plan.confirmationHash)) {
-      throw new Error(
-        'confirmation-mismatch: the confirmation phrase did not match. Call aiftp_push_prepare again to obtain a fresh challenge.',
-      );
-    }
-    await appendLogEntry(app.cwd, {
-      at: new Date().toISOString(),
-      event: 'confirm-phrase-accepted',
-      profile: plan.profile,
-      plan_id: plan.planId,
-    });
   }
   if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
     throw new Error(
@@ -2579,9 +2616,14 @@ export function createAiftpMcp(options: AiftpMcpOptions = {}): AiftpMcpApp {
     server: new McpServer({ name: 'aiftp', version: VERSION }),
     tools: Object.keys(handlers) as AiftpToolName[],
     resources: ['aiftp://config', 'aiftp://state/{profile}', 'aiftp://backups/{profile}'],
+    // v0.13 (Task 5, B3): explicit Desktop signal, production default reads
+    // the real env var set by packages/desktop-ext/src/server-entry.ts.
+    desktopMode: options.desktopMode ?? process.env.AIFTP_DESKTOP === '1',
     ...(() => {
       const phrase = options.confirmPhrase ?? process.env.AIFTP_CONFIRM_PHRASE;
-      return phrase === undefined || phrase.length === 0 ? {} : { confirmPhrase: phrase };
+      // Aligned with setup-status.ts's phraseSet check: a whitespace-only
+      // value counts as unset, so the two subsystems agree on presence.
+      return phrase === undefined || phrase.trim().length === 0 ? {} : { confirmPhrase: phrase };
     })(),
   };
 

@@ -107,6 +107,7 @@ export async function startDesktopServer(
   }
 
   process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify(report);
+  process.env.AIFTP_DESKTOP = '1';
 
   try {
     await startMcp({ cwd: input.localRoot ?? process.cwd() });

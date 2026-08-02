@@ -827,10 +827,9 @@ describe('mcp', () => {
         }),
       }),
     };
-    // v0.13 (Task 5): production confirms now fail closed without a
-    // configured confirm phrase, so this app needs one to reach the real
-    // push at the end of this test.
-    const app = createAiftpMcp({ cwd, runtime, confirmPhrase: 'sakura-2026' });
+    // v0.13 (Task 5, B4 row 4 / B7): no desktopMode, no confirmPhrase ->
+    // v0.12 behaviour is preserved, so this app needs neither.
+    const app = createAiftpMcp({ cwd, runtime });
 
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
@@ -838,7 +837,6 @@ describe('mcp', () => {
       plan_id: string;
       diff_hash: string;
       confirm_token: string;
-      confirmation_challenge: string;
     };
 
     // Wrong token: rejected.
@@ -863,15 +861,13 @@ describe('mcp', () => {
 
     // Correct values: real push runs. `acknowledge_production: true`
     // because the test config uses `production` which matches the
-    // default prod_profile_patterns (v0.6.0 #7). `confirmation` carries
-    // the human confirmation phrase (v0.13 Task 5).
+    // default prod_profile_patterns (v0.6.0 #7).
     const confirmRaw = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
       acknowledge_production: true,
-      confirmation: `${prepared.confirmation_challenge} sakura-2026`,
     });
     if (confirmRaw.isError) {
       throw new Error(`confirm failed unexpectedly: ${JSON.stringify(confirmRaw.content)}`);
@@ -1043,9 +1039,9 @@ describe('mcp', () => {
         }),
       }),
     };
-    // v0.13 (Task 5): production confirms fail closed without a configured
-    // confirm phrase.
-    const app = createAiftpMcp({ cwd, runtime, confirmPhrase: 'sakura-2026' });
+    // v0.13 (Task 5, B4 row 4 / B7): no desktopMode, no confirmPhrase ->
+    // v0.12 behaviour is preserved, so this app needs neither.
+    const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
     );
@@ -1061,7 +1057,6 @@ describe('mcp', () => {
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
         acknowledge_production: true,
-        confirmation: `${prepared.confirmation_challenge} sakura-2026`,
       }),
     ) as { ok: boolean };
     expect(first).toMatchObject({ ok: true });
@@ -2711,20 +2706,51 @@ describe('mcp', () => {
   });
 
   // -----------------------------------------------------------------
-  // v0.13 (Task 5): confirm-phrase gate for production pushes.
-  //   - prepare mints a one-time challenge when the profile is a prod
-  //     profile AND a confirm phrase is configured
-  //   - confirm requires "<challenge> <phrase>" verbatim from a human
-  //   - a missing confirm phrase on a prod-profile plan fails CLOSED
-  //     (see task-5-report.md for why this departs from the brief's
-  //     "keep the v0.12 behaviour" asymmetry)
+  // v0.13 (Task 5, amended 2026-08-02 per docs/superpowers/plans/
+  // 2026-07-30-v0.13-implementation-plan.md 「Task 5 修正条項」B1-B7):
+  // confirm-phrase gate for production pushes, scoped by desktopMode.
+  //
+  //   desktopMode | confirmPhrase | production push behaviour
+  //   true        | set           | confirm-phrase gate (row 1)
+  //   true        | unset         | fail CLOSED, Desktop wording (row 2)
+  //   false       | set           | confirm-phrase gate, terminal opt-in (row 3)
+  //   false       | unset         | v0.12 behaviour preserved, no phrase mention (row 4)
+  //
+  // desktopMode is an explicit flag (AIFTP_DESKTOP=1 / options.desktopMode),
+  // never inferred from AIFTP_DESKTOP_STARTUP (that's the startup-report
+  // transport, not a mode signal -- see B1).
   // -----------------------------------------------------------------
 
-  it('gates a production push behind the confirmation phrase', async () => {
+  function fakeBackupStoreForRealPush(): NonNullable<AiftpMcpRuntime['createBackupStore']> {
+    // Real (dry_run=false) confirm builds the default backup store, which
+    // would otherwise reach the real OS keychain (see the stale-plan-id
+    // test above for the same requirement).
+    return async () => ({
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => Buffer.alloc(0),
+      createAutoSnapshot: async () => ({
+        id: 'stub-snap',
+        type: 'auto',
+        createdAt: '2026-05-19T00:00:00.000Z',
+        fileCount: 0,
+        totalBytes: 0,
+        files: [],
+      }),
+    });
+  }
+
+  async function readLogFileRaw(): Promise<string> {
+    return readFile(join(cwd, '.aiftp', 'log.jsonl'), 'utf8').catch(() => '');
+  }
+
+  it('gates a production push behind the confirmation phrase in Desktop mode (row 1)', async () => {
     await writeConfig();
     const dryRun = createPushResult({ planned: ['index.html'] });
     const app = createAiftpMcp({
       cwd,
+      desktopMode: true,
       confirmPhrase: 'sakura-2026',
       runtime: {
         runPush: async (opts) =>
@@ -2734,23 +2760,7 @@ describe('mcp', () => {
                 uploaded: ['index.html'],
                 nextState: { schema: 1, files: {} },
               }),
-        // Real (dry_run=false) confirm builds the default backup store,
-        // which would otherwise reach the real OS keychain (see the
-        // stale-plan-id test above for the same requirement).
-        createBackupStore: async () => ({
-          listSnapshots: async () => [],
-          verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
-          prune: async () => [],
-          restoreFile: async () => Buffer.alloc(0),
-          createAutoSnapshot: async () => ({
-            id: 'stub-snap',
-            type: 'auto',
-            createdAt: '2026-05-19T00:00:00.000Z',
-            fileCount: 0,
-            totalBytes: 0,
-            files: [],
-          }),
-        }),
+        createBackupStore: fakeBackupStoreForRealPush(),
       },
     });
 
@@ -2778,6 +2788,7 @@ describe('mcp', () => {
     const missing = await callAiftpTool(app, 'aiftp_push_confirm', base);
     expect(missing.isError).toBe(true);
     expect(JSON.stringify(missing.content)).toMatch(/confirmation-required:/);
+    expect(JSON.stringify(missing.content)).not.toContain('sakura-2026');
 
     const wrong = await callAiftpTool(app, 'aiftp_push_confirm', {
       ...base,
@@ -2794,20 +2805,46 @@ describe('mcp', () => {
       }),
     ) as { ok: boolean };
     expect(accepted.ok).toBe(true);
+
+    // The phrase must never land in the on-disk operation log either.
+    expect(await readLogFileRaw()).not.toContain('sakura-2026');
   });
 
-  it('fails closed on a production push when no confirm phrase is configured', async () => {
-    // Ambiguity resolution (see task-5-report.md): the brief's own draft
-    // kept the v0.12 acknowledge_production-only gate when app.confirmPhrase
-    // is absent. That was overridden per this task's explicit instruction --
-    // a missing shared secret must never silently drop the confirm-phrase
-    // gate on a production push. So unlike v0.12, acknowledge_production
-    // alone is no longer sufficient once a profile matches
-    // safety.prod_profile_patterns; the operator must configure a phrase.
+  it('applies the confirm-phrase gate outside Desktop mode when a phrase is explicitly configured (row 3)', async () => {
+    // Terminal / Claude Code users can still opt in to the phrase gate by
+    // setting AIFTP_CONFIRM_PHRASE / options.confirmPhrase without ever
+    // setting desktopMode. B4 row 3.
     await writeConfig();
     const dryRun = createPushResult({ planned: ['index.html'] });
     const app = createAiftpMcp({
       cwd,
+      confirmPhrase: 'sakura-2026',
+      runtime: { runPush: async () => dryRun },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+      // intentionally omitting `confirmation`
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/confirmation-required:/);
+    expect(JSON.stringify(result.content)).not.toContain('sakura-2026');
+  });
+
+  it('fails closed on a production push in Desktop mode when no confirm phrase is configured (row 2)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
       runtime: {
         runPush: async (opts) =>
           opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
@@ -2821,8 +2858,10 @@ describe('mcp', () => {
       diff_hash: string;
       confirm_token: string;
       confirmation_challenge?: string;
+      prod_profile_message?: string;
     };
     expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toMatch(/Claude Desktop/);
 
     const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',
@@ -2834,5 +2873,97 @@ describe('mcp', () => {
     expect(refused.isError).toBe(true);
     expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
     expect(JSON.stringify(refused.content)).toMatch(/Claude Desktop/);
+    // No phrase was ever configured in this test, so there is nothing to
+    // leak by definition -- but guard against a future env-var
+    // interpolation bug that would leak the *name* of the mechanism.
+    expect(JSON.stringify(refused.content)).not.toMatch(/AIFTP_CONFIRM_PHRASE=\S/);
+  });
+
+  it('keeps the v0.12 acknowledge_production behaviour when Desktop mode is off and no phrase is configured (row 4, B6)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: false,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({
+                uploaded: ['index.html'],
+                nextState: { schema: 1, files: {} },
+              }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    // B5: outside Desktop mode, the response must not mention the confirm
+    // phrase or a Desktop settings screen at all.
+    expect(prepared.prod_profile_message).not.toMatch(/confirmation phrase|合言葉|Claude Desktop/);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('defaults desktopMode from AIFTP_DESKTOP=1 in production, with no fake injected (B3)', async () => {
+    // No options.desktopMode is passed here -- only the real environment
+    // variable that packages/desktop-ext/src/server-entry.ts sets (B2).
+    // This is the "no fake injected" test B3 requires for the production
+    // default, guarding against the injection-only-no-prod-fallback bug
+    // class this branch has hit three times.
+    const originalDesktop = process.env.AIFTP_DESKTOP;
+    process.env.AIFTP_DESKTOP = '1';
+    try {
+      await writeConfig();
+      const dryRun = createPushResult({ planned: ['index.html'] });
+      const app = createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async (opts) =>
+            opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
+        },
+      });
+
+      const prepared = parseText(
+        await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+      ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+      // No confirmPhrase configured + desktopMode defaulted true from the
+      // env var alone -> fails closed (row 2), proving the default reads
+      // process.env.AIFTP_DESKTOP without any options.desktopMode fake.
+      const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    } finally {
+      if (originalDesktop === undefined) {
+        Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP');
+      } else {
+        process.env.AIFTP_DESKTOP = originalDesktop;
+      }
+    }
   });
 });
