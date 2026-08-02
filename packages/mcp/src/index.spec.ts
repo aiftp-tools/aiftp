@@ -2966,4 +2966,11 @@ describe('mcp', () => {
       }
     }
   });
+
+  it('registers the aiftp_setup prompt', () => {
+    const app = createAiftpMcp({ cwd });
+    const registered = (app.server as unknown as Record<string, Record<string, unknown>>)
+      ._registeredPrompts;
+    expect(Object.keys(registered)).toContain('aiftp_setup');
+  });
 });

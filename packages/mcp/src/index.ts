@@ -56,6 +56,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { generateChallenge, hashConfirmation, verifyConfirmation } from './confirm-phrase.js';
+import { buildSetupPromptText } from './setup-prompt.js';
 import { buildSetupStatus } from './setup-status.js';
 
 export { VERSION };
@@ -2637,6 +2638,18 @@ export function createAiftpMcp(options: AiftpMcpOptions = {}): AiftpMcpApp {
       async (args: unknown) => callAiftpTool(app, name, args),
     );
   }
+
+  app.server.registerPrompt(
+    'aiftp_setup',
+    {
+      title: 'aiftp セットアップ',
+      description:
+        'Guide the operator through the four onboarding steps: connection check, test-area push, production push behind the confirmation phrase, and rollback.',
+    },
+    () => ({
+      messages: [{ role: 'user', content: { type: 'text', text: buildSetupPromptText() } }],
+    }),
+  );
 
   app.server.registerResource(
     'config',
