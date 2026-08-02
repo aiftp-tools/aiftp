@@ -55,6 +55,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { generateChallenge, hashConfirmation, verifyConfirmation } from './confirm-phrase.js';
 import { buildSetupStatus } from './setup-status.js';
 
 export { VERSION };
@@ -241,6 +242,13 @@ const pushConfirmSchema = requiredProfileSchema
       .optional()
       .describe(
         'Required when the prepare step returned prod_profile_warning=true. Must be the literal `true` to apply a push to a profile that matches safety.prod_profile_patterns. Schema-rejected if `false` is sent (no silent fallthrough to the runtime guard).',
+      ),
+    confirmation: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Required when the prepare step returned confirmation_challenge. The human operator must type "<challenge> <phrase>" into chat; the phrase is a shared secret the model cannot know. Do not guess it and do not compose it yourself — wait for the operator to send it.',
       ),
   })
   .strict();
@@ -759,6 +767,14 @@ interface PreparedPushPlan {
    */
   prodProfileWarning: boolean;
   createdAt: number;
+  /**
+   * v0.13 (Task 5): SHA-256 digest of the human confirmation phrase, set
+   * only when `prodProfileWarning` is true AND `app.confirmPhrase` was
+   * configured at prepare time. Never the phrase itself — see
+   * confirm-phrase.ts. Absence of this field on a production plan is the
+   * fail-closed signal consumed by `handlePushConfirm`.
+   */
+  confirmationHash?: string;
 }
 
 const PLAN_TTL_MS = 5 * 60 * 1000;
@@ -934,6 +950,13 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   });
   const plannedDeletes = plannedDeletesOf(previewResult);
   const confirmToken = randomBytes(24).toString('base64url');
+  // v0.13 (Task 5): production pushes are gated behind a human-supplied
+  // confirmation phrase — the replacement for MCP elicitation, which
+  // Claude Desktop does not support. A challenge is only minted when this
+  // is a production plan AND a phrase is actually configured; see the
+  // fail-closed check in handlePushConfirm for what happens otherwise.
+  const confirmationChallenge =
+    prodProfileWarning && app.confirmPhrase !== undefined ? generateChallenge() : undefined;
   planStore.set(planId, {
     planId,
     diffHash,
@@ -947,11 +970,22 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     plannedDeletes,
     prodProfileWarning,
     createdAt: now,
+    ...(confirmationChallenge === undefined || app.confirmPhrase === undefined
+      ? {}
+      : { confirmationHash: hashConfirmation(confirmationChallenge, app.confirmPhrase) }),
   });
   while (planStore.size > PUSH_PLAN_STORE_LIMIT) {
     const oldest = planStore.keys().next().value;
     if (oldest === undefined) break;
     planStore.delete(oldest);
+  }
+  if (confirmationChallenge !== undefined) {
+    await appendLogEntry(app.cwd, {
+      at: new Date().toISOString(),
+      event: 'confirm-phrase-challenge',
+      profile: profileName,
+      plan_id: planId,
+    });
   }
   return textResult({
     ok: true,
@@ -970,9 +1004,18 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     prod_profile_warning: prodProfileWarning,
     ...(prodProfileWarning
       ? {
-          prod_profile_message: `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
+          prod_profile_message:
+            app.confirmPhrase === undefined
+              ? `Profile "${profileName}" matches safety.prod_profile_patterns. No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
+              : `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`,
         }
       : {}),
+    ...(confirmationChallenge === undefined
+      ? {}
+      : {
+          confirmation_challenge: confirmationChallenge,
+          confirmation_instruction: `本番へ反映します。人間が次の1行をそのままチャットに入力してください: 「${confirmationChallenge} <合言葉>」。合言葉は Claude Desktop の設定に登録されたもので、AI は知りません。`,
+        }),
   });
 }
 
@@ -1012,6 +1055,35 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     throw new Error(
       `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
     );
+  }
+  // v0.13 (Task 5): production pushes must be gated behind a human
+  // confirmation phrase — the replacement for MCP elicitation (unavailable
+  // in Claude Desktop). Fail-closed: a missing `confirmationHash` on a
+  // production plan means no phrase was configured at prepare time, and
+  // the push must not proceed on `acknowledge_production` alone. This is a
+  // deliberate v0.13 behaviour change from v0.12 — see task-5-report.md.
+  if (plan.prodProfileWarning) {
+    if (plan.confirmationHash === undefined) {
+      throw new Error(
+        'confirm-phrase-not-configured: production pushes require a human confirmation phrase, and none is configured. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。(CLI: set AIFTP_CONFIRM_PHRASE.)',
+      );
+    }
+    if (args.confirmation === undefined) {
+      throw new Error(
+        'confirmation-required: this production plan needs the human confirmation phrase. Ask the operator to type "<challenge> <phrase>" in chat, then pass it verbatim as `confirmation`.',
+      );
+    }
+    if (!verifyConfirmation(args.confirmation, plan.confirmationHash)) {
+      throw new Error(
+        'confirmation-mismatch: the confirmation phrase did not match. Call aiftp_push_prepare again to obtain a fresh challenge.',
+      );
+    }
+    await appendLogEntry(app.cwd, {
+      at: new Date().toISOString(),
+      event: 'confirm-phrase-accepted',
+      profile: plan.profile,
+      plan_id: plan.planId,
+    });
   }
   if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
     throw new Error(

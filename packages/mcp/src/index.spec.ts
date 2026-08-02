@@ -827,7 +827,10 @@ describe('mcp', () => {
         }),
       }),
     };
-    const app = createAiftpMcp({ cwd, runtime });
+    // v0.13 (Task 5): production confirms now fail closed without a
+    // configured confirm phrase, so this app needs one to reach the real
+    // push at the end of this test.
+    const app = createAiftpMcp({ cwd, runtime, confirmPhrase: 'sakura-2026' });
 
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
@@ -835,6 +838,7 @@ describe('mcp', () => {
       plan_id: string;
       diff_hash: string;
       confirm_token: string;
+      confirmation_challenge: string;
     };
 
     // Wrong token: rejected.
@@ -859,13 +863,15 @@ describe('mcp', () => {
 
     // Correct values: real push runs. `acknowledge_production: true`
     // because the test config uses `production` which matches the
-    // default prod_profile_patterns (v0.6.0 #7).
+    // default prod_profile_patterns (v0.6.0 #7). `confirmation` carries
+    // the human confirmation phrase (v0.13 Task 5).
     const confirmRaw = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',
       plan_id: prepared.plan_id,
       diff_hash: prepared.diff_hash,
       confirm_token: prepared.confirm_token,
       acknowledge_production: true,
+      confirmation: `${prepared.confirmation_challenge} sakura-2026`,
     });
     if (confirmRaw.isError) {
       throw new Error(`confirm failed unexpectedly: ${JSON.stringify(confirmRaw.content)}`);
@@ -1037,7 +1043,9 @@ describe('mcp', () => {
         }),
       }),
     };
-    const app = createAiftpMcp({ cwd, runtime });
+    // v0.13 (Task 5): production confirms fail closed without a configured
+    // confirm phrase.
+    const app = createAiftpMcp({ cwd, runtime, confirmPhrase: 'sakura-2026' });
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
     );
@@ -1053,6 +1061,7 @@ describe('mcp', () => {
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
         acknowledge_production: true,
+        confirmation: `${prepared.confirmation_challenge} sakura-2026`,
       }),
     ) as { ok: boolean };
     expect(first).toMatchObject({ ok: true });
@@ -2699,5 +2708,131 @@ describe('mcp', () => {
       // leak into later tests in this file.
       Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
     }
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 (Task 5): confirm-phrase gate for production pushes.
+  //   - prepare mints a one-time challenge when the profile is a prod
+  //     profile AND a confirm phrase is configured
+  //   - confirm requires "<challenge> <phrase>" verbatim from a human
+  //   - a missing confirm phrase on a prod-profile plan fails CLOSED
+  //     (see task-5-report.md for why this departs from the brief's
+  //     "keep the v0.12 behaviour" asymmetry)
+  // -----------------------------------------------------------------
+
+  it('gates a production push behind the confirmation phrase', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      confirmPhrase: 'sakura-2026',
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({
+                uploaded: ['index.html'],
+                nextState: { schema: 1, files: {} },
+              }),
+        // Real (dry_run=false) confirm builds the default backup store,
+        // which would otherwise reach the real OS keychain (see the
+        // stale-plan-id test above for the same requirement).
+        createBackupStore: async () => ({
+          listSnapshots: async () => [],
+          verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+          prune: async () => [],
+          restoreFile: async () => Buffer.alloc(0),
+          createAutoSnapshot: async () => ({
+            id: 'stub-snap',
+            type: 'auto',
+            createdAt: '2026-05-19T00:00:00.000Z',
+            fileCount: 0,
+            totalBytes: 0,
+            files: [],
+          }),
+        }),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      confirmation_challenge: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(true);
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+    expect(JSON.stringify(prepared)).not.toContain('sakura-2026');
+
+    const base = {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    };
+
+    const missing = await callAiftpTool(app, 'aiftp_push_confirm', base);
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing.content)).toMatch(/confirmation-required:/);
+
+    const wrong = await callAiftpTool(app, 'aiftp_push_confirm', {
+      ...base,
+      confirmation: `${prepared.confirmation_challenge} wrong-phrase`,
+    });
+    expect(wrong.isError).toBe(true);
+    expect(JSON.stringify(wrong.content)).toMatch(/confirmation-mismatch:/);
+    expect(JSON.stringify(wrong.content)).not.toContain('sakura-2026');
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        ...base,
+        confirmation: `${prepared.confirmation_challenge} sakura-2026`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('fails closed on a production push when no confirm phrase is configured', async () => {
+    // Ambiguity resolution (see task-5-report.md): the brief's own draft
+    // kept the v0.12 acknowledge_production-only gate when app.confirmPhrase
+    // is absent. That was overridden per this task's explicit instruction --
+    // a missing shared secret must never silently drop the confirm-phrase
+    // gate on a production push. So unlike v0.12, acknowledge_production
+    // alone is no longer sufficient once a profile matches
+    // safety.prod_profile_patterns; the operator must configure a phrase.
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+    };
+    expect(prepared.confirmation_challenge).toBeUndefined();
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    expect(JSON.stringify(refused.content)).toMatch(/Claude Desktop/);
   });
 });
