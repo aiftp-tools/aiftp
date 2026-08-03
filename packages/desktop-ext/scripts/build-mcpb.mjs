@@ -25,7 +25,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildManifest } from '../dist/manifest.js';
 
@@ -72,6 +72,17 @@ const [coreTarball, mcpTarball, cliTarball] = await Promise.all(
 // 1b. Install the tarballs into stage/server. `overrides` forces every
 // nested reference to @aiftp-tools/* (e.g. cli's own dependency on core) to
 // resolve to the same local tarball instead of the public npm registry.
+//
+// Paths are written *relative* to stage/server, not absolute. An absolute
+// `file:` path would bake the build machine's home directory into
+// server/package.json, which ships inside the .mcpb to every attendee who
+// installs the extension — an avoidable disclosure of the maintainer's
+// filesystem layout, and dead metadata besides (the path would not exist on
+// their machine). npm resolves relative `file:` specifiers against the
+// directory of the package.json that declares them, so a path relative to
+// stageServer is exactly what's needed.
+const relativeTarball = (absPath) => `file:${relative(stageServer, absPath)}`;
+
 await writeFile(
   join(stageServer, 'package.json'),
   `${JSON.stringify(
@@ -81,13 +92,12 @@ await writeFile(
       private: true,
       type: 'module',
       dependencies: {
-        '@aiftp-tools/cli': `file:${cliTarball}`,
-        '@aiftp-tools/core': `file:${coreTarball}`,
+        '@aiftp-tools/cli': relativeTarball(cliTarball),
+        '@aiftp-tools/core': relativeTarball(coreTarball),
       },
       overrides: {
-        '@aiftp-tools/core': `file:${coreTarball}`,
-        '@aiftp-tools/mcp': `file:${mcpTarball}`,
-        '@aiftp-tools/cli': `file:${cliTarball}`,
+        '@aiftp-tools/core': relativeTarball(coreTarball),
+        '@aiftp-tools/mcp': relativeTarball(mcpTarball),
       },
     },
     null,
