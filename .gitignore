@@ -43,3 +43,6 @@ Thumbs.db
 
 # v0.9.4+: auto-generated VERSION constant (sourced from package.json)
 packages/core/src/version.generated.ts
+
+# v0.13: .mcpb bundle build output (manifest.json, staged node_modules, packed .mcpb)
+packages/desktop-ext/dist/

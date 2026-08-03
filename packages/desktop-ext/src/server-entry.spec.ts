@@ -50,6 +50,7 @@ describe('startDesktopServer', () => {
   afterEach(async () => {
     await rm(localRoot, { recursive: true, force: true });
     Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP');
   });
 
   it('starts the MCP server even when every setting is missing', async () => {
