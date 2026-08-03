@@ -1,14 +1,26 @@
 #!/usr/bin/env node
 // Assemble the .mcpb bundle:
 //   1. `pnpm pack` the three real runtime dependencies (core / mcp / cli) to
-//      tarballs, then `npm install --omit=dev` them into stage/server so a
-//      real node_modules tree exists.
+//      tarballs, then `npm install --omit=dev --ignore-scripts` them into
+//      stage/server so a real node_modules tree exists.
 //
 //      We deliberately do NOT bundle with esbuild: ssh2 (used by the SFTP
 //      client) has dynamic requires and an optional native dependency
-//      (cpu-features) that bundlers break. `cpu-features` is optional, so
-//      omitting it lets one .mcpb run on both macOS and Windows via the
-//      pure-JS crypto fallback.
+//      (cpu-features) that bundlers break.
+//
+//      `--ignore-scripts` is load-bearing, not an optimization: without it,
+//      npm runs node-gyp for ssh2's optional `sshcrypto` binding and for
+//      `cpu-features`, which (a) compiles a macOS-only .node binary even
+//      though the manifest targets both darwin and win32 — the wrong
+//      artifact for Windows attendees — and (b) leaves node-gyp
+//      Makefile/config.gypi/*.o.d files behind that bake in the build
+//      machine's home directory and toolchain paths, which then ship inside
+//      the .mcpb. Both packages are optional accelerators: ssh2 has a
+//      pure-JS crypto fallback and cpu-features is optional, so skipping
+//      their native builds costs SFTP crypto speed, not correctness — the
+//      right trade for an audience of FTPS-mostly beginners on shared
+//      hosting. `guardStagedTree` below re-checks this at build time so a
+//      regression here fails the build instead of shipping silently.
 //
 //      We use the `pnpm pack` + `npm install` route instead of `pnpm deploy`:
 //      in this environment `pnpm deploy --prod --legacy` produced a
@@ -21,13 +33,63 @@
 //      those names from the public registry (they are already published
 //      there under overlapping version numbers).
 //   2. Write manifest.json from the compiled buildManifest().
-//   3. `mcpb pack`.
+//   3. Guard the staged tree, then `mcpb pack`.
 
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildManifest } from '../dist/manifest.js';
+
+/**
+ * Fails the build if the staged tree (what's about to be zipped into the
+ * .mcpb) contains either:
+ *   - a file whose contents reference the build machine's home directory
+ *     (an absolute-path / identity leak into a file every attendee gets), or
+ *   - a `*.node` native binary (platform-specific; the manifest declares
+ *     both darwin and win32, so a binary built on this machine is wrong for
+ *     the other platform).
+ * This class of defect surfaced twice during Task 7 review without the test
+ * suite ever catching it, so it gets its own build-time check rather than
+ * relying on a human unzipping the artifact again next time.
+ */
+async function guardStagedTree(root) {
+  const home = homedir();
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  const nativeBinaries = [];
+  const leaks = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const filePath = join(entry.parentPath ?? entry.path, entry.name);
+    if (filePath.endsWith('.node')) {
+      nativeBinaries.push(filePath);
+      continue;
+    }
+    const contents = await readFile(filePath);
+    if (contents.includes(home)) {
+      leaks.push(filePath);
+    }
+  }
+  const problems = [];
+  if (leaks.length > 0) {
+    const list = leaks.map((f) => `  - ${relative(root, f)}`).join('\n');
+    problems.push(
+      `${leaks.length} file(s) contain the build machine's home directory ("${home}"):\n${list}`,
+    );
+  }
+  if (nativeBinaries.length > 0) {
+    const list = nativeBinaries.map((f) => `  - ${relative(root, f)}`).join('\n');
+    problems.push(
+      `${nativeBinaries.length} native .node binary/binaries found (platform-specific, breaks the other target platform):\n${list}`,
+    );
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `build-mcpb: refusing to pack a tainted staging tree.\n\n${problems.join('\n\n')}`,
+    );
+  }
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, '..');
@@ -106,7 +168,10 @@ await writeFile(
   'utf8',
 );
 
-execFileSync('npm', ['install', '--omit=dev'], { cwd: stageServer, stdio: 'inherit' });
+execFileSync('npm', ['install', '--omit=dev', '--ignore-scripts'], {
+  cwd: stageServer,
+  stdio: 'inherit',
+});
 
 // 1c. Copy desktop-ext's own compiled entry point (not installed as a
 // dependency — it IS this package).
@@ -133,7 +198,8 @@ await writeFile(
 );
 await cp(join(pkgRoot, 'icon.png'), join(stage, 'icon.png'));
 
-// 3. pack
+// 3. guard, then pack
+await guardStagedTree(stage);
 execFileSync(
   'pnpm',
   ['exec', 'mcpb', 'pack', stage, join(pkgRoot, 'dist', `aiftp-${version}.mcpb`)],
