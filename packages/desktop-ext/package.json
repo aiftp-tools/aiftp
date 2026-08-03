@@ -1,6 +1,6 @@
 {
   "name": "@aiftp-tools/desktop-ext",
-  "version": "0.12.4",
+  "version": "0.13.0",
   "private": true,
   "description": "aiftp Claude Desktop extension (.mcpb) — build-only package, never published to npm",
   "license": "MIT",
