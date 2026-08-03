@@ -25,7 +25,7 @@ Release tags live in the GitHub repository:
 - **Claude Desktop 拡張（`.mcpb`）** — GitHub Release に `aiftp-0.13.0.mcpb` を添付。ダブルクリックで導入でき、Node.js の導入も MCP 設定 JSON の手編集も不要。設定 UI で選んだサイトフォルダを起動時に冪等ブートストラップし（`.aiftp.toml` 生成・キーチェーン保存・サイト台帳登録）、以後は CLI 版とまったく同じ状態を共有する。**未署名配布**（理由と安全性の根拠は `docs/desktop-extension.md`）。
 - **`aiftp_setup_status` ツール** — 拡張の設定が揃っているかを 6 項目（bootstrap / プロジェクトフォルダ / `.aiftp.toml` / キーチェーン / サイト台帳 / 合言葉）で報告する読み取り専用ツール。失敗した項目には**日本語の `hint`** が付く。設定不足でサーバ起動を失敗させると Claude Desktop は「接続エラー」としか表示しないため、起動は常に成功させ不足はここで返す設計。
 - **`aiftp_setup` prompt** — 接続確認 → テスト領域へ push → 本番反映 → ロールバックの 4 ステップを案内する MCP prompt。本リポジトリ初の prompt。
-- **本番 push の合言葉ゲート** — 本番プロファイルへの `aiftp_push_prepare` がプランごとのチャレンジコードを返し、`aiftp_push_confirm` は `confirmation: "<チャレンジ> <合言葉>"` の完全一致を要求する（タイミング安全比較・ハッシュのみ保持）。合言葉はツール出力に一切出ないため、**人間がチャットに入力するまで confirm は通らない**。提示と受理は `.aiftp/log.jsonl` に記録される。**同一会話内での再利用という既知の限界**は `docs/desktop-extension.md` に明記した。合言葉が未設定の場合は v0.12 と同じ `acknowledge_production` のみのゲートになる（CLI 利用者との互換）。
+- **本番 push の合言葉ゲート** — 本番プロファイルへの `aiftp_push_prepare` がプランごとのチャレンジコードを返し、`aiftp_push_confirm` は `confirmation: "<チャレンジ> <合言葉>"` の完全一致を要求する（タイミング安全比較・ハッシュのみ保持）。合言葉はツール出力に一切出ないため、**人間がチャットに入力するまで confirm は通らない**。提示と受理は `.aiftp/log.jsonl` に記録される。**同一会話内での再利用という既知の限界**は `docs/desktop-extension.md` に明記した。合言葉が未設定の場合、**ターミナル / Claude Code からの利用は** v0.12 と同じ `acknowledge_production` のみのゲートになる（CLI 利用者との互換）。**Claude Desktop 拡張からの利用ではこのフォールバックは適用されず、本番反映はエラーで拒否される**（詳細は `docs/desktop-extension.md`）。
 
 ### Changed
 
