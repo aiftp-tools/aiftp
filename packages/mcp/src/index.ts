@@ -11,10 +11,13 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  type Config,
   type DeployClient,
   type DeployUploader,
+  type DestinationFingerprint,
   type DoctorReport,
   type ImportedProfile,
+  type ProfileConfig,
   type PushBackupStore,
   type PushOptions,
   type PushResult,
@@ -30,9 +33,11 @@ import {
   type VerifyResult,
   buildDeployClientOptions,
   checkAll,
+  computeDestinationFingerprint,
   createDefaultBackupStore,
   createDeployClient,
   createExcluder,
+  describeDestinationChange,
   getPassword,
   hasPassword,
   isProdProfile,
@@ -43,6 +48,7 @@ import {
   migrateV1ToV2Source,
   parseFilezillaXml,
   removeProfileBlock,
+  requiresProductionConfirmation,
   resolveDefaultProfile,
   resolveRollbackTarget,
   resolveSite,
@@ -795,17 +801,34 @@ interface PreparedPushPlan {
   planned: readonly string[];
   plannedDeletes: readonly string[];
   /**
-   * v0.6.0 #7: true when the profile matched `safety.prod_profile_patterns`
-   * at prepare time. When set, `aiftp_push_confirm` requires
-   * `acknowledge_production: true` in the arguments — preventing an AI
-   * agent from echoing the plan back blindly to a production target.
+   * DISPLAY only: true when the profile matched
+   * `safety.prod_profile_patterns` at prepare time (v0.6.0 #7). Decides how
+   * the plan is described, never whether it may be applied — see
+   * `productionConfirmationRequired`.
    */
-  prodProfileWarning: boolean;
+  matchedProdPattern: boolean;
+  /**
+   * AUTHORIZATION: true when this plan may only be applied with a human
+   * confirmation (`acknowledge_production` plus, when a phrase is
+   * configured, the confirm phrase). Computed by core's
+   * `requiresProductionConfirmation()`, which floors it at `true` in
+   * Desktop mode so `safety.*` cannot switch the gate off from a file the
+   * AI can edit (v0.13 Codex cross-review, H1). Outside Desktop mode this
+   * equals `matchedProdPattern`, preserving v0.12 terminal behaviour.
+   */
+  productionConfirmationRequired: boolean;
+  /**
+   * v0.13 Codex cross-review, H3: hash of the destination this plan was
+   * approved against (host / port / protocol / user / keychain service /
+   * remote root / TLS settings / production classification). Re-checked
+   * immediately before the upload runs.
+   */
+  destination: DestinationFingerprint;
   createdAt: number;
   /**
    * v0.13 (Task 5): SHA-256 digest of the human confirmation phrase, set
-   * only when `prodProfileWarning` is true AND `app.confirmPhrase` was
-   * configured at prepare time. Never the phrase itself — see
+   * only when `productionConfirmationRequired` is true AND
+   * `app.confirmPhrase` was configured at prepare time. Never the phrase itself — see
    * confirm-phrase.ts. Absence of this field on a production plan is the
    * fail-closed signal consumed by `handlePushConfirm`.
    */
@@ -924,6 +947,76 @@ async function executePush(
   }
 }
 
+/**
+ * Fingerprint the destination a prepare step is about to hand out, from the
+ * config it just read. Confirm re-runs this against a freshly-read config
+ * and refuses on any difference (v0.13 Codex cross-review, H3).
+ *
+ * Both call sites go through this one function so the two fingerprints can
+ * never be computed over different inputs — the production classification in
+ * particular has to be derived identically on both sides.
+ */
+function fingerprintDestination(
+  app: AiftpMcpApp,
+  profileName: string,
+  profile: ProfileConfig,
+  config: Config,
+): DestinationFingerprint {
+  return computeDestinationFingerprint({
+    profile,
+    config,
+    productionConfirmationRequired: requiresProductionConfirmation({
+      profileName,
+      patterns: config.safety.prod_profile_patterns,
+      warnEnabled: config.safety.warn_on_prod_profile,
+      desktopMode: app.desktopMode === true,
+    }),
+  });
+}
+
+/**
+ * Refuse, as a structured tool error, when the destination drifted between
+ * prepare and confirm. Names the changed components (`host`, `user`, ...)
+ * rather than echoing their values: this project's redaction contract allows
+ * remote_root / host / user in messages, but naming beats dumping — and the
+ * fingerprint itself only ever holds hashes.
+ */
+function assertDestinationUnchanged(input: {
+  app: AiftpMcpApp;
+  profileName: string;
+  expected: DestinationFingerprint;
+  config: Config;
+  prepareToolName: 'aiftp_push_prepare' | 'aiftp_rollback_prepare';
+}): void {
+  const profile = input.config.profile[input.profileName];
+  if (!profile) {
+    throw new Error(
+      `destination-changed: profile "${input.profileName}" is no longer defined in .aiftp.toml. Call ${input.prepareToolName} again to inspect the current destination.`,
+    );
+  }
+  const current = fingerprintDestination(input.app, input.profileName, profile, input.config);
+  if (current.digest === input.expected.digest) return;
+  const changed = describeDestinationChange(input.expected, current);
+  const detail = changed.length > 0 ? ` (changed: ${changed.join(', ')})` : '';
+  throw new Error(
+    `destination-changed: the deployment destination for profile "${input.profileName}" changed between prepare and confirm${detail}. Refusing to write to a destination the operator did not approve. Call ${input.prepareToolName} again to inspect the current destination.`,
+  );
+}
+
+/**
+ * First sentence of every production-gate message. When the profile matched
+ * the user's own patterns it says so (the v0.12 wording, byte-identical on
+ * the terminal). When the gate comes from the Desktop-mode floor instead, it
+ * must NOT claim a pattern match that did not happen — the operator may have
+ * emptied `prod_profile_patterns` and would rightly distrust a message that
+ * contradicts their own config.
+ */
+function productionGateReason(profileName: string, matchedProdPattern: boolean): string {
+  return matchedProdPattern
+    ? `Profile "${profileName}" matches safety.prod_profile_patterns.`
+    : `Claude Desktop mode always requires human confirmation before writing to profile "${profileName}", regardless of safety.prod_profile_patterns.`;
+}
+
 async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   const args = pushPrepareSchema.parse(rawArgs ?? {});
   const config = await loadConfigForMcp(app.cwd);
@@ -964,16 +1057,28 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     files: args.files,
     dry_run: true,
   });
-  // v0.6.0 #7: surface a prod-profile warning when the profile name
-  // matches the user-configured patterns. AI agents see this in the
-  // prepare response and must echo `acknowledge_production: true`
-  // back to confirm — preventing reflexive end-to-end automation
-  // from blowing up production.
-  const prodProfileWarning = isProdProfile({
+  // Two separate decisions, deliberately not one value (v0.13 Codex
+  // cross-review, H1 — see packages/core/src/safety.ts):
+  //   matchedProdPattern              -> how the plan is DESCRIBED
+  //   productionConfirmationRequired  -> whether it may be APPLIED
+  // v0.6.0 #7: the description tells AI agents to echo
+  // `acknowledge_production: true` back to confirm, preventing reflexive
+  // end-to-end automation from blowing up production. The authorization
+  // value is floored at true in Desktop mode, so writing
+  // `warn_on_prod_profile = false` (or emptying `prod_profile_patterns`)
+  // into `.aiftp.toml` can no longer remove the gate.
+  const matchedProdPattern = isProdProfile({
     profileName,
     patterns: config.safety.prod_profile_patterns,
     warnEnabled: config.safety.warn_on_prod_profile,
   });
+  const productionConfirmationRequired = requiresProductionConfirmation({
+    profileName,
+    patterns: config.safety.prod_profile_patterns,
+    warnEnabled: config.safety.warn_on_prod_profile,
+    desktopMode: app.desktopMode === true,
+  });
+  const destinationFingerprint = fingerprintDestination(app, profileName, profile, config);
   const now = Date.now();
   pruneExpiredPlans(now);
   const planId = randomUUID();
@@ -991,7 +1096,9 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   // is a production plan AND a phrase is actually configured; see the
   // fail-closed check in handlePushConfirm for what happens otherwise.
   const confirmationChallenge =
-    prodProfileWarning && app.confirmPhrase !== undefined ? generateChallenge() : undefined;
+    productionConfirmationRequired && app.confirmPhrase !== undefined
+      ? generateChallenge()
+      : undefined;
   planStore.set(planId, {
     planId,
     diffHash,
@@ -1003,7 +1110,9 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     expectedRemoteRoot: profile.remote_root,
     planned: previewResult.planned,
     plannedDeletes,
-    prodProfileWarning,
+    matchedProdPattern,
+    productionConfirmationRequired,
+    destination: destinationFingerprint,
     createdAt: now,
     ...(confirmationChallenge === undefined || app.confirmPhrase === undefined
       ? {}
@@ -1036,20 +1145,26 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     planned: previewResult.planned,
     plannedDeletes,
     ttl_ms: PLAN_TTL_MS,
-    prod_profile_warning: prodProfileWarning,
+    // Reports the DISPLAY decision, so an operator who set
+    // `warn_on_prod_profile = false` still sees their own classification.
+    // The gate below follows the AUTHORIZATION decision instead.
+    prod_profile_warning: matchedProdPattern,
     // v0.13 (Task 5, B4/B5): the message text must match which of the four
     // (desktopMode, confirmPhrase) rows this plan falls into. Outside
     // Desktop mode with no phrase configured (row 4), the message is
     // byte-for-byte the original v0.12 text -- no mention of a confirm
     // phrase or Claude Desktop, since that row's behaviour is unchanged.
-    ...(prodProfileWarning
+    // Outside Desktop mode `productionConfirmationRequired` always equals
+    // `matchedProdPattern`, so every terminal response below is identical
+    // to v0.12's, down to the leading sentence.
+    ...(productionConfirmationRequired
       ? {
           prod_profile_message:
             app.confirmPhrase !== undefined
-              ? `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`
+              ? `${productionGateReason(profileName, matchedProdPattern)} To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`
               : app.desktopMode === true
-                ? `Profile "${profileName}" matches safety.prod_profile_patterns. No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
-                : `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
+                ? `${productionGateReason(profileName, matchedProdPattern)} No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
+                : `${productionGateReason(profileName, matchedProdPattern)} To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
         }
       : {}),
     ...(confirmationChallenge === undefined
@@ -1089,13 +1204,18 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to push.');
   }
-  // v0.6.0 #7: production profile gate. When prepare flagged the
-  // profile as prod, confirm requires explicit `acknowledge_production
+  // v0.6.0 #7: production gate. When prepare decided this plan needs a
+  // human confirmation, confirm requires explicit `acknowledge_production
   // = true`. This makes echo-the-plan-verbatim insufficient — the
   // agent has to make a separate decision.
-  if (plan.prodProfileWarning && args.acknowledge_production !== true) {
+  if (plan.productionConfirmationRequired && args.acknowledge_production !== true) {
+    // The matched-pattern wording is v0.12's, character for character:
+    // outside Desktop mode this is the only branch reachable, and terminal
+    // callers must not see a changed message.
     throw new Error(
-      `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
+      plan.matchedProdPattern
+        ? `Production push refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`
+        : `Production push refused: Claude Desktop mode always requires human confirmation before writing to profile "${plan.profile}", regardless of safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.`,
     );
   }
   // v0.13 (Task 5, amended by 「Task 5 修正条項」B4): production pushes are
@@ -1109,7 +1229,7 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   // acknowledge_production-only behaviour on the terminal (row 4, where a
   // missing phrase is normal and expected — existing npm users never
   // configure one).
-  if (plan.prodProfileWarning) {
+  if (plan.productionConfirmationRequired) {
     if (plan.confirmationHash === undefined) {
       if (app.desktopMode === true) {
         throw new Error(
@@ -1127,8 +1247,18 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
         );
       }
       if (!verifyConfirmation(args.confirmation, plan.confirmationHash)) {
+        // v0.13 Codex cross-review, H2: one challenge, one attempt. The
+        // challenge is handed to the caller, so the phrase is the only
+        // secret in the pair — and an instructor-chosen phrase (a course
+        // name, a year) is dictionary-guessable given unlimited tries
+        // against a live plan for the full 5-minute TTL. Consuming the
+        // plan here (and ONLY here — a missing acknowledge_production, a
+        // stale diff_hash or a bad confirm_token are ordinary mistakes,
+        // not guesses at a secret) makes each guess cost a full
+        // aiftp_push_prepare round-trip.
+        planStore.delete(args.plan_id);
         throw new Error(
-          'confirmation-mismatch: the confirmation phrase did not match. Call aiftp_push_prepare again to obtain a fresh challenge.',
+          'confirmation-mismatch: the confirmation phrase did not match. This plan is now spent — call aiftp_push_prepare again to obtain a fresh challenge.',
         );
       }
       await appendLogEntry(app.cwd, {
@@ -1167,6 +1297,19 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
       'diff_hash mismatch: the upload/delete plan drifted between prepare and confirm. Call aiftp_push_prepare again to inspect the new plan.',
     );
   }
+  // v0.13 Codex cross-review, H3: the drift check above only proves the
+  // FILE SET is unchanged. Re-check WHERE those files are about to go,
+  // from the freshly-read config, immediately before executing — editing
+  // `.aiftp.toml`'s host / user / protocol / keychain service between
+  // prepare and confirm would otherwise redirect this upload (and its
+  // deletes) to a server the human never approved.
+  assertDestinationUnchanged({
+    app,
+    profileName: plan.profile,
+    expected: plan.destination,
+    config: currentConfig,
+    prepareToolName: 'aiftp_push_prepare',
+  });
   // Consume the plan before performing the side-effectful push so a second
   // confirm with the same token cannot replay the upload.
   planStore.delete(args.plan_id);
@@ -2249,6 +2392,13 @@ interface PreparedRollback {
    * and must stay usable even if the phrase is lost or misconfigured.
    */
   prodProfileWarning: boolean;
+  /**
+   * v0.13 Codex cross-review, H3: hash of the destination this rollback was
+   * planned against. Rollback deletes remote files and rebuilds its FTP
+   * connection from the freshly-read profile at confirm time, so it needs
+   * the same binding push has.
+   */
+  destination: DestinationFingerprint;
   createdAt: number;
 }
 
@@ -2384,6 +2534,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
       status: s.status,
     })),
     prodProfileWarning,
+    destination: fingerprintDestination(app, profileName, profile, config),
     createdAt: now,
   });
   return textResult({
@@ -2499,6 +2650,19 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
       'rollback plan drifted between prepare and confirm (hard-exclude config may have changed). Call aiftp_rollback_prepare again to inspect the new plan.',
     );
   }
+
+  // v0.13 Codex cross-review, H3: rollback re-uploads to — and deletes
+  // from — whatever profile `.aiftp.toml` names at this moment (see the
+  // createDefaultFtpClient call below). Bind it to the destination the
+  // operator approved at prepare time, immediately before that connection
+  // is built.
+  assertDestinationUnchanged({
+    app,
+    profileName,
+    expected: plan.destination,
+    config,
+    prepareToolName: 'aiftp_rollback_prepare',
+  });
 
   // Build a real Buffer-shaped uploader. Codex BLOCK review: the old
   // code tried to duck-type a DeployUploader (path-shaped) into a

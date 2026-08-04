@@ -82,7 +82,12 @@ export {
   templateIds,
 } from './templates/index.js';
 
-export { isProdProfile } from './safety.js';
+export { isProdProfile, requiresProductionConfirmation } from './safety.js';
+export {
+  type DestinationFingerprint,
+  computeDestinationFingerprint,
+  describeDestinationChange,
+} from './destination-fingerprint.js';
 
 export { type ParseFfftpIniOptions, parseFfftpIni } from './importers/ffftp.js';
 

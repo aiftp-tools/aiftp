@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isProdProfile } from './safety.js';
+import { isProdProfile, requiresProductionConfirmation } from './safety.js';
 
 describe('isProdProfile', () => {
   const defaultPatterns = ['prod*', 'production*', 'main*'];
@@ -47,5 +47,81 @@ describe('isProdProfile', () => {
     // `prodXus`. (Defense against accidental regex interpretation.)
     expect(isProdProfile({ profileName: 'prod.us', patterns: ['prod.us'] })).toBe(true);
     expect(isProdProfile({ profileName: 'prodXus', patterns: ['prod.us'] })).toBe(false);
+  });
+});
+
+describe('requiresProductionConfirmation', () => {
+  const defaultPatterns = ['prod*', 'production*', 'main*'];
+
+  it('always requires confirmation in Desktop mode, whatever safety.* says', () => {
+    // `.aiftp.toml` is a project file the AI itself can edit, so
+    // `safety.warn_on_prod_profile = false` / `prod_profile_patterns = []`
+    // must not be able to switch the Desktop gate off.
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'production',
+        patterns: defaultPatterns,
+        warnEnabled: false,
+        desktopMode: true,
+      }),
+    ).toBe(true);
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'production',
+        patterns: [],
+        desktopMode: true,
+      }),
+    ).toBe(true);
+    // Even a profile name that matches nothing at all.
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'staging',
+        patterns: defaultPatterns,
+        desktopMode: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('falls back to the safety.* classification outside Desktop mode', () => {
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'production',
+        patterns: defaultPatterns,
+        desktopMode: false,
+      }),
+    ).toBe(true);
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'staging',
+        patterns: defaultPatterns,
+        desktopMode: false,
+      }),
+    ).toBe(false);
+    // The CI escape hatch stays functional on the terminal.
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'production',
+        patterns: defaultPatterns,
+        warnEnabled: false,
+        desktopMode: false,
+      }),
+    ).toBe(false);
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'production',
+        patterns: [],
+        desktopMode: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('lets safety.* widen the gate outside Desktop mode', () => {
+    expect(
+      requiresProductionConfirmation({
+        profileName: 'gwco-live',
+        patterns: ['*-live'],
+        desktopMode: false,
+      }),
+    ).toBe(true);
   });
 });
