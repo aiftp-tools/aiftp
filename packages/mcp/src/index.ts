@@ -1483,6 +1483,17 @@ async function handleSetupStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
         return false;
       }
     },
+    siteRegistered: async (siteName: string, projectDir: string) => {
+      try {
+        const registry = app.runtime.createSiteRegistry?.() ?? new SiteRegistry();
+        const entries = await registry.list();
+        return entries.some(
+          (entry) => entry.name === siteName && resolve(entry.path) === resolve(projectDir),
+        );
+      } catch {
+        return false;
+      }
+    },
   });
   return textResult(report, report.ok ? undefined : true);
 }

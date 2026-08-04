@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import { z } from 'zod';
 
 export interface SetupCheck {
@@ -16,6 +17,13 @@ export interface SetupStatusDeps {
   readonly startup: string | undefined;
   readonly confirmPhrase: string | undefined;
   readonly pathExists: (path: string) => Promise<boolean>;
+  /**
+   * Whether `siteName` is actually present in the fleet registry, pointing
+   * at `projectDir`. Backed by a real registry read (see
+   * `packages/mcp/src/index.ts`'s `handleSetupStatus`) so the `registry`
+   * check below can fail for real instead of being an unconditional pass.
+   */
+  readonly siteRegistered: (siteName: string, projectDir: string) => Promise<boolean>;
 }
 
 /**
@@ -30,7 +38,7 @@ export interface SetupStatusDeps {
  */
 const configOutcomeSchema = z.enum(['created', 'updated', 'existing']);
 const credentialOutcomeSchema = z.enum(['stored', 'already-stored', 'missing']);
-const registryOutcomeSchema = z.enum(['registered', 'already-registered']);
+const registryOutcomeSchema = z.enum(['registered', 'already-registered', 'renamed']);
 
 const bootstrapResultSchema = z.object({
   ok: z.boolean(),
@@ -91,6 +99,17 @@ function parseStartupJson(raw: string | undefined): unknown | undefined {
     return JSON.parse(raw);
   } catch {
     return undefined;
+  }
+}
+
+function registryOutcomeMessage(outcome: z.infer<typeof registryOutcomeSchema>): string {
+  switch (outcome) {
+    case 'registered':
+      return 'site registered in the fleet';
+    case 'renamed':
+      return 'site renamed in the fleet registry';
+    default:
+      return 'site already registered';
   }
 }
 
@@ -160,8 +179,15 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
         },
   ];
 
+  // The site folder itself (dirname of the config path, which is always
+  // `<localRoot>/.aiftp.toml`). project_dir checks this directory;
+  // config_file below checks the file inside it -- two genuinely different
+  // things that can each fail independently (e.g. someone deletes
+  // `.aiftp.toml` by hand but the folder itself is fine).
+  const projectDir = dirname(boot.configPath);
+
   checks.push(
-    (await deps.pathExists(boot.configPath))
+    (await deps.pathExists(projectDir))
       ? { id: 'project_dir', status: 'pass', message: 'project directory is readable' }
       : {
           id: 'project_dir',
@@ -171,11 +197,21 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
         },
   );
 
-  checks.push({
-    id: 'config_file',
-    status: 'pass',
-    message: boot.config === 'created' ? '.aiftp.toml created' : '.aiftp.toml already present',
-  });
+  checks.push(
+    (await deps.pathExists(boot.configPath))
+      ? {
+          id: 'config_file',
+          status: 'pass',
+          message:
+            boot.config === 'created' ? '.aiftp.toml created' : '.aiftp.toml already present',
+        }
+      : {
+          id: 'config_file',
+          status: 'fail',
+          message: 'bootstrap-incomplete: .aiftp.toml is missing',
+          hint: `.aiftp.toml が見つかりません。${RESTART}`,
+        },
+  );
 
   checks.push(
     boot.credential === 'missing'
@@ -188,12 +224,20 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
       : { id: 'credential', status: 'pass', message: 'credential stored in the OS keychain' },
   );
 
-  checks.push({
-    id: 'registry',
-    status: 'pass',
-    message:
-      boot.registry === 'registered' ? 'site registered in the fleet' : 'site already registered',
-  });
+  checks.push(
+    (await deps.siteRegistered(boot.siteName, projectDir))
+      ? {
+          id: 'registry',
+          status: 'pass',
+          message: registryOutcomeMessage(boot.registry),
+        }
+      : {
+          id: 'registry',
+          status: 'fail',
+          message: 'bootstrap-incomplete: site not found in the fleet registry',
+          hint: `サイト台帳に登録が見つかりません。${RESTART}`,
+        },
+  );
 
   const phraseSet = typeof deps.confirmPhrase === 'string' && deps.confirmPhrase.trim().length > 0;
   checks.push(

@@ -19,6 +19,7 @@ const happy = {
   startup: JSON.stringify({ bootstrap: bootstrapOk }),
   confirmPhrase: phrase,
   pathExists: async () => true,
+  siteRegistered: async () => true,
 };
 
 describe('buildSetupStatus', () => {
@@ -70,6 +71,7 @@ describe('buildSetupStatus', () => {
       }),
       confirmPhrase: phrase,
       pathExists: async () => false,
+      siteRegistered: async () => true,
     });
     const bootstrap = report.checks.find((check) => check.id === 'bootstrap');
     expect(bootstrap?.status).toBe('fail');
@@ -82,6 +84,7 @@ describe('buildSetupStatus', () => {
       startup: undefined,
       confirmPhrase: undefined,
       pathExists: async () => false,
+      siteRegistered: async () => true,
     });
     expect(report.ok).toBe(false);
     expect(report.checks[0]?.message).toBe(
@@ -99,6 +102,7 @@ describe('buildSetupStatus', () => {
       startup: '',
       confirmPhrase: undefined,
       pathExists: async () => false,
+      siteRegistered: async () => true,
     });
     expect(report.ok).toBe(false);
     expect(report.checks).toEqual([
@@ -117,6 +121,7 @@ describe('buildSetupStatus', () => {
         startup: '{not valid json',
         confirmPhrase: undefined,
         pathExists: async () => false,
+        siteRegistered: async () => true,
       }),
     ).resolves.toEqual({
       ok: false,
@@ -136,6 +141,7 @@ describe('buildSetupStatus', () => {
       startup: JSON.stringify({ bootstrap: {} }),
       confirmPhrase: phrase,
       pathExists: async () => true,
+      siteRegistered: async () => true,
     });
     expect(report.ok).toBe(false);
     expect(report.checks).toEqual([
@@ -155,6 +161,7 @@ describe('buildSetupStatus', () => {
       }),
       confirmPhrase: phrase,
       pathExists: async () => true,
+      siteRegistered: async () => true,
     });
     expect(report.ok).toBe(false);
     // Exactly one check — the malformed bootstrap short-circuits before any
@@ -172,6 +179,7 @@ describe('buildSetupStatus', () => {
       }),
       confirmPhrase: phrase,
       pathExists: async () => true,
+      siteRegistered: async () => true,
     });
     const bootstrap = report.checks.find((check) => check.id === 'bootstrap');
     expect(report.ok).toBe(false);
@@ -181,7 +189,7 @@ describe('buildSetupStatus', () => {
     );
   });
 
-  it('reaches and fails the project_dir check when the config path is not readable', async () => {
+  it('reaches and fails the project_dir check when the site folder is not readable', async () => {
     const report = await buildSetupStatus({
       ...happy,
       pathExists: async () => false,
@@ -193,5 +201,47 @@ describe('buildSetupStatus', () => {
     expect(projectDir?.hint).toBe(
       'Claude Desktop の設定 → 拡張機能 → aiftp で「サイトフォルダ」を選び直し、Claude Desktop を再起動してください。',
     );
+  });
+
+  it('passes project_dir but fails config_file when only .aiftp.toml is missing', async () => {
+    // The site folder itself exists (pathExists true for the directory) but
+    // the config file inside it does not (pathExists false for the exact
+    // configPath) -- e.g. a trainee deletes .aiftp.toml by hand. These two
+    // checks must be able to fail independently of each other.
+    const report = await buildSetupStatus({
+      ...happy,
+      pathExists: async (path: string) => path !== bootstrapOk.configPath,
+    });
+    const projectDir = report.checks.find((check) => check.id === 'project_dir');
+    const configFile = report.checks.find((check) => check.id === 'config_file');
+    expect(report.ok).toBe(false);
+    expect(projectDir?.status).toBe('pass');
+    expect(configFile?.status).toBe('fail');
+    expect(configFile?.message).toBe('bootstrap-incomplete: .aiftp.toml is missing');
+  });
+
+  it('fails the registry check when the site is not actually in the fleet registry', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      siteRegistered: async () => false,
+    });
+    const registry = report.checks.find((check) => check.id === 'registry');
+    expect(report.ok).toBe(false);
+    expect(registry?.status).toBe('fail');
+    expect(registry?.message).toBe('bootstrap-incomplete: site not found in the fleet registry');
+  });
+
+  it('passes the registry check only when siteRegistered resolves true for this site/folder', async () => {
+    let receivedArgs: readonly [string, string] | undefined;
+    const report = await buildSetupStatus({
+      ...happy,
+      siteRegistered: async (siteName: string, projectDir: string) => {
+        receivedArgs = [siteName, projectDir];
+        return true;
+      },
+    });
+    const registry = report.checks.find((check) => check.id === 'registry');
+    expect(registry?.status).toBe('pass');
+    expect(receivedArgs).toEqual(['gwco', '/abs/site']);
   });
 });

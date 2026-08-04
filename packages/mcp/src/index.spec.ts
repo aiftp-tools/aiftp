@@ -2705,6 +2705,58 @@ describe('mcp', () => {
     }
   });
 
+  it('aiftp_setup_status fails the registry check for real when the site is not in the fleet registry', async () => {
+    // Final-review fix: config_file/registry used to be unconditional
+    // passes. This proves the registry check now reads a real registry
+    // (via app.runtime.createSiteRegistry, same fallback pattern as
+    // resolveDestination) instead of always reporting pass.
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        profileName: 'production',
+        keychainService: 'aiftp:gwco-production',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        gitignore: 'skipped-not-a-repo',
+        missing: [] as string[],
+      },
+    });
+    try {
+      await writeConfig();
+      const runtime: AiftpMcpRuntime = { createSiteRegistry: () => ({ list: async () => [] }) };
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026', runtime });
+      const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+        ok: boolean;
+        checks: Array<Record<string, string>>;
+      };
+
+      expect(payload.ok).toBe(false);
+      const registry = payload.checks.find((entry) => entry.id === 'registry');
+      expect(registry?.status).toBe('fail');
+      expect(registry?.message).toBe('bootstrap-incomplete: site not found in the fleet registry');
+
+      const registeredApp = createAiftpMcp({
+        cwd,
+        confirmPhrase: 'sakura-2026',
+        runtime: {
+          createSiteRegistry: () => ({
+            list: async () => [{ name: 'gwco', path: cwd, default_profile: 'production' }],
+          }),
+        },
+      });
+      const registeredPayload = parseText(
+        await callAiftpTool(registeredApp, 'aiftp_setup_status', {}),
+      ) as { ok: boolean; checks: Array<Record<string, string>> };
+      const registeredCheck = registeredPayload.checks.find((entry) => entry.id === 'registry');
+      expect(registeredCheck?.status).toBe('pass');
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
   // -----------------------------------------------------------------
   // v0.13 (Task 5, amended 2026-08-02 per docs/superpowers/plans/
   // 2026-07-30-v0.13-implementation-plan.md 「Task 5 修正条項」B1-B7):
