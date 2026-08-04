@@ -91,6 +91,13 @@ The registry is **read-only over MCP**: there is no tool to write or mutate
   configured secret. This is an opt-in hardening for terminal use; it is
   always-on and fail-closed in the Claude Desktop `.mcpb` extension (see
   `docs/desktop-extension.md`).
+- **`AIFTP_CONFIRM_PHRASE` set to a value that is too weak**: identical to
+  unset. A phrase must be at least 12 Unicode code points after trimming and
+  contain at least 4 distinct code points; anything shorter or more repetitive
+  is discarded when the server starts and never reaches the gate. The same
+  predicate backs the `confirm_phrase` check in `aiftp_setup_status`, so the
+  two always agree. Rationale, and why there is no attempt counter, in the
+  README section "Production confirm phrase (v0.13)".
 
 **Which pushes need production confirmation.** Two separate decisions, kept
 separate on purpose — `.aiftp.toml` is a file the AI being gated can edit, so

@@ -436,6 +436,24 @@ the challenge is returned to the caller, so the phrase is the only secret in
 the pair. Non-secret mistakes (missing `acknowledge_production`, stale
 `diff_hash`, wrong `confirm_token`) do not consume the plan.
 
+**Phrase strength requirement.** A configured phrase must be, after trimming,
+at least **12 Unicode code points** long and contain at least **4 distinct**
+code points. A value that fails this is treated as **not configured at all**:
+the push gate and the `confirm_phrase` check of `aiftp_setup_status` share one
+predicate, so neither can report it as present while the other treats it as
+absent. Spending the plan on a mismatch does not bound the number of guesses —
+the caller can simply prepare again — so the phrase itself has to be out of
+reach of a dictionary run. There is deliberately **no attempt counter,
+cooldown, or lockout**: a failure budget is something a misbehaving client can
+burn on purpose, which would take a live training class offline. Strength is
+stateless and cannot be triggered by an attacker. 12 is a floor, not a proof of
+strength — generate the phrase with a password manager rather than inventing
+one. Refusals never reveal the phrase or its length, and do not distinguish
+"unset" from "too weak". The rule applies on the terminal too; since the phrase
+is new in v0.13, no existing v0.12 user is affected, and a terminal user who
+sets a too-short phrase simply gets the unchanged v0.12
+`acknowledge_production`-only behaviour rather than an error.
+
 Inside the Claude Desktop extension (`AIFTP_DESKTOP=1`) the gate applies to
 **every** push regardless of profile name, because `.aiftp.toml` — including
 `safety.warn_on_prod_profile` and `safety.prod_profile_patterns` — is a
