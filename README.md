@@ -397,13 +397,34 @@ Or, when developing aiftp from a local clone:
 Tools the AI sees:
 
 - `aiftp_status` — show the local diff
+- `aiftp_setup_status` — report per-check pass/fail (bootstrap, project folder,
+  config file, credential, fleet registry, confirm phrase) with a Japanese hint
 - `aiftp_sites_list` — list registered sites (redacted; read-only, no write tool)
 - `aiftp_push` (dry-run only) — preview
 - `aiftp_push_prepare` + `aiftp_push_confirm` — the two-step gate for real pushes
-  (accepts `expected_site`, rejected fail-closed on mismatch)
+  (accepts `expected_site`, rejected fail-closed on mismatch; `aiftp_push_confirm`
+  also accepts a `confirmation` argument — see "Production confirm phrase" below)
 - `aiftp_rollback` (dry-run) + `aiftp_rollback_prepare` + `aiftp_rollback_confirm`
 - `aiftp_backup_list` / `aiftp_backup_restore` / `aiftp_backup_verify` / `aiftp_backup_prune`
 - `aiftp_log`, `aiftp_list_remote`, `aiftp_init_template_list`
+
+The server also registers one MCP **prompt**, `aiftp_setup` — a guided
+onboarding walkthrough (connection check → test-area push → production push
+behind the confirm phrase → rollback demo). A client that lists prompts (not
+just tools) will see it.
+
+### Production confirm phrase (v0.13)
+
+Set `AIFTP_CONFIRM_PHRASE` in the MCP server's environment to require a shared
+"confirmation phrase" before a production-profile push can be confirmed, on
+top of the existing `acknowledge_production` flag. When set,
+`aiftp_push_prepare` returns a `confirmation_challenge` for a push that
+matches `safety.prod_profile_patterns`, and `aiftp_push_confirm` must be
+called with `confirmation: "<challenge> <phrase>"` or it is rejected. Leaving
+`AIFTP_CONFIRM_PHRASE` unset from a terminal/Claude Code MCP client keeps the
+v0.12 behaviour unchanged: `acknowledge_production: true` alone is enough.
+(This is separate from the Claude Desktop `.mcpb` extension's confirm-phrase
+gate, which is fail-closed and documented in `docs/desktop-extension.md`.)
 
 Resources:
 
