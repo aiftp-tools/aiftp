@@ -83,7 +83,11 @@ jobs:
       - name: Verify the bundle
         shell: bash
         run: |
-          version="$(node -p "require('./package.json').version")"
+          # The built filename and the manifest's version both come from
+          # packages/desktop-ext/package.json (see build-mcpb.mjs), NOT the
+          # root package.json — those can drift if a release bumps the root
+          # and forgets desktop-ext. Read the same file the build reads.
+          version="$(node -p "require('./packages/desktop-ext/package.json').version")"
           bundle="packages/desktop-ext/dist/aiftp-${version}.mcpb"
           test -f "$bundle" || { echo "FAIL: $bundle not found"; exit 1; }
           unzip -l "$bundle" | grep -q 'manifest.json' || { echo "FAIL: manifest.json missing"; exit 1; }
@@ -91,7 +95,7 @@ jobs:
           unzip -p "$bundle" manifest.json > /tmp/packed-manifest.json
           node -e "
             const m = require('/tmp/packed-manifest.json');
-            const expected = require('./package.json').version;
+            const expected = require('./packages/desktop-ext/package.json').version;
             if (m.version !== expected) { console.error('FAIL: manifest ' + m.version + ' != ' + expected); process.exit(1); }
             if (m.server.entry_point !== 'server/index.js') { console.error('FAIL: entry_point ' + m.server.entry_point); process.exit(1); }
             console.log('PASS: manifest ' + m.version);

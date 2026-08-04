@@ -9,13 +9,12 @@ on:
     types: [published]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   attach-mcpb:
     name: Attach .mcpb to the release
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -41,10 +40,16 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
+          # The built filename and the manifest's version both come from
+          # packages/desktop-ext/package.json (see build-mcpb.mjs), NOT the
+          # root package.json — those can drift if a release bumps the root
+          # and forgets desktop-ext. Read the same file the build reads, so
+          # a "PASS" here is actually a guarantee about the artifact we are
+          # about to upload.
           expected="${RELEASE_TAG#v}"
-          actual="$(node -p "require('./package.json').version")"
+          actual="$(node -p "require('./packages/desktop-ext/package.json').version")"
           if [ "$expected" != "$actual" ]; then
-            echo "FAIL: tag $RELEASE_TAG does not match package version $actual"
+            echo "FAIL: tag $RELEASE_TAG does not match desktop-ext package version $actual"
             exit 1
           fi
           echo "PASS: $actual"
@@ -55,4 +60,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" packages/desktop-ext/dist/*.mcpb --clobber
+        run: |
+          # Upload the exact file the previous step just verified, not a
+          # glob — "whatever is in dist/*.mcpb" is what let a stale-version
+          # artifact slip past a passing check before.
+          version="$(node -p "require('./packages/desktop-ext/package.json').version")"
+          bundle="packages/desktop-ext/dist/aiftp-${version}.mcpb"
+          test -f "$bundle" || { echo "FAIL: $bundle not found"; exit 1; }
+          gh release upload "$RELEASE_TAG" "$bundle" --clobber
