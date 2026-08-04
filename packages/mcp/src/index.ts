@@ -1222,8 +1222,11 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   // gated behind a human confirmation phrase — the replacement for MCP
   // elicitation (unavailable in Claude Desktop). `plan.confirmationHash` is
   // set whenever a phrase was configured at prepare time (rows 1 & 3),
-  // regardless of desktopMode, so the gate below applies uniformly. It is
-  // ONLY when a production plan has NO confirmationHash that desktopMode
+  // regardless of desktopMode, so the gate below applies uniformly. In
+  // Desktop mode `productionConfirmationRequired` is always true (H1), so
+  // "which plans reach this gate" is no longer answerable from
+  // `.aiftp.toml` there. It is ONLY when a gated plan has NO
+  // confirmationHash that desktopMode
   // decides the outcome: fail closed inside Claude Desktop (row 2, where a
   // missing phrase is a misconfiguration), but preserve the v0.12
   // acknowledge_production-only behaviour on the terminal (row 4, where a

@@ -85,18 +85,59 @@ The registry is **read-only over MCP**: there is no tool to write or mutate
   requires `acknowledge_production: true`; `confirmation` is not required and
   is ignored.
 - **`AIFTP_CONFIRM_PHRASE` set**: `aiftp_push_prepare` additionally returns a
-  `confirmation_challenge` for a push matching `safety.prod_profile_patterns`,
-  and `aiftp_push_confirm` is rejected unless called with
+  `confirmation_challenge` for a push that needs production confirmation, and
+  `aiftp_push_confirm` is rejected unless called with
   `confirmation: "<challenge> <phrase>"` where `<phrase>` matches the
   configured secret. This is an opt-in hardening for terminal use; it is
   always-on and fail-closed in the Claude Desktop `.mcpb` extension (see
   `docs/desktop-extension.md`).
 
+**Which pushes need production confirmation.** Two separate decisions, kept
+separate on purpose — `.aiftp.toml` is a file the AI being gated can edit, so
+it cannot be the only input to an authorization decision:
+
+- *Display* (`prod_profile_warning` in the prepare response) always follows
+  `safety.prod_profile_patterns` and `safety.warn_on_prod_profile`.
+- *Authorization* (the `acknowledge_production` + confirm-phrase gate) follows
+  the same patterns **outside** Desktop mode, but in Desktop mode
+  (`AIFTP_DESKTOP=1`, set by the `.mcpb` server entry point) it is
+  unconditionally required for every profile. `safety.*` can widen the gate
+  there; it cannot narrow it. Outside Desktop mode nothing changed from
+  v0.12 — `warn_on_prod_profile = false` still works as a CI escape hatch,
+  and the messages are byte-identical.
+
+**One challenge, one attempt.** A `confirmation` that does not match consumes
+the plan: `plan_id` is discarded and `aiftp_push_prepare` must be called again
+for a fresh challenge. The challenge is public (it is returned to the caller),
+so the phrase is the only secret in the pair and unlimited retries against one
+challenge would make a human-chosen phrase guessable. Non-secret mistakes — a
+missing `acknowledge_production`, a stale `diff_hash`, a bad `confirm_token` —
+do **not** consume the plan.
+
+### Destination binding (v0.13)
+
+`aiftp_push_prepare` and `aiftp_rollback_prepare` fingerprint the destination
+they planned against: host, port, protocol, user, keychain service, remote
+root, the TLS-related settings (`safety.require_tls`,
+`safety.verify_certificate`, `quirks.tls_check_hostname`) and the production
+classification. The matching `_confirm` recomputes that fingerprint from the
+freshly-read config immediately before it uploads, and refuses with a
+`destination-changed:` error naming the changed components when it differs.
+
+Without this, editing `.aiftp.toml`'s `host` or `user` between prepare and
+confirm would send the upload — and the deletes — to a server the operator
+never approved, while the `diff_hash` drift check still passed, because the
+remote root and file set were unchanged. Only hashes are stored and compared,
+and the refusal names components (`host`, `user`) rather than echoing values.
+
 ### `aiftp_rollback_confirm`'s `acknowledge_production` argument (v0.13.0, breaking change)
 
-`aiftp_rollback_prepare` now returns `prod_profile_warning: true` — computed
-the same way as `aiftp_push_prepare`'s — when the profile matches
-`safety.prod_profile_patterns`. When that flag is set,
+`aiftp_rollback_prepare` now returns `prod_profile_warning: true` when the
+profile matches `safety.prod_profile_patterns`. Unlike push's authorization
+gate, this one is **not** floored in Desktop mode: it follows
+`safety.prod_profile_patterns` / `safety.warn_on_prod_profile` on every server
+configuration, so that the recovery path behaves identically everywhere. (The
+destination binding below does apply to rollback.) When that flag is set,
 `aiftp_rollback_confirm` refuses (schema-rejects a literal `false`, and
 refuses at runtime when the argument is simply omitted) unless called with
 `acknowledge_production: true`.

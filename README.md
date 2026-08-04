@@ -430,6 +430,28 @@ v0.12 behaviour unchanged: `acknowledge_production: true` alone is enough.
 (This is separate from the Claude Desktop `.mcpb` extension's confirm-phrase
 gate, which is fail-closed and documented in `docs/desktop-extension.md`.)
 
+A mismatched phrase **consumes the plan**: the caller must run
+`aiftp_push_prepare` again for a fresh challenge. One challenge, one attempt —
+the challenge is returned to the caller, so the phrase is the only secret in
+the pair. Non-secret mistakes (missing `acknowledge_production`, stale
+`diff_hash`, wrong `confirm_token`) do not consume the plan.
+
+Inside the Claude Desktop extension (`AIFTP_DESKTOP=1`) the gate applies to
+**every** push regardless of profile name, because `.aiftp.toml` — including
+`safety.warn_on_prod_profile` and `safety.prod_profile_patterns` — is a
+project file the AI itself can edit. Those settings can widen the gate but
+never switch it off there. Outside Desktop mode they govern exactly as they
+did in v0.12.
+
+**Destination binding (v0.13)**: `aiftp_push_prepare` and
+`aiftp_rollback_prepare` hash the destination they planned against (host,
+port, protocol, user, keychain service, remote root, TLS settings, production
+classification); the matching `_confirm` re-checks that hash against the
+freshly-read config immediately before uploading and refuses with
+`destination-changed:` if any component differs. Editing `.aiftp.toml`
+between the two calls can no longer redirect an approved upload — or its
+deletes — to another server.
+
 **`aiftp_rollback_confirm` never requires the confirm phrase**, regardless of
 whether `AIFTP_CONFIRM_PHRASE` is set — rollback is the recovery path and
 must stay usable even when the phrase is lost or misconfigured. It does
