@@ -114,6 +114,11 @@ describe('mcp', () => {
     return JSON.parse(result.content[0]?.text ?? '{}');
   }
 
+  /** The raw text of a result, for error responses that are not JSON. */
+  function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+    return result.content[0]?.text ?? '';
+  }
+
   function addedSnapshotFile(path: string): TestSnapshotFile {
     return {
       path,
@@ -2895,13 +2900,13 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime,
     });
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
     ) as { plan_id: string; diff_hash: string; confirm_token: string };
-    expect(JSON.stringify(prepared)).not.toContain('sakura-2026');
+    expect(JSON.stringify(prepared)).not.toContain('spec-fixture-phrase-7Q2');
 
     const confirmed = parseText(
       await callAiftpTool(app, 'aiftp_rollback_confirm', {
@@ -3012,7 +3017,7 @@ describe('mcp', () => {
     });
     try {
       await writeConfig();
-      const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026' });
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'spec-fixture-phrase-7Q2' });
       const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
         ok: boolean;
         checks: Array<Record<string, string>>;
@@ -3021,7 +3026,7 @@ describe('mcp', () => {
       expect(payload.ok).toBe(false);
       const check = payload.checks.find((entry) => entry.id === 'credential');
       expect(check?.message).toBe('bootstrap-incomplete: credential not stored');
-      expect(JSON.stringify(payload)).not.toContain('sakura-2026');
+      expect(JSON.stringify(payload)).not.toContain('spec-fixture-phrase-7Q2');
     } finally {
       // try/finally (not a trailing statement): if an assertion above
       // throws, AIFTP_DESKTOP_STARTUP must still be cleared so it cannot
@@ -3052,7 +3057,7 @@ describe('mcp', () => {
     try {
       await writeConfig();
       const runtime: AiftpMcpRuntime = { createSiteRegistry: () => ({ list: async () => [] }) };
-      const app = createAiftpMcp({ cwd, confirmPhrase: 'sakura-2026', runtime });
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'spec-fixture-phrase-7Q2', runtime });
       const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
         ok: boolean;
         checks: Array<Record<string, string>>;
@@ -3065,7 +3070,7 @@ describe('mcp', () => {
 
       const registeredApp = createAiftpMcp({
         cwd,
-        confirmPhrase: 'sakura-2026',
+        confirmPhrase: 'spec-fixture-phrase-7Q2',
         runtime: {
           createSiteRegistry: () => ({
             list: async () => [{ name: 'gwco', path: cwd, default_profile: 'production' }],
@@ -3128,7 +3133,7 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: {
         runPush: async (opts) =>
           opts.dryRun
@@ -3152,7 +3157,7 @@ describe('mcp', () => {
     };
     expect(prepared.prod_profile_warning).toBe(true);
     expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
-    expect(JSON.stringify(prepared)).not.toContain('sakura-2026');
+    expect(JSON.stringify(prepared)).not.toContain('spec-fixture-phrase-7Q2');
 
     const base = {
       profile: 'production',
@@ -3165,7 +3170,7 @@ describe('mcp', () => {
     const missing = await callAiftpTool(app, 'aiftp_push_confirm', base);
     expect(missing.isError).toBe(true);
     expect(JSON.stringify(missing.content)).toMatch(/confirmation-required:/);
-    expect(JSON.stringify(missing.content)).not.toContain('sakura-2026');
+    expect(JSON.stringify(missing.content)).not.toContain('spec-fixture-phrase-7Q2');
 
     // v0.13 Codex cross-review H2: a wrong phrase consumes the plan, so
     // this mismatch costs the caller the whole challenge. The correct
@@ -3176,7 +3181,7 @@ describe('mcp', () => {
     });
     expect(wrong.isError).toBe(true);
     expect(JSON.stringify(wrong.content)).toMatch(/confirmation-mismatch:/);
-    expect(JSON.stringify(wrong.content)).not.toContain('sakura-2026');
+    expect(JSON.stringify(wrong.content)).not.toContain('spec-fixture-phrase-7Q2');
 
     const reprepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
@@ -3193,13 +3198,13 @@ describe('mcp', () => {
         diff_hash: reprepared.diff_hash,
         confirm_token: reprepared.confirm_token,
         acknowledge_production: true,
-        confirmation: `${reprepared.confirmation_challenge} sakura-2026`,
+        confirmation: `${reprepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
       }),
     ) as { ok: boolean };
     expect(accepted.ok).toBe(true);
 
     // The phrase must never land in the on-disk operation log either.
-    expect(await readLogFileRaw()).not.toContain('sakura-2026');
+    expect(await readLogFileRaw()).not.toContain('spec-fixture-phrase-7Q2');
   });
 
   it('applies the confirm-phrase gate outside Desktop mode when a phrase is explicitly configured (row 3)', async () => {
@@ -3210,7 +3215,7 @@ describe('mcp', () => {
     const dryRun = createPushResult({ planned: ['index.html'] });
     const app = createAiftpMcp({
       cwd,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: { runPush: async () => dryRun },
     });
 
@@ -3228,7 +3233,7 @@ describe('mcp', () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toMatch(/confirmation-required:/);
-    expect(JSON.stringify(result.content)).not.toContain('sakura-2026');
+    expect(JSON.stringify(result.content)).not.toContain('spec-fixture-phrase-7Q2');
   });
 
   it('fails closed on a production push in Desktop mode when no confirm phrase is configured (row 2)', async () => {
@@ -3360,6 +3365,218 @@ describe('mcp', () => {
   });
 
   // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H2: a mismatch spends the plan, but the AI
+  // can call aiftp_push_prepare again for a fresh challenge and try the
+  // next candidate. The countermeasure is a strength floor on the phrase
+  // (stateless — no attempt budget an attacker could burn to lock a class
+  // out mid-lesson). A phrase below the floor is treated as NOT configured,
+  // which is fail-closed inside Claude Desktop.
+  // -----------------------------------------------------------------
+
+  /** 11 code points: below CONFIRM_PHRASE_MIN_LENGTH. */
+  const WEAK_PHRASE = 'sakura-2026';
+
+  it('treats a too-weak phrase as no phrase at all, fail-closed in Desktop mode (H2)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const realPushes: string[] = [];
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: WEAK_PHRASE,
+      runtime: {
+        runPush: async (opts) => {
+          if (!opts.dryRun) realPushes.push(opts.profile);
+          return dryRun;
+        },
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    // No challenge is minted: from the server's point of view there is no
+    // phrase to check against.
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. No usable confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。合言葉は 12 文字以上・4 種類以上の文字が必要です。未設定の場合と短すぎる場合は同じ扱いで、本番反映は拒否されます。パスワード管理ツールで生成した20文字以上の文字列を推奨します（講座名や西暦のような推測しやすい文字列は避けてください）。',
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    // Actionable, in Japanese, and states the rule without stating a phrase.
+    expect(JSON.stringify(refused.content)).toContain(
+      '合言葉は 12 文字以上・4 種類以上の文字が必要です。',
+    );
+    // Nothing was uploaded.
+    expect(realPushes).toEqual([]);
+
+    // No leak of the rejected phrase on any surface this test touched:
+    // both responses, and the on-disk operation log.
+    const surfaces = [JSON.stringify(prepared), JSON.stringify(refused), await readLogFileRaw()];
+    for (const surface of surfaces) {
+      expect(surface).not.toContain('sakura');
+      expect(surface).not.toContain(WEAK_PHRASE);
+      // A weak phrase never mints a challenge, so nothing was logged for it.
+      expect(surface).not.toContain('confirm-phrase-challenge');
+    }
+
+    // No leak of its LENGTH either. Asserted on the human-readable messages
+    // rather than the whole payload, because plan_id/confirm_token are
+    // random and would make a plain substring search for "11" flaky. Every
+    // number these messages may contain is pinned here: 12 and 4 are the
+    // published rule, 20 is the recommendation. A measured length (11)
+    // could not appear without failing this.
+    const humanMessages = [prepared.prod_profile_message ?? '', textOf(refused)];
+    for (const message of humanMessages) {
+      expect([...new Set(message.match(/\d+/gu) ?? [])].sort()).toEqual(['12', '20', '4']);
+    }
+  });
+
+  it('reports the same verdict from aiftp_setup_status as the gate, for a too-weak phrase (H2)', async () => {
+    await writeConfig();
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        missing: [],
+      },
+    });
+    try {
+      const weakApp = createAiftpMcp({ cwd, desktopMode: true, confirmPhrase: WEAK_PHRASE });
+      const unsetApp = createAiftpMcp({ cwd, desktopMode: true });
+      const strongApp = createAiftpMcp({
+        cwd,
+        desktopMode: true,
+        confirmPhrase: 'spec-fixture-phrase-7Q2',
+      });
+
+      const checkOf = async (app: ReturnType<typeof createAiftpMcp>) => {
+        const report = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+          checks: { id: string; status: string; message: string; hint?: string }[];
+        };
+        return report.checks.find((entry) => entry.id === 'confirm_phrase');
+      };
+
+      const weakCheck = await checkOf(weakApp);
+      // The gate refuses a weak phrase, so setup_status must not call it
+      // present -- and must be indistinguishable from the unset case.
+      expect(weakCheck?.status).toBe('fail');
+      expect(weakCheck?.message).toBe('bootstrap-incomplete: confirm phrase not set or too weak');
+      expect(weakCheck).toEqual(await checkOf(unsetApp));
+      expect((await checkOf(strongApp))?.status).toBe('pass');
+      expect(JSON.stringify(weakCheck)).not.toContain('sakura');
+      expect(JSON.stringify(weakCheck)).not.toContain(String(WEAK_PHRASE.length));
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
+  it('accepts a long multi-word passphrase and still gates on it (H2)', async () => {
+    await writeConfig();
+    const passphrase = 'correct battery staple horse fence';
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: passphrase,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    // The strength rule must not reject good input: a challenge is minted.
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${prepared.confirmation_challenge} ${passphrase}`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain(passphrase);
+  });
+
+  it('leaves the terminal path byte-identical when the configured phrase is too weak (H2)', async () => {
+    // v0.12 users never configure a phrase, so applying the same strength
+    // rule on the terminal breaks nobody -- and a weak one must degrade to
+    // exactly the v0.12 acknowledge_production-only behaviour, with no
+    // mention of a confirm phrase or Claude Desktop.
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const runtime = {
+      runPush: async (opts: { dryRun?: boolean }) =>
+        opts.dryRun
+          ? dryRun
+          : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+      createBackupStore: fakeBackupStoreForRealPush(),
+    };
+    const app = createAiftpMcp({ cwd, confirmPhrase: WEAK_PHRASE, runtime });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.',
+    );
+    expect(prepared.prod_profile_message).not.toMatch(/confirmation phrase|合言葉|Claude Desktop/);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain('sakura');
+  });
+
+  // -----------------------------------------------------------------
   // v0.13 Codex cross-review, H1: `.aiftp.toml` is a project file the AI
   // itself can edit, so `safety.*` must not be able to switch the Desktop
   // confirm-phrase gate off. In Desktop mode the gate is unconditional;
@@ -3372,7 +3589,7 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: {
         runPush: async (opts) =>
           opts.dryRun
@@ -3410,11 +3627,11 @@ describe('mcp', () => {
     const accepted = parseText(
       await callAiftpTool(app, 'aiftp_push_confirm', {
         ...base,
-        confirmation: `${prepared.confirmation_challenge} sakura-2026`,
+        confirmation: `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
       }),
     ) as { ok: boolean };
     expect(accepted.ok).toBe(true);
-    expect(await readLogFileRaw()).not.toContain('sakura-2026');
+    expect(await readLogFileRaw()).not.toContain('spec-fixture-phrase-7Q2');
   });
 
   it('still demands acknowledge_production in Desktop mode when warn_on_prod_profile = false (H1)', async () => {
@@ -3423,7 +3640,7 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: { runPush: async () => dryRun },
     });
     const prepared = parseText(
@@ -3565,7 +3782,7 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: {
         runPush: async (opts) =>
           opts.dryRun
@@ -3603,11 +3820,11 @@ describe('mcp', () => {
     // phrase — must be refused as a spent plan.
     const retry = await callAiftpTool(app, 'aiftp_push_confirm', {
       ...base,
-      confirmation: `${prepared.confirmation_challenge} sakura-2026`,
+      confirmation: `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
     });
     expect(retry.isError).toBe(true);
     expect(JSON.stringify(retry.content)).toMatch(/Unknown or expired plan_id/);
-    expect(JSON.stringify(retry.content)).not.toContain('sakura-2026');
+    expect(JSON.stringify(retry.content)).not.toContain('spec-fixture-phrase-7Q2');
 
     // A fresh prepare mints a fresh challenge and the push goes through.
     const reprepared = parseText(
@@ -3626,7 +3843,7 @@ describe('mcp', () => {
         diff_hash: reprepared.diff_hash,
         confirm_token: reprepared.confirm_token,
         acknowledge_production: true,
-        confirmation: `${reprepared.confirmation_challenge} sakura-2026`,
+        confirmation: `${reprepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
       }),
     ) as { ok: boolean };
     expect(accepted.ok).toBe(true);
@@ -3641,7 +3858,7 @@ describe('mcp', () => {
     const app = createAiftpMcp({
       cwd,
       desktopMode: true,
-      confirmPhrase: 'sakura-2026',
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
       runtime: {
         runPush: async (opts) =>
           opts.dryRun
@@ -3659,7 +3876,7 @@ describe('mcp', () => {
       confirm_token: string;
       confirmation_challenge: string;
     };
-    const confirmation = `${prepared.confirmation_challenge} sakura-2026`;
+    const confirmation = `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`;
 
     const noAck = await callAiftpTool(app, 'aiftp_push_confirm', {
       profile: 'production',

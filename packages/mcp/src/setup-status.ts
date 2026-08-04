@@ -1,5 +1,6 @@
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { CONFIRM_PHRASE_REQUIREMENT_JA, isUsableConfirmPhrase } from './confirm-phrase.js';
 
 export interface SetupCheck {
   readonly id: string;
@@ -239,15 +240,26 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
         },
   );
 
-  const phraseSet = typeof deps.confirmPhrase === 'string' && deps.confirmPhrase.trim().length > 0;
+  // v0.13 Codex cross-review, H2: "set" means "set AND strong enough to
+  // gate a production push". `isUsableConfirmPhrase` is the same predicate
+  // `createAiftpMcp` applies when resolving the phrase, so this check and
+  // the push gate can never disagree — a weak phrase is reported absent
+  // here exactly as the gate treats it.
+  //
+  // Both the message and the hint are identical for "unset" and "too weak"
+  // on purpose. Saying which one it is would tell a guesser that a phrase
+  // exists and is below the published minimum, narrowing the search space;
+  // the hint states the requirement instead, which is what the instructor
+  // actually needs to fix it.
+  const phraseSet = isUsableConfirmPhrase(deps.confirmPhrase);
   checks.push(
     phraseSet
       ? { id: 'confirm_phrase', status: 'pass', message: 'production confirm phrase is set' }
       : {
           id: 'confirm_phrase',
           status: 'fail',
-          message: 'bootstrap-incomplete: confirm phrase not set',
-          hint: `${SETTINGS} で「合言葉」欄に FTP のパスワードとは違う文字列を入力し、${RESTART}`,
+          message: 'bootstrap-incomplete: confirm phrase not set or too weak',
+          hint: `${SETTINGS} で「合言葉」欄に FTP のパスワードとは違う文字列を入力し、${RESTART}${CONFIRM_PHRASE_REQUIREMENT_JA}`,
         },
   );
 

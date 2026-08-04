@@ -116,8 +116,13 @@ export function buildManifest(version: string): DesktopManifest {
       confirm_phrase: {
         type: 'string',
         title: '合言葉',
+        // The 12 / 4 / 20 here restate CONFIRM_PHRASE_MIN_LENGTH,
+        // CONFIRM_PHRASE_MIN_DISTINCT_CHARS and the recommendation in
+        // packages/mcp/src/confirm-phrase.ts, which is the source of truth
+        // and pins those values with a test. desktop-ext does not depend on
+        // @aiftp-tools/mcp, so this text is a copy on purpose.
         description:
-          '本番反映のときにあなた自身がチャットへ入力する合言葉。FTP のパスワードとは別の文字列にしてください',
+          '本番反映のときにあなた自身がチャットへ入力する合言葉。FTP のパスワードとは別の文字列にしてください。12文字以上・4種類以上の文字が必要です（パスワード管理ツールで生成した20文字以上を推奨。短すぎる合言葉は未設定と同じ扱いになり、本番反映は拒否されます）',
         required: true,
         sensitive: true,
       },

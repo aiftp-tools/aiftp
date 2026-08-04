@@ -43,6 +43,18 @@ describe('buildManifest', () => {
     expect(sensitive).toEqual(['confirm_phrase', 'password']);
   });
 
+  it('states the confirm-phrase strength rule in the settings UI (v0.13 H2)', () => {
+    // The instructor sets the phrase here, so the requirement has to be
+    // visible at the moment they type it -- not only in an error later.
+    const description = manifest.user_config.confirm_phrase?.description ?? '';
+    expect(description).toContain('12文字以上・4種類以上の文字が必要です');
+    expect(description).toContain('短すぎる合言葉は未設定と同じ扱いになり、本番反映は拒否されます');
+    // How to make one, never one to copy: no field of the shipped manifest
+    // may contain something a trainee could paste in as their phrase.
+    expect(description).toContain('パスワード管理ツールで生成した20文字以上を推奨');
+    expect(description).not.toMatch(/例[:：]/u);
+  });
+
   it('uses a directory picker for the site folder', () => {
     expect(manifest.user_config.local_root?.type).toBe('directory');
   });

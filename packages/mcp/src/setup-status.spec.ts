@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildSetupStatus } from './setup-status.js';
 
-const phrase = 'sakura-2026';
+/** A throwaway fixture that clears the strength floor. */
+const phrase = 'spec-fixture-phrase-7Q2';
+/** 11 code points: below CONFIRM_PHRASE_MIN_LENGTH, so treated as unset. */
+const weakPhrase = 'sakura-2026';
 
 const bootstrapOk = {
   ok: true,
@@ -58,7 +61,61 @@ describe('buildSetupStatus', () => {
     const check = report.checks.find((entry) => entry.id === 'confirm_phrase');
     expect(report.ok).toBe(false);
     expect(check?.status).toBe('fail');
-    expect(check?.message).toBe('bootstrap-incomplete: confirm phrase not set');
+    expect(check?.message).toBe('bootstrap-incomplete: confirm phrase not set or too weak');
+    expect(check?.hint).toBe(
+      'Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄に FTP のパスワードとは違う文字列を入力し、Claude Desktop を再起動してください。合言葉は 12 文字以上・4 種類以上の文字が必要です。未設定の場合と短すぎる場合は同じ扱いで、本番反映は拒否されます。パスワード管理ツールで生成した20文字以上の文字列を推奨します（講座名や西暦のような推測しやすい文字列は避けてください）。',
+    );
+  });
+
+  it('reports a too-weak phrase exactly like an unset one (v0.13 H2)', async () => {
+    // The gate in index.ts drops a weak phrase, so setup_status must not
+    // report it as present -- that disagreement (present here, absent at
+    // the gate) was already a finding earlier on this branch.
+    const weak = await buildSetupStatus({ ...happy, confirmPhrase: weakPhrase });
+    const unset = await buildSetupStatus({ ...happy, confirmPhrase: undefined });
+    const weakCheck = weak.checks.find((entry) => entry.id === 'confirm_phrase');
+    const unsetCheck = unset.checks.find((entry) => entry.id === 'confirm_phrase');
+
+    expect(weak.ok).toBe(false);
+    expect(weakCheck?.status).toBe('fail');
+    // Byte-identical to the unset case: the report must not reveal that a
+    // phrase exists but is short, which would narrow it for a guesser.
+    expect(weakCheck).toEqual(unsetCheck);
+  });
+
+  it('leaks neither the phrase nor its length on any confirm_phrase path', async () => {
+    for (const value of [weakPhrase, phrase, undefined, '   ']) {
+      const report = await buildSetupStatus({ ...happy, confirmPhrase: value });
+      const serialized = JSON.stringify(report);
+      expect(serialized).not.toContain('sakura');
+      expect(serialized).not.toContain('spec-fixture');
+      // No "your phrase is N characters" anywhere: the only numbers in the
+      // hint are the published rule (12 and 4), never a measured length.
+      expect(serialized).not.toContain('11');
+      expect(serialized).not.toContain('23');
+    }
+  });
+
+  it('passes the confirm_phrase check for a long multi-word passphrase', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      confirmPhrase: 'correct battery staple horse fence',
+    });
+    const check = report.checks.find((entry) => entry.id === 'confirm_phrase');
+    expect(check?.status).toBe('pass');
+    expect(report.ok).toBe(true);
+  });
+
+  it('keeps the six frozen check ids', async () => {
+    const report = await buildSetupStatus({ ...happy, confirmPhrase: weakPhrase });
+    expect(report.checks.map((entry) => entry.id)).toEqual([
+      'bootstrap',
+      'project_dir',
+      'config_file',
+      'credential',
+      'registry',
+      'confirm_phrase',
+    ]);
   });
 
   it('surfaces a startup error as the bootstrap check failure', async () => {

@@ -61,7 +61,13 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { generateChallenge, hashConfirmation, verifyConfirmation } from './confirm-phrase.js';
+import {
+  CONFIRM_PHRASE_REQUIREMENT_JA,
+  generateChallenge,
+  hashConfirmation,
+  isUsableConfirmPhrase,
+  verifyConfirmation,
+} from './confirm-phrase.js';
 import { buildSetupPromptText } from './setup-prompt.js';
 import { buildSetupStatus } from './setup-status.js';
 
@@ -126,7 +132,12 @@ export interface AiftpMcpRuntime {
 export interface AiftpMcpOptions {
   cwd?: string;
   runtime?: AiftpMcpRuntime;
-  /** Shared secret for the production push gate. Never echoed in tool output. */
+  /**
+   * Shared secret for the production push gate. Never echoed in tool output.
+   * A value that fails `isUsableConfirmPhrase` (see confirm-phrase.ts) is
+   * discarded during `createAiftpMcp` and the server behaves exactly as if
+   * none had been supplied.
+   */
   confirmPhrase?: string;
   /**
    * v0.13 (Task 5, B1/B3): explicit signal that this server is running
@@ -176,6 +187,11 @@ export interface AiftpMcpApp {
   server: McpServer;
   tools: readonly AiftpToolName[];
   resources: readonly string[];
+  /**
+   * Only ever holds a phrase that passed `isUsableConfirmPhrase`. A weak
+   * one is dropped at construction (v0.13 Codex cross-review, H2), so every
+   * read site below can treat `undefined` as the single "no phrase" case.
+   */
   readonly confirmPhrase?: string;
   /**
    * v0.13 (Task 5, B3): always populated by createAiftpMcp (never left
@@ -1205,7 +1221,7 @@ async function handlePushPrepare(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
             app.confirmPhrase !== undefined
               ? `${productionGateReason(profileName, matchedProdPattern)} To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token, plus the confirmation phrase below.`
               : app.desktopMode === true
-                ? `${productionGateReason(profileName, matchedProdPattern)} No confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。`
+                ? `${productionGateReason(profileName, matchedProdPattern)} No usable confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。${CONFIRM_PHRASE_REQUIREMENT_JA}`
                 : `${productionGateReason(profileName, matchedProdPattern)} To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.`,
         }
       : {}),
@@ -1278,7 +1294,11 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     if (plan.confirmationHash === undefined) {
       if (app.desktopMode === true) {
         throw new Error(
-          'confirm-phrase-not-configured: production pushes require a human confirmation phrase, and none is configured. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。',
+          // Covers both "never set" and "set but too weak" without saying
+          // which: a message that distinguished them would tell a guesser
+          // the phrase is below the published minimum. The requirement text
+          // is what the instructor needs, and it is the same either way.
+          `confirm-phrase-not-configured: production pushes require a human confirmation phrase, and no usable one is configured. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。${CONFIRM_PHRASE_REQUIREMENT_JA}`,
         );
       }
       // desktopMode is false: row 4, v0.12 behaviour preserved on purpose.
@@ -2944,9 +2964,18 @@ export function createAiftpMcp(options: AiftpMcpOptions = {}): AiftpMcpApp {
     desktopMode: options.desktopMode ?? process.env.AIFTP_DESKTOP === '1',
     ...(() => {
       const phrase = options.confirmPhrase ?? process.env.AIFTP_CONFIRM_PHRASE;
-      // Aligned with setup-status.ts's phraseSet check: a whitespace-only
-      // value counts as unset, so the two subsystems agree on presence.
-      return phrase === undefined || phrase.trim().length === 0 ? {} : { confirmPhrase: phrase };
+      // v0.13 Codex cross-review, H2. One predicate, shared with
+      // setup-status.ts's `confirm_phrase` check, decides whether a phrase
+      // counts as configured — so `setup_status` can never report a phrase
+      // as present while the push gate treats it as absent.
+      //
+      // A phrase that is too weak is dropped here rather than rejected at
+      // the gate: from that point on it simply does not exist, which routes
+      // it down the existing "no phrase configured" path (fail-closed in
+      // Desktop mode, unchanged v0.12 behaviour on the terminal) instead of
+      // adding a second failure mode. Nothing downstream ever sees the
+      // rejected value, so it cannot leak.
+      return isUsableConfirmPhrase(phrase) ? { confirmPhrase: phrase } : {};
     })(),
   };
 
