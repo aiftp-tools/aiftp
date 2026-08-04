@@ -1,0 +1,58 @@
+name: release
+
+# Attach the .mcpb bundle to a published GitHub Release. Publishing itself
+# (tag, `pnpm publish` x3, Release creation) stays manual and requires the
+# maintainer's explicit approval — this workflow only adds the asset.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  attach-mcpb:
+    name: Attach .mcpb to the release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.1
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @aiftp-tools/desktop-ext build:mcpb
+
+      - name: Verify the bundle version matches the tag
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          expected="${RELEASE_TAG#v}"
+          actual="$(node -p "require('./package.json').version")"
+          if [ "$expected" != "$actual" ]; then
+            echo "FAIL: tag $RELEASE_TAG does not match package version $actual"
+            exit 1
+          fi
+          echo "PASS: $actual"
+
+      - name: Upload the asset
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" packages/desktop-ext/dist/*.mcpb --clobber

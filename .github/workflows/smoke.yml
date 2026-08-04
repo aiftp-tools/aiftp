@@ -107,3 +107,23 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: bash ./.github/workflows/scripts/mcp-smoke.sh
+
+      - name: .mcpb asset is attached and well-formed
+        if: github.event_name == 'release' && runner.os == 'macOS' && matrix.node == 22
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          gh release download "$RELEASE_TAG" --pattern '*.mcpb' --dir ./mcpb-check
+          bundle="./mcpb-check/aiftp-${version}.mcpb"
+          test -f "$bundle" || { echo "FAIL: $bundle not attached to the release"; exit 1; }
+          unzip -p "$bundle" manifest.json > ./mcpb-check/manifest.json
+          node -e "
+            const m = require('./mcpb-check/manifest.json');
+            const expected = process.env.RELEASE_TAG.replace(/^v/, '');
+            if (m.version !== expected) { console.error('FAIL: manifest ' + m.version + ' != ' + expected); process.exit(1); }
+            if (m.name !== 'aiftp') { console.error('FAIL: manifest name ' + m.name); process.exit(1); }
+            console.log('PASS: .mcpb ' + m.version);
+          "

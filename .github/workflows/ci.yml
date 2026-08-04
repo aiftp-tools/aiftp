@@ -54,3 +54,63 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  mcpb:
+    name: Build .mcpb bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.1
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Pack the extension
+        run: pnpm --filter @aiftp-tools/desktop-ext build:mcpb
+
+      - name: Verify the bundle
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          bundle="packages/desktop-ext/dist/aiftp-${version}.mcpb"
+          test -f "$bundle" || { echo "FAIL: $bundle not found"; exit 1; }
+          unzip -l "$bundle" | grep -q 'manifest.json' || { echo "FAIL: manifest.json missing"; exit 1; }
+          unzip -l "$bundle" | grep -q 'server/index.js' || { echo "FAIL: server/index.js missing"; exit 1; }
+          unzip -p "$bundle" manifest.json > /tmp/packed-manifest.json
+          node -e "
+            const m = require('/tmp/packed-manifest.json');
+            const expected = require('./package.json').version;
+            if (m.version !== expected) { console.error('FAIL: manifest ' + m.version + ' != ' + expected); process.exit(1); }
+            if (m.server.entry_point !== 'server/index.js') { console.error('FAIL: entry_point ' + m.server.entry_point); process.exit(1); }
+            console.log('PASS: manifest ' + m.version);
+          "
+
+      - name: Boot the packed server without configuration
+        shell: bash
+        run: |
+          # spec §5.1: the server must start even with no configuration at all.
+          cd packages/desktop-ext/dist/stage
+          node server/index.js < /dev/null > boot-stdout.log 2> boot-stderr.log || true
+          if grep -qi 'Error:' boot-stderr.log; then
+            echo "FAIL: the server reported an error on an unconfigured start"
+            cat boot-stderr.log
+            exit 1
+          fi
+          echo "PASS: unconfigured start did not error"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aiftp-mcpb
+          path: packages/desktop-ext/dist/*.mcpb
