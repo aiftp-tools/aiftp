@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { loadConfig } from '../config.js';
+import { type Config, loadConfig } from '../config.js';
 import {
   type DeployClient,
   buildDeployClientOptions,
@@ -28,6 +28,17 @@ export interface CreateDefaultBackupStoreOptions {
   profileName: string;
   keychain?: BackupKeychain;
   ftpClient?: BackupFtpClient;
+  /**
+   * v0.13 Codex cross-review, H3 (second pass): an already-read, already-
+   * verified `Config` snapshot. When supplied, this store is built from that
+   * snapshot instead of re-reading `.aiftp.toml` — so a caller that verified a
+   * destination fingerprint can guarantee the credentials and remote root used
+   * here belong to the destination it verified, with no window in which the
+   * file could be swapped. Omit it and the previous behaviour (read the file
+   * now) is unchanged, which is what every read-only / standalone caller
+   * wants.
+   */
+  config?: Config;
 }
 
 export function backupKeyService(keychainService: string): string {
@@ -47,7 +58,7 @@ export async function createDefaultBackupStore(
   options: CreateDefaultBackupStoreOptions,
 ): Promise<BackupStore> {
   const { cwd, profileName, keychain = { getPassword } } = options;
-  const config = await loadConfig(join(cwd, '.aiftp.toml'));
+  const config = options.config ?? (await loadConfig(join(cwd, '.aiftp.toml')));
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);

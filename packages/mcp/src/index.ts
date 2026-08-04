@@ -620,8 +620,24 @@ function unavailableUploader(): DeployUploader {
   };
 }
 
-async function createDefaultFtpClient(cwd: string, profileName: string): Promise<DeployClient> {
-  const config = await loadConfigForMcp(cwd);
+/**
+ * Build (and connect) the deploy client for `profileName`.
+ *
+ * v0.13 Codex cross-review, H3 (second pass): `verifiedConfig` is the
+ * already-read, already-fingerprint-checked snapshot. When the caller passes
+ * one, NOTHING here touches `.aiftp.toml` — the host, port, protocol, user,
+ * TLS settings and keychain service all come from the very object the
+ * destination fingerprint was verified against, closing the window in which a
+ * swapped file could redirect a confirmed upload. Callers that legitimately
+ * want the *current* config (read-only tools, one-shot commands) simply omit
+ * it and get the previous read-from-disk behaviour.
+ */
+async function createDefaultFtpClient(
+  cwd: string,
+  profileName: string,
+  verifiedConfig?: Config,
+): Promise<DeployClient> {
+  const config = verifiedConfig ?? (await loadConfigForMcp(cwd));
   const profile = config.profile[profileName];
   if (!profile) {
     throw new Error(`Profile not found: ${profileName}`);
@@ -641,10 +657,14 @@ function uploaderFromClient(client: DeployClient): DeployUploader {
   };
 }
 
-async function backupStoreFor(app: AiftpMcpApp, profileName: string): Promise<AiftpBackupStore> {
+async function backupStoreFor(
+  app: AiftpMcpApp,
+  profileName: string,
+  verifiedConfig?: Config,
+): Promise<AiftpBackupStore> {
   return (
     (await app.runtime.createBackupStore?.({ cwd: app.cwd, profileName })) ??
-    (await createDefaultBackupStore({ cwd: app.cwd, profileName }))
+    (await createDefaultBackupStore({ cwd: app.cwd, profileName, config: verifiedConfig }))
   );
 }
 
@@ -668,6 +688,7 @@ async function pushBackupStoreFor(
   dryRun: boolean,
   ftpClient?: DeployClient,
   runtimeStore?: PushBackupStore,
+  verifiedConfig?: Config,
 ): Promise<PushBackupStore> {
   if (runtimeStore) {
     return runtimeStore;
@@ -675,7 +696,12 @@ async function pushBackupStoreFor(
   if (dryRun) {
     return dryRunBackupStore();
   }
-  return createDefaultBackupStore({ cwd: app.cwd, profileName, ftpClient });
+  return createDefaultBackupStore({
+    cwd: app.cwd,
+    profileName,
+    ftpClient,
+    config: verifiedConfig,
+  });
 }
 
 function textResult(payload: unknown, isError?: boolean): CallToolResult {
@@ -735,7 +761,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
     !args.dry_run &&
     (runtimePushStore === undefined || runtimeUploader === undefined);
   const sharedFtpClient = needsDefaultFtp
-    ? await createDefaultFtpClient(app.cwd, profileName)
+    ? await createDefaultFtpClient(app.cwd, profileName, config)
     : undefined;
 
   const result = await (async () => {
@@ -745,6 +771,7 @@ async function handlePush(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolR
       args.dry_run,
       sharedFtpClient,
       runtimePushStore,
+      config,
     );
     const uploader =
       runtimeUploader ??
@@ -884,11 +911,25 @@ function hashPushPlan(input: {
     .digest('hex');
 }
 
+/**
+ * v0.13 Codex cross-review, H3 (second pass): `args.config` is the verified
+ * destination snapshot. Supplying it makes this whole call — the plan, the
+ * safety limits, the credential lookup and the connection — read from ONE
+ * `Config` object, so `.aiftp.toml` cannot be swapped underneath a confirmed
+ * push. Omitting it keeps the read-it-now behaviour used by the single-step
+ * dry-run tool.
+ */
 async function executePush(
   app: AiftpMcpApp,
-  args: { profile: string; files?: readonly string[]; dry_run: boolean; confirmDeletes?: boolean },
+  args: {
+    profile: string;
+    files?: readonly string[];
+    dry_run: boolean;
+    confirmDeletes?: boolean;
+    config?: Config;
+  },
 ): Promise<PushResult> {
-  const config = await loadConfigForMcp(app.cwd);
+  const config = args.config ?? (await loadConfigForMcp(app.cwd));
   const profile = config.profile[args.profile];
   if (!profile) {
     throw new Error(`Profile not found: ${args.profile}`);
@@ -907,7 +948,7 @@ async function executePush(
     !args.dry_run &&
     (runtimePushStore === undefined || runtimeUploader === undefined);
   const sharedFtpClient = needsDefaultFtp
-    ? await createDefaultFtpClient(app.cwd, args.profile)
+    ? await createDefaultFtpClient(app.cwd, args.profile, config)
     : undefined;
   try {
     const backupStore = await pushBackupStoreFor(
@@ -916,6 +957,7 @@ async function executePush(
       args.dry_run,
       sharedFtpClient,
       runtimePushStore,
+      config,
     );
     const uploader =
       runtimeUploader ??
@@ -1277,12 +1319,19 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
       `Deletion push refused: ${plan.plannedDeletes.length} remote delete(s) were planned. Re-call aiftp_push_confirm with acknowledge_deletions: true.`,
     );
   }
+  // v0.13 Codex cross-review, H3 (second pass): read `.aiftp.toml` exactly
+  // ONCE for this whole confirm, then use that single snapshot for the drift
+  // check, the destination check, the credential lookup and the connection.
+  // Verifying one read and connecting from another left a window in which
+  // swapping the file redirected an approved upload; there is now no second
+  // read to swap.
+  const currentConfig = await loadConfigForMcp(app.cwd);
   const preview = await executePush(app, {
     profile: plan.profile,
     files: plan.files,
     dry_run: true,
+    config: currentConfig,
   });
-  const currentConfig = await loadConfigForMcp(app.cwd);
   const currentRemoteRoot =
     currentConfig.profile[plan.profile]?.remote_root ?? plan.expectedRemoteRoot;
   const currentDiffHash = hashPushPlan({
@@ -1321,6 +1370,8 @@ async function handlePushConfirm(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
     files: plan.files,
     dry_run: false,
     confirmDeletes: plan.plannedDeletes.length > 0,
+    // The same snapshot `assertDestinationUnchanged` just verified.
+    config: currentConfig,
   });
   if (!result.dryRun) {
     await saveState(stateDir(app.cwd, plan.profile), result.nextState);
@@ -2649,9 +2700,13 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   // contract = uniform reasoning.)
   rollbackPlanStore.delete(args.plan_id);
 
-  const backupStore = await backupStoreFor(app, profileName);
-  const rollbackStore = asRollbackStore(backupStore);
+  // v0.13 Codex cross-review, H3 (second pass): one read of `.aiftp.toml` for
+  // the whole confirm. The snapshot below feeds the exclude rules, the
+  // destination check and the connection, so there is no second read for a
+  // concurrent writer to swap after the check passes.
   const config = await loadConfigForMcp(app.cwd);
+  const backupStore = await backupStoreFor(app, profileName, config);
+  const rollbackStore = asRollbackStore(backupStore);
   const excluder = createExcluder({
     userPatterns: config.exclude.patterns,
     useDefaults: config.exclude.use_defaults,
@@ -2688,10 +2743,10 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   }
 
   // v0.13 Codex cross-review, H3: rollback re-uploads to — and deletes
-  // from — whatever profile `.aiftp.toml` names at this moment (see the
-  // createDefaultFtpClient call below). Bind it to the destination the
-  // operator approved at prepare time, immediately before that connection
-  // is built.
+  // from — the profile this snapshot names. Bind it to the destination the
+  // operator approved at prepare time; the same `config` object is then
+  // handed to `createDefaultFtpClient` below, so what was verified here is
+  // exactly what the connection is built from.
   assertDestinationUnchanged({
     app,
     profileName,
@@ -2713,7 +2768,8 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
       profileName,
     })) ??
     (await (async () => {
-      sharedFtp = await createDefaultFtpClient(app.cwd, profileName);
+      // Built from the verified snapshot, never a fresh read (H3).
+      sharedFtp = await createDefaultFtpClient(app.cwd, profileName, config);
       const client = sharedFtp;
       return {
         upload: async (_localPath, remotePath, content) => {
