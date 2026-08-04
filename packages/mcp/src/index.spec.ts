@@ -2800,6 +2800,181 @@ describe('mcp', () => {
     expect(uploads).toEqual(['/public_html/index.html']);
   });
 
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H1 (rollback half): rollback deletes remote
+  // files, and its acknowledge_production gate was still keyed off a value
+  // `.aiftp.toml` could zero out. Floor it in Desktop mode exactly the way
+  // push's gate is floored. The confirm phrase stays push-only: rollback is
+  // the recovery path and must survive a lost or misconfigured phrase.
+  // -----------------------------------------------------------------
+
+  it('still demands acknowledge_production for a rollback in Desktop mode when warn_on_prod_profile = false (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    // The display flag honours the operator's opt-out...
+    expect(prepared.prod_profile_warning).toBe(false);
+    // ...but the plan still says a human has to acknowledge it.
+    expect(prepared.prod_profile_message).toMatch(/acknowledge_production/);
+    // Rollback never mentions the confirm phrase, on any configuration.
+    expect(prepared.prod_profile_message).not.toMatch(
+      /合言葉|confirmation phrase|confirmation_challenge/i,
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/acknowledge_production/);
+    expect(JSON.stringify(refused.content)).not.toMatch(/合言葉|confirmation phrase/i);
+    expect(uploads).toEqual([]);
+  });
+
+  it('still demands acknowledge_production for a rollback in Desktop mode when prod_profile_patterns is emptied (H1)', async () => {
+    await writeConfig({ prodProfilePatterns: [] });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/acknowledge_production/);
+    expect(uploads).toEqual([]);
+  });
+
+  it('completes a Desktop-mode rollback with acknowledge_production and no confirm phrase (H1)', async () => {
+    // The property the whole rollback design exists to preserve: an
+    // attendee who never set a phrase — or set the wrong one — must still
+    // be able to undo a bad push. No `confirmation` argument is passed,
+    // and none is accepted by the schema.
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('completes a Desktop-mode rollback even when a confirm phrase is configured (H1)', async () => {
+    // Same property, with a phrase set: the phrase is push-only, so it
+    // must neither be requested nor checked on the recovery path.
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'sakura-2026',
+      runtime,
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    expect(JSON.stringify(prepared)).not.toContain('sakura-2026');
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('keeps the v0.12 terminal rollback production wording byte-identical (H1)', async () => {
+    // Pin the exact strings a terminal user saw at b67edd0, so routing
+    // rollback through the new authorization plumbing cannot reword them.
+    await writeConfig();
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_message: string;
+    };
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_rollback_confirm along with the plan_id / diff_hash / confirm_token.',
+    );
+
+    const refused = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { error: { message: string } };
+    expect(refused.error.message).toBe(
+      'Production rollback refused: profile "production" matches safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.',
+    );
+  });
+
+  it('keeps warn_on_prod_profile = false working as the terminal rollback escape hatch (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(false);
+    expect(prepared.prod_profile_message).toBeUndefined();
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
   it('reads config and state resources', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });

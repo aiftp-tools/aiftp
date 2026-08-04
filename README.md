@@ -454,9 +454,15 @@ deletes — to another server.
 
 **`aiftp_rollback_confirm` never requires the confirm phrase**, regardless of
 whether `AIFTP_CONFIRM_PHRASE` is set — rollback is the recovery path and
-must stay usable even when the phrase is lost or misconfigured. It does
-require `acknowledge_production: true` for a plan matching
-`safety.prod_profile_patterns`, the same way push always has. **Breaking
+must stay usable even when the phrase is lost or misconfigured.
+
+It does require `acknowledge_production: true`: for a plan matching
+`safety.prod_profile_patterns` on the terminal, and for **every** profile
+inside the Claude Desktop extension, where `safety.*` cannot switch it off —
+the same rule push follows, and more important here because rollback deletes
+remote files. These two are settled separately on purpose: "the recovery path
+must survive a lost phrase" is a reason not to demand the phrase, not a reason
+to let a config edit remove the gate. **Breaking
 change**: existing v0.12 terminal users must now pass
 `acknowledge_production: true` to `aiftp_rollback_confirm` when rolling back
 a prod-matching profile; non-prod profiles are unaffected.

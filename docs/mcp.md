@@ -133,21 +133,30 @@ and the refusal names components (`host`, `user`) rather than echoing values.
 ### `aiftp_rollback_confirm`'s `acknowledge_production` argument (v0.13.0, breaking change)
 
 `aiftp_rollback_prepare` now returns `prod_profile_warning: true` when the
-profile matches `safety.prod_profile_patterns`. Unlike push's authorization
-gate, this one is **not** floored in Desktop mode: it follows
-`safety.prod_profile_patterns` / `safety.warn_on_prod_profile` on every server
-configuration, so that the recovery path behaves identically everywhere. (The
-destination binding below does apply to rollback.) When that flag is set,
+profile matches `safety.prod_profile_patterns`. When the plan needs production
+confirmation,
 `aiftp_rollback_confirm` refuses (schema-rejects a literal `false`, and
 refuses at runtime when the argument is simply omitted) unless called with
 `acknowledge_production: true`.
 
-This gate is intentionally independent of the confirm-phrase mechanism
-described above: `aiftp_rollback_confirm` never requires, checks, or
-mentions the confirm phrase, on any server configuration. Rollback is the
-recovery path — an operator who has lost or misconfigured the confirm phrase
-must still be able to undo a bad push, or a fixable incident becomes a
-permanently broken site with no way back short of a terminal.
+Two things about this gate are decided separately, for different reasons.
+
+**Which plans are gated** follows the same rule as push, including the Desktop
+floor: outside Desktop mode it is `safety.prod_profile_patterns` /
+`safety.warn_on_prod_profile`; in Desktop mode `acknowledge_production` is
+required for every profile regardless of `safety.*`. The reason is the same one
+that applies to push — `.aiftp.toml` is a file the AI being gated can edit — and
+it applies here with more force, because rollback deletes remote files. The
+destination binding below applies to rollback too.
+
+**What satisfies the gate** is `acknowledge_production: true` alone.
+`aiftp_rollback_confirm` never requires, checks, or mentions the confirm
+phrase, on any server configuration. Rollback is the recovery path — an
+operator who has lost or misconfigured the confirm phrase must still be able to
+undo a bad push, or a fixable incident becomes a permanently broken site with
+no way back short of a terminal. That reasoning justifies not demanding the
+phrase; it does not justify letting a config edit remove the gate, which is why
+the two are settled independently.
 
 **Breaking change**: a v0.12 terminal/CLI user calling `aiftp_rollback_confirm`
 against a profile matching `safety.prod_profile_patterns` (default patterns:

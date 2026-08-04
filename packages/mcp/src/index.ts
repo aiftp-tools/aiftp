@@ -2387,14 +2387,22 @@ interface PreparedRollback {
    */
   skipped: ReadonlyArray<{ path: string; reason: string; status: string }>;
   /**
-   * v0.13 (post-review): true when the profile matched
-   * `safety.prod_profile_patterns` at prepare time, computed the same way
-   * as push's `prodProfileWarning`. When set, `aiftp_rollback_confirm`
-   * requires `acknowledge_production: true` in the arguments. Unlike push,
-   * this never gates on the confirm phrase — rollback is the recovery path
-   * and must stay usable even if the phrase is lost or misconfigured.
+   * DISPLAY only: true when the profile matched
+   * `safety.prod_profile_patterns` at prepare time. Decides how the plan is
+   * described; never whether it may be applied.
    */
-  prodProfileWarning: boolean;
+  matchedProdPattern: boolean;
+  /**
+   * AUTHORIZATION: true when `aiftp_rollback_confirm` requires
+   * `acknowledge_production: true`. Computed by the same core function push
+   * uses, so Desktop mode floors it at `true` and `safety.*` cannot remove
+   * a gate that stands in front of remote deletions (v0.13 Codex
+   * cross-review, H1). Unlike push, "confirmation" here means the
+   * acknowledgement flag alone — rollback never gates on the confirm
+   * phrase, because it is the recovery path and must stay usable when the
+   * phrase is lost or misconfigured.
+   */
+  productionConfirmationRequired: boolean;
   /**
    * v0.13 Codex cross-review, H3: hash of the destination this rollback was
    * planned against. Rollback deletes remote files and rebuilds its FTP
@@ -2508,15 +2516,24 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     plannedDeletes: preview.plannedDeletes,
   });
   // v0.13 (post-review): surface the same production-profile warning push's
-  // prepare step does, computed the same way from the resolved profile and
-  // safety.prod_profile_patterns. aiftp_rollback_confirm requires
-  // acknowledge_production: true back when this is set -- see
-  // handleRollbackConfirm. This does NOT gate on the confirm phrase; that
-  // stays push-only (rollback is the recovery path).
-  const prodProfileWarning = isProdProfile({
+  // prepare step does. Same two-value split as push (see
+  // handlePushPrepare): the display value follows safety.*, the
+  // authorization value is floored in Desktop mode so a config edit cannot
+  // remove the gate in front of remote deletions.
+  // aiftp_rollback_confirm requires acknowledge_production: true back when
+  // the authorization value is set -- see handleRollbackConfirm. Neither
+  // value gates on the confirm phrase; that stays push-only, because
+  // rollback is the recovery path.
+  const matchedProdPattern = isProdProfile({
     profileName,
     patterns: config.safety.prod_profile_patterns,
     warnEnabled: config.safety.warn_on_prod_profile,
+  });
+  const productionConfirmationRequired = requiresProductionConfirmation({
+    profileName,
+    patterns: config.safety.prod_profile_patterns,
+    warnEnabled: config.safety.warn_on_prod_profile,
+    desktopMode: app.desktopMode === true,
   });
   const confirmToken = randomBytes(24).toString('base64url');
   const planId = randomUUID();
@@ -2536,7 +2553,8 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
       reason: s.reason ?? 'hard-exclude',
       status: s.status,
     })),
-    prodProfileWarning,
+    matchedProdPattern,
+    productionConfirmationRequired,
     destination: fingerprintDestination(app, profileName, profile, config),
     createdAt: now,
   });
@@ -2560,10 +2578,14 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
       status: s.status,
       reason: s.reason,
     })),
-    prod_profile_warning: prodProfileWarning,
-    ...(prodProfileWarning
+    // Display value, so an operator who set `warn_on_prod_profile = false`
+    // still sees their own classification; the message below follows the
+    // authorization value. Outside Desktop mode the two are equal, so a
+    // terminal response is byte-identical to the one v0.12 users saw.
+    prod_profile_warning: matchedProdPattern,
+    ...(productionConfirmationRequired
       ? {
-          prod_profile_message: `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_rollback_confirm along with the plan_id / diff_hash / confirm_token.`,
+          prod_profile_message: `${productionGateReason(profileName, matchedProdPattern)} To confirm, pass acknowledge_production: true to aiftp_rollback_confirm along with the plan_id / diff_hash / confirm_token.`,
         }
       : {}),
   });
@@ -2593,16 +2615,27 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to roll back.');
   }
-  // v0.13 (post-review): production profile gate, mirroring push's
-  // acknowledge_production check exactly. Rollback is the recovery path —
-  // it must stay reachable even when the confirm phrase is lost or
-  // misconfigured, so this check is deliberately independent of any phrase.
-  // It still writes to and deletes from a live server, so a plan flagged
-  // prod at prepare time cannot be applied by echoing plan_id/diff_hash/
-  // confirm_token alone.
-  if (plan.prodProfileWarning && args.acknowledge_production !== true) {
+  // v0.13 (post-review): production gate, mirroring push's
+  // acknowledge_production check. It writes to and deletes from a live
+  // server, so a gated plan cannot be applied by echoing
+  // plan_id/diff_hash/confirm_token alone.
+  //
+  // Two properties, held apart on purpose (v0.13 Codex cross-review, H1):
+  //   - WHICH plans are gated is floored in Desktop mode, exactly like
+  //     push, because `.aiftp.toml` is a file the gated AI can edit and
+  //     this gate stands in front of remote deletions.
+  //   - WHAT satisfies the gate is `acknowledge_production` alone, never
+  //     the confirm phrase. That is not a weakening: rollback is the
+  //     recovery path and must stay reachable when the phrase is lost or
+  //     misconfigured, or a fixable incident becomes a permanently broken
+  //     site with no way back short of a terminal.
+  if (plan.productionConfirmationRequired && args.acknowledge_production !== true) {
+    // Matched-pattern wording is v0.12's, character for character; outside
+    // Desktop mode it is the only branch reachable.
     throw new Error(
-      `Production rollback refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.`,
+      plan.matchedProdPattern
+        ? `Production rollback refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.`
+        : `Production rollback refused: Claude Desktop mode always requires human confirmation before writing to profile "${plan.profile}", regardless of safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.`,
     );
   }
   if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
