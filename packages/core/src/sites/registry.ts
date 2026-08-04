@@ -15,8 +15,13 @@ export const SITE_REGISTRY_SCHEMA_VERSION = 1 as const;
  * (`../prod`, `client/a`) silently shadows the operator's intended argument
  * and redirects config inheritance. Path separators, `:`, control
  * characters, and bare `.` / `..` are all rejected.
+ *
+ * Exported so `bootstrap/validate.ts` can reuse the exact same pattern: two
+ * independently-drifting copies would let bootstrap accept a name that
+ * `registry.add()` later rejects, and that rejection happens after
+ * `.aiftp.toml` and the keychain entry have already been written.
  */
-const SITE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+export const SITE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
 
 const siteNameSchema = z
   .string()
@@ -217,6 +222,49 @@ export class SiteRegistry {
       throw new SiteRegistryDuplicateError(validatedEntry.name);
     }
     const next = [...current, validatedEntry];
+    await this.write(next);
+    return next;
+  }
+
+  /**
+   * Renames an existing entry in place, keeping its path/label/default_profile
+   * untouched. Used by bootstrap when the Desktop settings form's site name
+   * no longer matches the registry entry already pointing at the same
+   * resolved folder -- the settings form is authoritative for the name, so
+   * the fix is to rename the existing entry rather than add a second one
+   * pointing at the same folder (which `add()` would allow, since it only
+   * rejects duplicate *names*, not duplicate *paths*).
+   */
+  async rename(oldName: string, newName: string): Promise<readonly SiteEntry[]> {
+    const oldNameResult = siteEntrySchema.shape.name.safeParse(oldName);
+    if (!oldNameResult.success) {
+      throw new SiteRegistryValidationError(
+        `Invalid site name: ${validationMessage(oldNameResult.error)}`,
+        { cause: oldNameResult.error },
+      );
+    }
+    const newNameResult = siteEntrySchema.shape.name.safeParse(newName);
+    if (!newNameResult.success) {
+      throw new SiteRegistryValidationError(
+        `Invalid site name: ${validationMessage(newNameResult.error)}`,
+        { cause: newNameResult.error },
+      );
+    }
+
+    const current = await this.readForMutation();
+    if (!current.some(({ name }) => name === oldNameResult.data)) {
+      throw new SiteRegistryError(`Cannot rename: site '${oldName}' is not registered`);
+    }
+    if (
+      newNameResult.data !== oldNameResult.data &&
+      current.some(({ name }) => name === newNameResult.data)
+    ) {
+      throw new SiteRegistryDuplicateError(newNameResult.data);
+    }
+
+    const next = current.map((entry) =>
+      entry.name === oldNameResult.data ? { ...entry, name: newNameResult.data } : entry,
+    );
     await this.write(next);
     return next;
   }

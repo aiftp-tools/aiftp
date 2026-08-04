@@ -15,6 +15,7 @@ export interface BootstrapInput {
 export interface BootstrapRegistrySurface {
   list(): Promise<readonly SiteEntry[]>;
   add(entry: SiteEntry): Promise<readonly SiteEntry[]>;
+  rename(oldName: string, newName: string): Promise<readonly SiteEntry[]>;
 }
 
 export interface BootstrapDeps {
@@ -29,7 +30,7 @@ export interface BootstrapDeps {
 
 export type ConfigOutcome = 'created' | 'updated' | 'existing';
 export type CredentialOutcome = 'stored' | 'already-stored' | 'missing';
-export type RegistryOutcome = 'registered' | 'already-registered';
+export type RegistryOutcome = 'registered' | 'already-registered' | 'renamed';
 
 export interface BootstrapResult {
   readonly ok: boolean;

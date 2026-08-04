@@ -72,6 +72,59 @@ describe('SiteRegistry', () => {
     );
   });
 
+  it('renames an entry in place, keeping path/label/default_profile untouched', async () => {
+    const registry = new SiteRegistry();
+    await registry.add(FIRST_SITE);
+
+    const next = await registry.rename('gwco', 'gwco-corrected');
+
+    expect(next).toEqual([{ ...FIRST_SITE, name: 'gwco-corrected' }]);
+    expect(await registry.list()).toEqual([{ ...FIRST_SITE, name: 'gwco-corrected' }]);
+  });
+
+  it('leaves other entries untouched when renaming one of several', async () => {
+    const registry = new SiteRegistry();
+    await registry.add(FIRST_SITE);
+    await registry.add({ name: 'other-site', path: '/projects/other' });
+
+    await registry.rename('gwco', 'gwco-corrected');
+
+    const names = (await registry.list()).map((entry) => entry.name).sort();
+    expect(names).toEqual(['gwco-corrected', 'other-site']);
+  });
+
+  it('rejects renaming a site that is not registered', async () => {
+    const registry = new SiteRegistry();
+    await expect(registry.rename('does-not-exist', 'new-name')).rejects.toThrow(
+      "Cannot rename: site 'does-not-exist' is not registered",
+    );
+  });
+
+  it('rejects renaming onto a name that is already taken by a different entry', async () => {
+    const registry = new SiteRegistry();
+    await registry.add(FIRST_SITE);
+    await registry.add({ name: 'other-site', path: '/projects/other' });
+
+    await expect(registry.rename('gwco', 'other-site')).rejects.toBeInstanceOf(
+      SiteRegistryDuplicateError,
+    );
+    // Neither entry was touched by the failed rename.
+    expect((await registry.list()).map((entry) => entry.name).sort()).toEqual([
+      'gwco',
+      'other-site',
+    ]);
+  });
+
+  it('rejects an invalid new name without mutating the registry', async () => {
+    const registry = new SiteRegistry();
+    await registry.add(FIRST_SITE);
+
+    await expect(registry.rename('gwco', '../escape')).rejects.toBeInstanceOf(
+      SiteRegistryValidationError,
+    );
+    expect(await registry.list()).toEqual([FIRST_SITE]);
+  });
+
   it('handles malformed TOML without throwing and preserves it from mutation', async () => {
     const registryDirectory = join(temporaryHome, '.aiftp');
     const registryPath = join(registryDirectory, 'sites.toml');

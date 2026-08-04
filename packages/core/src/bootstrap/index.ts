@@ -1,5 +1,5 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { appendProfileBlock, findProfileBlockRange, setProfileField } from '../config-edit.js';
 import { ensureGitignoreEntry } from '../init/gitignore.js';
 import { buildKeychainService } from '../init/keychain-name.js';
@@ -90,17 +90,33 @@ export async function runBootstrap(
   const keychainService = buildKeychainService(input.siteName, input.profileName);
   const configPath = join(input.localRoot, '.aiftp.toml');
 
-  // 3. fleet registry conflict check — a pure read, so it can safely throw
+  // 3. fleet registry lookup — a pure read, so any conflict can safely throw
   //    before any side effect (.aiftp.toml write, keychain write) happens.
+  //
+  //    Two independent lookups, both on resolved paths:
+  //      - by name: the pre-existing genuine-conflict check (same name,
+  //        different folder — refuse, unchanged behaviour).
+  //      - by resolved path: the Desktop settings form is authoritative for
+  //        the site name, the same way it already is for
+  //        host/protocol/user/remote_root/keychain_service (see
+  //        reconcileOwnedFields above). Renaming the site in the settings
+  //        UI is the single most likely edit, and without this lookup it
+  //        would silently create a second registry entry pointing at the
+  //        same folder (add() only rejects duplicate *names*, never
+  //        duplicate *paths*), leaving the stale name as the one
+  //        `aiftp_push_prepare`'s `expected_site` resolution picks up.
   const registrySurface = createRegistry();
   const entries = await registrySurface.list();
-  const existingEntry = entries.find((entry) => entry.name === input.siteName);
-  if (existingEntry && existingEntry.path !== input.localRoot) {
+  const nameMatch = entries.find((entry) => entry.name === input.siteName);
+  if (nameMatch && resolvePath(nameMatch.path) !== resolvePath(input.localRoot)) {
     throw new BootstrapValidationError(
-      `bootstrap-conflict: site "${input.siteName}" is already registered for a different folder (${existingEntry.path})`,
+      `bootstrap-conflict: site "${input.siteName}" is already registered for a different folder (${nameMatch.path})`,
       'Claude Desktop の設定 → 拡張機能 → aiftp で「サイト名」を別の名前に変えるか、「サイトフォルダ」を登録済みのフォルダに合わせてください。',
     );
   }
+  const pathMatch = nameMatch
+    ? undefined
+    : entries.find((entry) => resolvePath(entry.path) === resolvePath(input.localRoot));
 
   // 4. .aiftp.toml — create it, or reconcile the bootstrap-owned fields in
   //    place. Never overwrite a config whose matching profile does not
@@ -144,10 +160,18 @@ export async function runBootstrap(
     credential = 'missing';
   }
 
-  // 6. fleet registry registration — only when step 3 found no existing entry.
+  // 6. fleet registry registration. Three outcomes, matching step 3's lookup:
+  //    - nameMatch: this exact name is already registered for this exact
+  //      folder (step 3 already refused any other case) — nothing to do.
+  //    - pathMatch: a different name already points at this exact folder —
+  //      rename that entry rather than adding a duplicate.
+  //    - neither: genuinely new — add it.
   let registry: RegistryOutcome;
-  if (existingEntry) {
+  if (nameMatch) {
     registry = 'already-registered';
+  } else if (pathMatch) {
+    await registrySurface.rename(pathMatch.name, input.siteName);
+    registry = 'renamed';
   } else {
     await registrySurface.add({
       name: input.siteName,

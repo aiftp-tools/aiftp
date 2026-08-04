@@ -39,6 +39,17 @@ function fakeDeps(): BootstrapDeps & {
         entries.push(entry);
         return entries;
       },
+      rename: async (oldName, newName) => {
+        if (!entries.some((entry) => entry.name === oldName)) {
+          throw new Error(`Cannot rename: site '${oldName}' is not registered`);
+        }
+        const renamed = entries.map((entry) =>
+          entry.name === oldName ? { ...entry, name: newName } : entry,
+        );
+        entries.length = 0;
+        entries.push(...renamed);
+        return entries;
+      },
     }),
   };
 }
@@ -214,6 +225,67 @@ describe('runBootstrap', () => {
     await expect(readFile(join(localRoot, '.aiftp.toml'), 'utf8')).rejects.toThrow();
     expect(deps.stored.size).toBe(0);
     expect(deps.entries).toHaveLength(1);
+  });
+
+  it('renames the existing registry entry in place when the folder matches but the name changed', async () => {
+    // Fix 2 (final whole-branch review): a settings-form site-name edit for
+    // an already-registered folder must rename the existing entry, not add
+    // a second one pointing at the same folder. Seed a stale name at the
+    // exact resolved localRoot, then bootstrap under the corrected name.
+    const deps = fakeDeps();
+    deps.entries.push({ name: 'gwco-old-typo', path: localRoot, default_profile: 'production' });
+
+    const result = await runBootstrap({ ...input, siteName: 'gwco', localRoot }, deps);
+
+    expect(result.ok).toBe(true);
+    expect(result.registry).toBe('renamed');
+    // Exactly one entry survives, under the corrected name, still pointing
+    // at the same folder -- no duplicate, no leftover stale entry.
+    expect(deps.entries).toHaveLength(1);
+    expect(deps.entries).toEqual([
+      { name: 'gwco', path: localRoot, default_profile: 'production' },
+    ]);
+  });
+
+  it('resolves expected_site by the new name after a rename (no stale-name shadowing)', async () => {
+    // Reproduces the reviewer's failure mode end to end: after the rename,
+    // a lookup keyed on the corrected name must find the entry. A lookup
+    // keyed on the stale name must NOT find it (the whole point of renaming
+    // in place instead of leaving both names registered).
+    const deps = fakeDeps();
+    deps.entries.push({ name: 'gwco-old-typo', path: localRoot, default_profile: 'production' });
+
+    await runBootstrap({ ...input, siteName: 'gwco', localRoot }, deps);
+
+    const byNewName = deps.entries.find((entry) => entry.name === 'gwco');
+    const byOldName = deps.entries.find((entry) => entry.name === 'gwco-old-typo');
+    expect(byNewName).toEqual({ name: 'gwco', path: localRoot, default_profile: 'production' });
+    expect(byOldName).toBeUndefined();
+  });
+
+  it('does not rename when a different name is already registered for a different folder (genuine conflict preserved)', async () => {
+    const deps = fakeDeps();
+    deps.entries.push({ name: 'someone-else', path: join(tmpdir(), 'unrelated-folder') });
+
+    // Same-name/different-folder conflict is untouched: the run below uses
+    // the ALREADY-registered name "someone-else" is irrelevant here since
+    // input.siteName is "gwco" and no entry named "gwco" nor any entry at
+    // `localRoot` exists yet, so this must be a plain, uneventful add.
+    const result = await runBootstrap({ ...input, localRoot }, deps);
+
+    expect(result.registry).toBe('registered');
+    expect(deps.entries).toHaveLength(2);
+  });
+
+  it('still refuses the same-name/different-folder conflict after the path-lookup fix', async () => {
+    const deps = fakeDeps();
+    deps.entries.push({ name: 'gwco', path: join(tmpdir(), 'somewhere-else') });
+    deps.entries.push({ name: 'other-site', path: localRoot });
+
+    await expect(runBootstrap({ ...input, localRoot }, deps)).rejects.toThrow(
+      'bootstrap-conflict: site "gwco" is already registered for a different folder',
+    );
+    expect(deps.entries).toHaveLength(2);
   });
 
   it('fails when local_root does not exist', async () => {

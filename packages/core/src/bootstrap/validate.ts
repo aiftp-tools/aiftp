@@ -1,9 +1,9 @@
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { isValidProfileName } from '../config-edit.js';
+import { SITE_NAME_PATTERN } from '../sites/registry.js';
 import type { SiteProtocol } from '../sites/types.js';
 import { type BootstrapInput, BootstrapValidationError } from './types.js';
 
-const SITE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
 const PROTOCOLS: readonly SiteProtocol[] = ['ftps', 'sftp', 'ftp'];
 const DEFAULT_PROFILE = 'production';
 
