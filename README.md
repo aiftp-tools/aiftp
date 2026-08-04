@@ -405,6 +405,10 @@ Tools the AI sees:
   (accepts `expected_site`, rejected fail-closed on mismatch; `aiftp_push_confirm`
   also accepts a `confirmation` argument — see "Production confirm phrase" below)
 - `aiftp_rollback` (dry-run) + `aiftp_rollback_prepare` + `aiftp_rollback_confirm`
+  (also accepts `acknowledge_production` for a plan matching
+  `safety.prod_profile_patterns` — same schema shape as push's flag, but the
+  confirm-phrase gate below does **not** apply to rollback; see "Production
+  confirm phrase" below)
 - `aiftp_backup_list` / `aiftp_backup_restore` / `aiftp_backup_verify` / `aiftp_backup_prune`
 - `aiftp_log`, `aiftp_list_remote`, `aiftp_init_template_list`
 
@@ -425,6 +429,15 @@ called with `confirmation: "<challenge> <phrase>"` or it is rejected. Leaving
 v0.12 behaviour unchanged: `acknowledge_production: true` alone is enough.
 (This is separate from the Claude Desktop `.mcpb` extension's confirm-phrase
 gate, which is fail-closed and documented in `docs/desktop-extension.md`.)
+
+**`aiftp_rollback_confirm` never requires the confirm phrase**, regardless of
+whether `AIFTP_CONFIRM_PHRASE` is set — rollback is the recovery path and
+must stay usable even when the phrase is lost or misconfigured. It does
+require `acknowledge_production: true` for a plan matching
+`safety.prod_profile_patterns`, the same way push always has. **Breaking
+change**: existing v0.12 terminal users must now pass
+`acknowledge_production: true` to `aiftp_rollback_confirm` when rolling back
+a prod-matching profile; non-prod profiles are unaffected.
 
 Resources:
 

@@ -397,6 +397,22 @@ const rollbackConfirmSchema = requiredProfileSchema
     diff_hash: z.string().min(1),
     confirm_token: z.string().min(1),
     acknowledge_deletions: z.literal(true).optional(),
+    /**
+     * v0.13 (post-review): mirrors aiftp_push_confirm's acknowledge_production
+     * gate exactly — same schema shape, same fail-closed behaviour on a
+     * schema-rejected `false`. Rollback does NOT gate on the confirm phrase
+     * (see handleRollbackConfirm): it is the recovery path and must stay
+     * reachable even when the phrase is lost or misconfigured, but it still
+     * writes to and deletes from a live server, so a deliberate
+     * acknowledgement is required for profiles matching
+     * safety.prod_profile_patterns.
+     */
+    acknowledge_production: z
+      .literal(true)
+      .optional()
+      .describe(
+        'Required when the prepare step returned prod_profile_warning=true. Must be the literal `true` to apply a rollback to a profile that matches safety.prod_profile_patterns. Schema-rejected if `false` is sent (no silent fallthrough to the runtime guard).',
+      ),
   })
   .strict();
 
@@ -2224,6 +2240,15 @@ interface PreparedRollback {
    * stayed protected.
    */
   skipped: ReadonlyArray<{ path: string; reason: string; status: string }>;
+  /**
+   * v0.13 (post-review): true when the profile matched
+   * `safety.prod_profile_patterns` at prepare time, computed the same way
+   * as push's `prodProfileWarning`. When set, `aiftp_rollback_confirm`
+   * requires `acknowledge_production: true` in the arguments. Unlike push,
+   * this never gates on the confirm phrase — rollback is the recovery path
+   * and must stay usable even if the phrase is lost or misconfigured.
+   */
+  prodProfileWarning: boolean;
   createdAt: number;
 }
 
@@ -2329,6 +2354,17 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
     planned: preview.planned,
     plannedDeletes: preview.plannedDeletes,
   });
+  // v0.13 (post-review): surface the same production-profile warning push's
+  // prepare step does, computed the same way from the resolved profile and
+  // safety.prod_profile_patterns. aiftp_rollback_confirm requires
+  // acknowledge_production: true back when this is set -- see
+  // handleRollbackConfirm. This does NOT gate on the confirm phrase; that
+  // stays push-only (rollback is the recovery path).
+  const prodProfileWarning = isProdProfile({
+    profileName,
+    patterns: config.safety.prod_profile_patterns,
+    warnEnabled: config.safety.warn_on_prod_profile,
+  });
   const confirmToken = randomBytes(24).toString('base64url');
   const planId = randomUUID();
   const now = Date.now();
@@ -2347,6 +2383,7 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
       reason: s.reason ?? 'hard-exclude',
       status: s.status,
     })),
+    prodProfileWarning,
     createdAt: now,
   });
   return textResult({
@@ -2369,6 +2406,12 @@ async function handleRollbackPrepare(app: AiftpMcpApp, rawArgs: unknown): Promis
       status: s.status,
       reason: s.reason,
     })),
+    prod_profile_warning: prodProfileWarning,
+    ...(prodProfileWarning
+      ? {
+          prod_profile_message: `Profile "${profileName}" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_rollback_confirm along with the plan_id / diff_hash / confirm_token.`,
+        }
+      : {}),
   });
 }
 
@@ -2395,6 +2438,18 @@ async function handleRollbackConfirm(app: AiftpMcpApp, rawArgs: unknown): Promis
   }
   if (plan.confirmToken !== args.confirm_token) {
     throw new Error('confirm_token mismatch: refusing to roll back.');
+  }
+  // v0.13 (post-review): production profile gate, mirroring push's
+  // acknowledge_production check exactly. Rollback is the recovery path —
+  // it must stay reachable even when the confirm phrase is lost or
+  // misconfigured, so this check is deliberately independent of any phrase.
+  // It still writes to and deletes from a live server, so a plan flagged
+  // prod at prepare time cannot be applied by echoing plan_id/diff_hash/
+  // confirm_token alone.
+  if (plan.prodProfileWarning && args.acknowledge_production !== true) {
+    throw new Error(
+      `Production rollback refused: profile "${plan.profile}" matches safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.`,
+    );
   }
   if (plan.plannedDeletes.length > 0 && args.acknowledge_deletions !== true) {
     throw new Error(

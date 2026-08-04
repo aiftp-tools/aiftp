@@ -2386,13 +2386,16 @@ describe('mcp', () => {
     expect(wrongToken.isError).toBe(true);
     expect(uploads).toHaveLength(0);
 
-    // Correct values: rollback runs.
+    // Correct values: rollback runs. `acknowledge_production: true` because
+    // the test config uses `production`, which matches the default
+    // prod_profile_patterns (mirrors aiftp_push_confirm, v0.13 post-review).
     const confirmed = parseText(
       await callAiftpTool(app, 'aiftp_rollback_confirm', {
         profile: 'production',
         plan_id: prepared.plan_id,
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
       }),
     ) as { ok: boolean; rolled_back: string[] };
     expect(confirmed.ok).toBe(true);
@@ -2460,6 +2463,7 @@ describe('mcp', () => {
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
         acknowledge_deletions: true,
+        acknowledge_production: true,
       }),
     ) as { ok: boolean; rolled_back: string[]; deleted: string[] };
 
@@ -2470,7 +2474,10 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm requires acknowledge_deletions when deletes are planned', async () => {
-    await writeConfig();
+    // warnOnProdProfile: false isolates this test's concern (the deletion
+    // gate) from the prod-profile gate, matching aiftp_push_confirm's own
+    // equivalent test precedent.
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2491,7 +2498,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm accepts acknowledge_deletions when deletes are planned', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2514,7 +2521,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm does not require acknowledge_deletions when no deletes are planned', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, uploads, deletes } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2538,7 +2545,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm persists rollback nextState to state.json', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const statePath = join(cwd, '.aiftp', 'state', 'production', 'state.json');
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });
     await writeFile(
@@ -2602,7 +2609,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm rejects replay of a consumed plan', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const runtime: AiftpMcpRuntime = {
       createBackupStore: async () => ({
         listSnapshots: async () => [
@@ -2648,6 +2655,135 @@ describe('mcp', () => {
     });
     expect(replay.isError).toBe(true);
     expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 (post-review): rollback must carry the same production gate
+  // push already has — NOT the confirm phrase (rollback is the recovery
+  // path and must stay reachable even if the phrase is lost), but
+  // `acknowledge_production` for profiles matching
+  // safety.prod_profile_patterns, mirroring aiftp_push_confirm exactly.
+  //   - prepare surfaces prod_profile_warning the same way push's does
+  //   - confirm requires acknowledge_production: true to apply
+  //   - confirm phrase is never mentioned or required on this path
+  // -----------------------------------------------------------------
+
+  it('aiftp_rollback_prepare surfaces prod_profile_warning when the profile matches a prod pattern', async () => {
+    await writeConfig();
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 })) as {
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(parsed.prod_profile_warning).toBe(true);
+    expect(parsed.prod_profile_message).toMatch(/acknowledge_production|prod_profile_patterns/);
+    // The confirm phrase must never be mentioned on the rollback path —
+    // rollback is the recovery path and must stay usable even when the
+    // phrase is lost or misconfigured.
+    expect(parsed.prod_profile_message).not.toMatch(
+      /合言葉|confirmation phrase|confirmation_challenge/i,
+    );
+  });
+
+  it('aiftp_rollback_prepare does not surface prod_profile_warning for a non-prod profile', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 })) as {
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(parsed.prod_profile_warning).toBe(false);
+    expect(parsed.prod_profile_message).toBeUndefined();
+  });
+
+  it('aiftp_rollback_confirm schema rejects acknowledge_production: false outright', async () => {
+    // Mirrors the aiftp_push_confirm v0.9.1 fix: z.literal(true).optional()
+    // means `false` is a schema-level type error, not a runtime-guard trip.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: 'whatever',
+      diff_hash: 'whatever',
+      confirm_token: 'whatever',
+      acknowledge_production: false,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(
+      /invalid_(literal|value)|expected.*true|literal/i,
+    );
+  });
+
+  it('aiftp_rollback_confirm refuses a prod-profile plan without acknowledge_production: true', async () => {
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      // intentionally omitting acknowledge_production
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(
+      /acknowledge_production|production rollback refused/i,
+    );
+    // Must not mention the confirm phrase — rollback never gates on it.
+    expect(JSON.stringify(refused.content)).not.toMatch(/合言葉|confirmation phrase/i);
+    expect(uploads).toHaveLength(0);
+  });
+
+  it('aiftp_rollback_confirm applies a prod-profile plan when acknowledge_production: true is passed', async () => {
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('aiftp_rollback_confirm applies a non-prod-profile plan with no acknowledge_production argument', async () => {
+    // Existing v0.12 users on non-prod profiles must be unaffected by this
+    // change: no new argument is required when the profile does not match
+    // safety.prod_profile_patterns.
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
   });
 
   it('reads config and state resources', async () => {

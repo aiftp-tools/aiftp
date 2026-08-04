@@ -92,6 +92,29 @@ The registry is **read-only over MCP**: there is no tool to write or mutate
   always-on and fail-closed in the Claude Desktop `.mcpb` extension (see
   `docs/desktop-extension.md`).
 
+### `aiftp_rollback_confirm`'s `acknowledge_production` argument (v0.13.0, breaking change)
+
+`aiftp_rollback_prepare` now returns `prod_profile_warning: true` — computed
+the same way as `aiftp_push_prepare`'s — when the profile matches
+`safety.prod_profile_patterns`. When that flag is set,
+`aiftp_rollback_confirm` refuses (schema-rejects a literal `false`, and
+refuses at runtime when the argument is simply omitted) unless called with
+`acknowledge_production: true`.
+
+This gate is intentionally independent of the confirm-phrase mechanism
+described above: `aiftp_rollback_confirm` never requires, checks, or
+mentions the confirm phrase, on any server configuration. Rollback is the
+recovery path — an operator who has lost or misconfigured the confirm phrase
+must still be able to undo a bad push, or a fixable incident becomes a
+permanently broken site with no way back short of a terminal.
+
+**Breaking change**: a v0.12 terminal/CLI user calling `aiftp_rollback_confirm`
+against a profile matching `safety.prod_profile_patterns` (default patterns:
+`prod*`, `production*`, `main*`) must now also pass
+`acknowledge_production: true`, matching the requirement
+`aiftp_push_confirm` already had. Rollbacks against non-prod profiles are
+unaffected — no new argument is required.
+
 ### MCP prompt
 
 The server registers one MCP **prompt**, `aiftp_setup` — this is the first
