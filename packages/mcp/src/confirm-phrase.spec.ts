@@ -55,6 +55,11 @@ describe('verifyConfirmation', () => {
     expect(verifyConfirmation('AB3K9P SAKURA-2026', hash)).toBe(false);
   });
 
+  it('is case-insensitive on the challenge, so a lowercase typo still matches', () => {
+    expect(verifyConfirmation('ab3k9p sakura-2026', hash)).toBe(true);
+    expect(verifyConfirmation('Ab3K9p sakura-2026', hash)).toBe(true);
+  });
+
   it('keeps internal whitespace inside a multi-word phrase', () => {
     const multi = hashConfirmation('AB3K9P', 'sakura no ki');
     expect(verifyConfirmation('AB3K9P sakura no ki', multi)).toBe(true);

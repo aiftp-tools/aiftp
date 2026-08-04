@@ -16,8 +16,15 @@ export function generateChallenge(): string {
 function normalize(raw: string): string {
   const trimmed = raw.trim();
   const separator = trimmed.search(/\s/u);
-  if (separator < 0) return `${trimmed}\n`;
-  return `${trimmed.slice(0, separator)}\n${trimmed.slice(separator + 1).trim()}`;
+  // Only the challenge segment is upper-cased: it is a public, non-secret
+  // code read off a screen (ALPHABET is upper-case-only), so a lowercase
+  // typo should not cost a trainee a whole aiftp_push_prepare round-trip.
+  // The phrase segment is left exactly as typed -- it is the secret half
+  // of the pair and must stay case-sensitive.
+  if (separator < 0) return `${trimmed.toUpperCase()}\n`;
+  const challenge = trimmed.slice(0, separator).toUpperCase();
+  const phrase = trimmed.slice(separator + 1).trim();
+  return `${challenge}\n${phrase}`;
 }
 
 export function hashConfirmation(challenge: string, phrase: string): string {
