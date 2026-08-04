@@ -109,8 +109,7 @@ export function buildManifest(version: string): DesktopManifest {
       password: {
         type: 'string',
         title: 'パスワード',
-        description:
-          'FTP のパスワード。OS のキーチェーンに保存され、初回起動後はこの欄を空にしてかまいません',
+        description: 'FTP のパスワード。OS のキーチェーンに保存されます',
         required: true,
         sensitive: true,
       },
