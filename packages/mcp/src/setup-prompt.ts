@@ -17,6 +17,7 @@ export function buildSetupPromptText(): string {
     '',
     '## ④ 戻す体験',
     '`aiftp_backup_list` で自動取得されたバックアップを見せ、`aiftp_rollback_prepare` → `aiftp_rollback_confirm` で1つ前の状態に戻せることを実演します。',
+    '戻す操作もリモートを書き換えるため、`aiftp_rollback_confirm` には `acknowledge_production: true` が必要です（合言葉は不要です。復旧手段を合言葉に依存させないためです）。',
     '',
     '困ったときは `aiftp_setup_status` に戻ってください。設定の不足は必ず `hint` に日本語の対処法が入っています。',
   ].join('\n');

@@ -56,7 +56,7 @@ Read-only (safe, no confirmation):
 - `aiftp_profile_list`
 - `aiftp_profile_test`
 - `aiftp_sites_list` — list sites registered in the global registry (`~/.aiftp/sites.toml`), redacted (no credentials)
-- `aiftp_setup_status` — report pass/fail for 6 checks (bootstrap, project_dir, config_file, credential, registry, confirm_phrase), each with a Japanese `hint` on failure. Primarily aimed at the Claude Desktop `.mcpb` extension, but works the same way from a terminal MCP client.
+- `aiftp_setup_status` — report pass/fail for 6 checks (bootstrap, project_dir, config_file, credential, registry, confirm_phrase), each with a Japanese `hint` on failure. Aimed at the Claude Desktop `.mcpb` extension: the report is built from a startup report that only the Desktop extension writes, so from a terminal MCP client this tool returns a single `bootstrap-missing` check.
 - `aiftp_init_template_list`
 - `aiftp_backup_list`
 - `aiftp_backup_verify`
