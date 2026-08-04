@@ -36,60 +36,16 @@
 //   3. Guard the staged tree, then `mcpb pack`.
 
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildManifest } from '../dist/manifest.js';
-
-/**
- * Fails the build if the staged tree (what's about to be zipped into the
- * .mcpb) contains either:
- *   - a file whose contents reference the build machine's home directory
- *     (an absolute-path / identity leak into a file every attendee gets), or
- *   - a `*.node` native binary (platform-specific; the manifest declares
- *     both darwin and win32, so a binary built on this machine is wrong for
- *     the other platform).
- * This class of defect surfaced twice during Task 7 review without the test
- * suite ever catching it, so it gets its own build-time check rather than
- * relying on a human unzipping the artifact again next time.
- */
-async function guardStagedTree(root) {
-  const home = homedir();
-  const entries = await readdir(root, { recursive: true, withFileTypes: true });
-  const nativeBinaries = [];
-  const leaks = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const filePath = join(entry.parentPath ?? entry.path, entry.name);
-    if (filePath.endsWith('.node')) {
-      nativeBinaries.push(filePath);
-      continue;
-    }
-    const contents = await readFile(filePath);
-    if (contents.includes(home)) {
-      leaks.push(filePath);
-    }
-  }
-  const problems = [];
-  if (leaks.length > 0) {
-    const list = leaks.map((f) => `  - ${relative(root, f)}`).join('\n');
-    problems.push(
-      `${leaks.length} file(s) contain the build machine's home directory ("${home}"):\n${list}`,
-    );
-  }
-  if (nativeBinaries.length > 0) {
-    const list = nativeBinaries.map((f) => `  - ${relative(root, f)}`).join('\n');
-    problems.push(
-      `${nativeBinaries.length} native .node binary/binaries found (platform-specific, breaks the other target platform):\n${list}`,
-    );
-  }
-  if (problems.length > 0) {
-    throw new Error(
-      `build-mcpb: refusing to pack a tainted staging tree.\n\n${problems.join('\n\n')}`,
-    );
-  }
-}
+// The staged-tree guard lives in src/ (and is unit-tested there) rather
+// than inline here: this class of defect surfaced twice during Task 7
+// review without the test suite ever catching it, and once more in the
+// v0.13 security cross-review, so it needs tests of its own.
+import { guardStagedTree } from '../dist/staged-tree-guard.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, '..');
@@ -198,8 +154,13 @@ await writeFile(
 );
 await cp(join(pkgRoot, 'icon.png'), join(stage, 'icon.png'));
 
-// 3. guard, then pack
-await guardStagedTree(stage);
+// 3. guard, then pack.
+//
+// `forbiddenPaths` is what the guard searches file contents for. The home
+// directory is the classic leak, but it is not the only one: a build in a
+// CI workspace, /private/tmp, or another volume lives outside $HOME, so the
+// repository root (which IS the CI workspace root) is passed too.
+await guardStagedTree(stage, { forbiddenPaths: [homedir(), repoRoot] });
 execFileSync(
   'pnpm',
   ['exec', 'mcpb', 'pack', stage, join(pkgRoot, 'dist', `aiftp-${version}.mcpb`)],
