@@ -16,7 +16,7 @@ Release tags live in the GitHub repository:
 
 ---
 
-## [0.13.0] — 2026-08-03
+## [0.13.0] — 2026-08-04
 
 **Minor release** — Claude Desktop 用の `.mcpb` 拡張を追加。ターミナルと Node.js の導入なしで aiftp を使えるようにし、本番反映に人間の合言葉ゲートを設けた。
 
