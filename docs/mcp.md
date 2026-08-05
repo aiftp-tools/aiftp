@@ -91,13 +91,32 @@ The registry is **read-only over MCP**: there is no tool to write or mutate
   configured secret. This is an opt-in hardening for terminal use; it is
   always-on and fail-closed in the Claude Desktop `.mcpb` extension (see
   `docs/desktop-extension.md`).
-- **`AIFTP_CONFIRM_PHRASE` set to a value that is too weak**: identical to
-  unset. A phrase must be at least 12 Unicode code points after trimming and
-  contain at least 4 distinct code points; anything shorter or more repetitive
-  is discarded when the server starts and never reaches the gate. The same
-  predicate backs the `confirm_phrase` check in `aiftp_setup_status`, so the
-  two always agree. Rationale, and why there is no attempt counter, in the
-  README section "Production confirm phrase (v0.13)".
+- **`AIFTP_CONFIRM_PHRASE` set to a value that is too weak**: **not** identical
+  to unset — `aiftp_push_confirm` refuses the production plan with
+  `confirm-phrase-not-configured:`, on the terminal as well as in Desktop mode.
+  A phrase must be at least 12 Unicode code points after trimming and contain
+  at least 4 distinct code points. Setting one and having it silently ignored
+  would remove a boundary the operator explicitly asked for, so a supplied
+  phrase either gates or errors; only a genuinely unset (or empty) variable
+  takes the v0.12 compatibility path. The same predicate backs the
+  `confirm_phrase` check in `aiftp_setup_status`, so the two always agree, and
+  no response, error or log entry says whether a refusal was "unset" or "too
+  weak". Rationale, and why there is no attempt counter, in the README section
+  "Production confirm phrase (v0.13)".
+
+Generate the phrase with the CLI rather than inventing one:
+
+```bash
+aiftp confirm-phrase generate
+```
+
+It prints a 150-bit phrase to stdout (handling instructions to stderr) and is
+deliberately **not** available over MCP: a phrase emitted by a tool, prompt or
+resource would enter the model's context before the human ever used it, which
+is exactly what the gate exists to prevent. For the same reason the server's
+refusal messages do not name this command — **run it yourself rather than
+asking an assistant to run it**, since a phrase the assistant has seen cannot
+gate the assistant.
 
 **Which pushes need production confirmation.** Two separate decisions, kept
 separate on purpose — `.aiftp.toml` is a file the AI being gated can edit, so

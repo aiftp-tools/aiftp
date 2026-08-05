@@ -347,6 +347,18 @@ aiftp sites doctor
 aiftp init --from gwco
 ```
 
+### Arming the production confirm phrase (v0.13)
+
+```bash
+# Generate the phrase the MCP push gate will require, then paste it into the
+# Claude Desktop extension's settings (or export it as AIFTP_CONFIRM_PHRASE).
+aiftp confirm-phrase generate
+```
+
+The phrase goes to stdout and the handling instructions to stderr, so the
+command is readable as-is and pipeable when you want only the secret. See
+"Production confirm phrase (v0.13)" below for what the gate does with it.
+
 Every `aiftp push` / `aiftp rollback` then prints a destination banner
 (`⛳ 宛先: gwco (glocalworks.co.jp)`) before acting, and an AI agent driving
 aiftp over MCP can pass `expected_site` to have a wrong destination **rejected
@@ -436,23 +448,60 @@ the challenge is returned to the caller, so the phrase is the only secret in
 the pair. Non-secret mistakes (missing `acknowledge_production`, stale
 `diff_hash`, wrong `confirm_token`) do not consume the plan.
 
+**Generate the phrase, don't invent one.**
+
+```bash
+aiftp confirm-phrase generate
+```
+
+Prints a phrase with **150 bits of entropy** (30 characters drawn uniformly
+from a 32-symbol alphabet by `node:crypto`, grouped with hyphens for reading)
+to stdout, and how to handle it to stderr — so `aiftp confirm-phrase generate`
+is readable and `aiftp confirm-phrase generate 2>/dev/null | pbcopy` is
+pasteable. This is the documented path for setting the phrase up. It is
+**CLI-only on purpose**: there is no MCP tool, prompt or resource that
+generates a phrase, because a phrase that passed through the MCP server would
+be in the model's context before the human ever used it. For the same reason
+the MCP server's own refusals never name this command — **run it yourself; do
+not ask an AI assistant to run it for you.** A phrase the assistant has seen
+cannot gate the assistant. The command takes no arguments — it prints a
+secret, it never accepts one. Do not show the output on slides or a shared
+screen.
+
 **Phrase strength requirement.** A configured phrase must be, after trimming,
 at least **12 Unicode code points** long and contain at least **4 distinct**
-code points. A value that fails this is treated as **not configured at all**:
-the push gate and the `confirm_phrase` check of `aiftp_setup_status` share one
-predicate, so neither can report it as present while the other treats it as
-absent. Spending the plan on a mismatch does not bound the number of guesses —
-the caller can simply prepare again — so the phrase itself has to be out of
-reach of a dictionary run. There is deliberately **no attempt counter,
+code points. Spending the plan on a mismatch does not bound the number of
+guesses — the caller can simply prepare again — so the phrase itself has to be
+out of reach of a dictionary run. There is deliberately **no attempt counter,
 cooldown, or lockout**: a failure budget is something a misbehaving client can
 burn on purpose, which would take a live training class offline. Strength is
 stateless and cannot be triggered by an attacker. 12 is a floor, not a proof of
-strength — generate the phrase with a password manager rather than inventing
-one. Refusals never reveal the phrase or its length, and do not distinguish
-"unset" from "too weak". The rule applies on the terminal too; since the phrase
-is new in v0.13, no existing v0.12 user is affected, and a terminal user who
-sets a too-short phrase simply gets the unchanged v0.12
-`acknowledge_production`-only behaviour rather than an error.
+strength: a long but predictable phrase still passes it, which is why the
+generator above — not the floor — is what the docs recommend. Free input above
+the floor stays permitted, so a password-manager string or a memorable
+multi-word passphrase works too.
+
+**Three states, not two.** The setting is `absent`, `rejected` or `usable`,
+and they are not interchangeable:
+
+| State | Terminal / Claude Code | Claude Desktop |
+|---|---|---|
+| **absent** — nothing supplied (unset, or empty) | v0.12 behaviour, byte-identical: `acknowledge_production: true` alone confirms | fail-closed, push refused |
+| **rejected** — supplied, below the floor | **fail-closed, push refused** | fail-closed, push refused |
+| **usable** — clears the floor | phrase gate applies | phrase gate applies |
+
+The `rejected` row is the point: setting a weak phrase used to be identical to
+setting none, so a terminal user who set one believing they had armed the gate
+silently lost it. A phrase that was supplied and refused now refuses the push
+instead of downgrading. `absent` still keeps v0.12 compatibility, because that
+is every existing npm user and they never opted into anything.
+
+The push gate and the `confirm_phrase` check of `aiftp_setup_status` resolve
+the state through one predicate, so neither can report a phrase as usable while
+the other refuses it: `confirm_phrase` passes for `usable` and fails —
+identically worded — for both `absent` and `rejected`. Refusals never reveal
+the phrase or its length, and never say which of the two failing states
+produced them.
 
 Inside the Claude Desktop extension (`AIFTP_DESKTOP=1`) the gate applies to
 **every** push regardless of profile name, because `.aiftp.toml` — including
