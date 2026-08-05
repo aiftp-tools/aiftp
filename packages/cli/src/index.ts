@@ -72,6 +72,7 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
+import { registerConfirmPhraseCommand } from './confirm-phrase-command.js';
 import {
   type InheritedSections,
   InitFromInvalidError,
@@ -1765,6 +1766,8 @@ export function createCli(options: CliOptions = {}): Command {
     runDoctor: runtime.runDoctor ?? defaultRunDoctor,
     ...options.sites,
   });
+
+  registerConfirmPhraseCommand(program, { stdout, stderr });
 
   program
     .command('init')

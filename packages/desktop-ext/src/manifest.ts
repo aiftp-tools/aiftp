@@ -122,7 +122,7 @@ export function buildManifest(version: string): DesktopManifest {
         // and pins those values with a test. desktop-ext does not depend on
         // @aiftp-tools/mcp, so this text is a copy on purpose.
         description:
-          '本番反映のときにあなた自身がチャットへ入力する合言葉。FTP のパスワードとは別の文字列にしてください。12文字以上・4種類以上の文字が必要です（パスワード管理ツールで生成した20文字以上を推奨。短すぎる合言葉は未設定と同じ扱いになり、本番反映は拒否されます）',
+          '本番反映のときにあなた自身がチャットへ入力する合言葉。FTP のパスワードとは別の文字列にしてください。12文字以上・4種類以上の文字が必要です（ターミナルで aiftp confirm-phrase generate を実行し、出力を貼り付けるのが確実。パスワード管理ツールで生成した20文字以上でも可。条件を満たさない合言葉は本番反映が拒否されます）',
         required: true,
         sensitive: true,
       },

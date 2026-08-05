@@ -48,10 +48,13 @@ describe('buildManifest', () => {
     // visible at the moment they type it -- not only in an error later.
     const description = manifest.user_config.confirm_phrase?.description ?? '';
     expect(description).toContain('12文字以上・4種類以上の文字が必要です');
-    expect(description).toContain('短すぎる合言葉は未設定と同じ扱いになり、本番反映は拒否されます');
+    expect(description).toContain('条件を満たさない合言葉は本番反映が拒否されます');
     // How to make one, never one to copy: no field of the shipped manifest
-    // may contain something a trainee could paste in as their phrase.
-    expect(description).toContain('パスワード管理ツールで生成した20文字以上を推奨');
+    // may contain something a trainee could paste in as their phrase. The
+    // generator is the recommended path, so it is named here, where the
+    // instructor is standing when they need it.
+    expect(description).toContain('aiftp confirm-phrase generate');
+    expect(description).toContain('パスワード管理ツールで生成した20文字以上でも可');
     expect(description).not.toMatch(/例[:：]/u);
   });
 
