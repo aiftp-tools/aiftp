@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   CONFIRM_PHRASE_MIN_DISTINCT_CHARS,
   CONFIRM_PHRASE_MIN_LENGTH,
+  CONFIRM_PHRASE_REQUIREMENT_EN,
+  CONFIRM_PHRASE_REQUIREMENT_JA,
   generateChallenge,
   hashConfirmation,
   isUsableConfirmPhrase,
+  resolveConfirmPhrase,
   verifyConfirmation,
 } from './confirm-phrase.js';
 
@@ -76,6 +79,90 @@ describe('isUsableConfirmPhrase', () => {
     expect(isUsableConfirmPhrase('abababababababab')).toBe(false);
     expect(isUsableConfirmPhrase('abcabcabcabcabc')).toBe(false); // 3 distinct
     expect(isUsableConfirmPhrase('abcdabcdabcdabcd')).toBe(true); // 4 distinct
+  });
+});
+
+describe('resolveConfirmPhrase', () => {
+  // v0.13 Codex cross-review round 3, M1. "Absent" and "rejected" are NOT
+  // the same thing: the first is a v0.12 user who never opted in, the second
+  // is someone who asked for a gate and typed something too weak. Collapsing
+  // the second into the first silently removes a boundary the operator
+  // explicitly chose, so the resolver keeps them apart and the gate decides
+  // what each one means.
+  it('reports an unsupplied phrase as absent', () => {
+    expect(resolveConfirmPhrase(undefined)).toEqual({ state: 'absent' });
+  });
+
+  it('reports an empty or whitespace-only phrase as absent, not rejected', () => {
+    // Claude Desktop writes AIFTP_CONFIRM_PHRASE="" for an untouched
+    // settings field, and an empty env var is the same statement as no env
+    // var: nothing was supplied.
+    expect(resolveConfirmPhrase('')).toEqual({ state: 'absent' });
+    expect(resolveConfirmPhrase('   \t \n ')).toEqual({ state: 'absent' });
+  });
+
+  it('reports a supplied but too-weak phrase as rejected', () => {
+    expect(resolveConfirmPhrase('sakura-2026')).toEqual({ state: 'rejected' });
+    expect(resolveConfirmPhrase('aaaaaaaaaaaaaaaaaaaa')).toEqual({ state: 'rejected' });
+  });
+
+  it('returns the phrase verbatim when it is usable', () => {
+    expect(resolveConfirmPhrase('abcdefghijkl')).toEqual({
+      state: 'usable',
+      phrase: 'abcdefghijkl',
+    });
+    // Untrimmed input stays untrimmed: hashConfirmation() does the trimming,
+    // and doing it twice in two places is how the two drift apart.
+    expect(resolveConfirmPhrase('  abcdefghijkl  ')).toEqual({
+      state: 'usable',
+      phrase: '  abcdefghijkl  ',
+    });
+  });
+
+  it('agrees with isUsableConfirmPhrase on every input', () => {
+    const inputs = [
+      undefined,
+      '',
+      '   ',
+      'sakura-2026',
+      'abcdefghijk',
+      'abcdefghijkl',
+      'correct battery staple horse fence',
+      'とうきょうのそらはあおい',
+      'aaaaaaaaaaaaaaaaaaaa',
+    ];
+    for (const input of inputs) {
+      expect(resolveConfirmPhrase(input).state === 'usable').toBe(isUsableConfirmPhrase(input));
+    }
+  });
+});
+
+describe('confirm phrase requirement text', () => {
+  it('states the enforced numbers in both languages and names no example phrase', () => {
+    for (const text of [CONFIRM_PHRASE_REQUIREMENT_JA, CONFIRM_PHRASE_REQUIREMENT_EN]) {
+      expect(text).toContain(String(CONFIRM_PHRASE_MIN_LENGTH));
+      expect(text).toContain(String(CONFIRM_PHRASE_MIN_DISTINCT_CHARS));
+      // Every number in the published requirement is one of the three we
+      // mean to publish: the two thresholds and the recommended length. A
+      // measured length could not appear here without failing this.
+      expect([...new Set(text.match(/\d+/gu) ?? [])].sort()).toEqual(['12', '20', '4']);
+    }
+  });
+
+  it('never names a runnable generator command, on either MCP-facing text', () => {
+    // Both strings are returned to an MCP client. Naming a command that
+    // prints a phrase would invite the assistant to run it and read the
+    // phrase off its own stdout -- and a phrase the assistant has seen
+    // cannot gate the assistant. The generator is named only where humans
+    // read: CLI help, the Desktop settings field, README and docs/.
+    for (const text of [CONFIRM_PHRASE_REQUIREMENT_JA, CONFIRM_PHRASE_REQUIREMENT_EN]) {
+      expect(text).not.toContain('confirm-phrase generate');
+      expect(text).not.toMatch(/\baiftp [a-z-]+ [a-z-]+\b/u);
+    }
+  });
+
+  it('tells the reader the human must generate the phrase, not the assistant', () => {
+    expect(CONFIRM_PHRASE_REQUIREMENT_EN).toMatch(/human operator rather than by an AI/u);
   });
 });
 

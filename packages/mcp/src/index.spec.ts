@@ -119,6 +119,16 @@ describe('mcp', () => {
     return result.content[0]?.text ?? '';
   }
 
+  /**
+   * The refusal message a structured tool error carries, unwrapped from its
+   * JSON envelope. Assertions about wording (and about what a message must
+   * NOT reveal) belong on this, not on the escaped envelope.
+   */
+  function errorMessageOf(result: { content: Array<{ type: string; text?: string }> }): string {
+    const payload = parseText(result) as { error?: { message?: string } };
+    return payload.error?.message ?? '';
+  }
+
   function addedSnapshotFile(path: string): TestSnapshotFile {
     return {
       path,
@@ -3490,6 +3500,94 @@ describe('mcp', () => {
     }
   });
 
+  it('reports a confirm_phrase verdict that matches what the gate does, in all three states (M1)', async () => {
+    // The two must never disagree. They cannot, structurally -- both read
+    // the resolution produced by `resolveConfirmPhrase`, which is built on
+    // `isUsableConfirmPhrase` -- and this pins the resulting table.
+    await writeConfig();
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        missing: [],
+      },
+    });
+    const usable = 'spec-fixture-phrase-7Q2';
+    try {
+      const observe = async (desktopMode: boolean, confirmPhrase?: string) => {
+        const app = createAiftpMcp({
+          cwd,
+          desktopMode,
+          ...(confirmPhrase === undefined ? {} : { confirmPhrase }),
+          runtime: terminalRuntime(),
+        });
+        const report = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+          checks: { id: string; status: string }[];
+        };
+        const prepared = parseText(
+          await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+        ) as PreparedPlan;
+        const confirmed = await callAiftpTool(app, 'aiftp_push_confirm', {
+          profile: 'production',
+          plan_id: prepared.plan_id,
+          diff_hash: prepared.diff_hash,
+          confirm_token: prepared.confirm_token,
+          acknowledge_production: true,
+          ...(prepared.confirmation_challenge === undefined
+            ? {}
+            : { confirmation: `${prepared.confirmation_challenge} ${confirmPhrase ?? ''}` }),
+        });
+        return {
+          check: report.checks.find((entry) => entry.id === 'confirm_phrase')?.status,
+          pushed: confirmed.isError !== true,
+          demandedPhrase: prepared.confirmation_challenge !== undefined,
+        };
+      };
+
+      // Desktop: a usable phrase gates and passes; both failure states are
+      // refused, and neither is reported as configured.
+      expect(await observe(true, usable)).toEqual({
+        check: 'pass',
+        pushed: true,
+        demandedPhrase: true,
+      });
+      expect(await observe(true, WEAK_PHRASE)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+      expect(await observe(true, undefined)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+
+      // Terminal: same verdicts, except that "absent" keeps the documented
+      // v0.12 acknowledge_production-only path. "Rejected" does not.
+      expect(await observe(false, usable)).toEqual({
+        check: 'pass',
+        pushed: true,
+        demandedPhrase: true,
+      });
+      expect(await observe(false, WEAK_PHRASE)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+      expect(await observe(false, undefined)).toEqual({
+        check: 'fail',
+        pushed: true,
+        demandedPhrase: false,
+      });
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
   it('accepts a long multi-word passphrase and still gates on it (H2)', async () => {
     await writeConfig();
     const passphrase = 'correct battery staple horse fence';
@@ -3532,31 +3630,42 @@ describe('mcp', () => {
     expect(await readLogFileRaw()).not.toContain(passphrase);
   });
 
-  it('leaves the terminal path byte-identical when the configured phrase is too weak (H2)', async () => {
-    // v0.12 users never configure a phrase, so applying the same strength
-    // rule on the terminal breaks nobody -- and a weak one must degrade to
-    // exactly the v0.12 acknowledge_production-only behaviour, with no
-    // mention of a confirm phrase or Claude Desktop.
-    await writeConfig();
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review round 3, M1: the phrase has THREE states, not
+  // two. "Absent" (nothing supplied) keeps the v0.12 terminal behaviour;
+  // "rejected" (supplied, below the floor) is refused everywhere, because a
+  // user who typed a phrase asked for a gate and must get a gate or an
+  // error -- never a silent downgrade. "Usable" gates as before.
+  // -----------------------------------------------------------------
+
+  function terminalRuntime(): AiftpMcpRuntime {
     const dryRun = createPushResult({ planned: ['index.html'] });
-    const runtime = {
-      runPush: async (opts: { dryRun?: boolean }) =>
+    return {
+      runPush: async (opts) =>
         opts.dryRun
           ? dryRun
           : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
       createBackupStore: fakeBackupStoreForRealPush(),
     };
-    const app = createAiftpMcp({ cwd, confirmPhrase: WEAK_PHRASE, runtime });
+  }
+
+  interface PreparedPlan {
+    plan_id: string;
+    diff_hash: string;
+    confirm_token: string;
+    confirmation_challenge?: string;
+    prod_profile_message?: string;
+  }
+
+  it('keeps the terminal path byte-identical when NO phrase is supplied (absent)', async () => {
+    // Row 4, restated as the "absent" state: this is every existing v0.12
+    // npm user, and nothing about their flow may change.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd, runtime: terminalRuntime() });
 
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
-    ) as {
-      plan_id: string;
-      diff_hash: string;
-      confirm_token: string;
-      confirmation_challenge?: string;
-      prod_profile_message?: string;
-    };
+    ) as PreparedPlan;
     expect(prepared.confirmation_challenge).toBeUndefined();
     expect(prepared.prod_profile_message).toBe(
       'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.',
@@ -3573,6 +3682,132 @@ describe('mcp', () => {
       }),
     ) as { ok: boolean };
     expect(accepted.ok).toBe(true);
+  });
+
+  it('refuses the terminal production push when the supplied phrase is too weak (rejected, M1)', async () => {
+    // The regression this fixes: a terminal user who set a weak phrase
+    // believing they had enabled the gate used to fall into the "absent"
+    // compatibility branch and push on acknowledge_production alone.
+    await writeConfig();
+    const realPushes: string[] = [];
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      confirmPhrase: WEAK_PHRASE,
+      runtime: {
+        runPush: async (opts) => {
+          if (!opts.dryRun) realPushes.push(opts.profile);
+          return dryRun;
+        },
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as PreparedPlan;
+    // No challenge: there is no usable phrase to check one against. But the
+    // message must NOT be the v0.12 "acknowledge_production is enough" text,
+    // which would now be a lie.
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. No usable confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Set AIFTP_CONFIRM_PHRASE in the MCP server\'s environment and restart it. A confirm phrase must be at least 12 Unicode code points after trimming and contain at least 4 distinct code points; a password-manager string of 20 or more characters clears it comfortably. It must be generated rather than invented, and generated by the human operator rather than by an AI assistant — a phrase the assistant has seen cannot gate the assistant. See "Production confirm phrase" in the aiftp README. The floor is a floor, not proof of strength.',
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(errorMessageOf(refused)).toMatch(/^confirm-phrase-not-configured:/);
+    // Terminal wording: an npm user has no Claude Desktop settings screen.
+    expect(errorMessageOf(refused)).not.toContain('Claude Desktop');
+    // ...and no runnable generator command, on either surface: the client
+    // reading this could run it and see the phrase it is meant not to know.
+    for (const message of [prepared.prod_profile_message ?? '', errorMessageOf(refused)]) {
+      expect(message).not.toContain('confirm-phrase generate');
+    }
+    // Nothing was uploaded, and no confirm-phrase event was logged.
+    expect(realPushes).toEqual([]);
+
+    for (const surface of [
+      JSON.stringify(prepared),
+      JSON.stringify(refused),
+      await readLogFileRaw(),
+    ]) {
+      expect(surface).not.toContain('sakura');
+      expect(surface).not.toContain(WEAK_PHRASE);
+      expect(surface).not.toContain('confirm-phrase-challenge');
+    }
+    // No length leak: the only numbers in the human-facing text are the
+    // published rule (12 / 4) and the recommendation (20).
+    for (const message of [prepared.prod_profile_message ?? '', errorMessageOf(refused)]) {
+      expect([...new Set(message.match(/\d+/gu) ?? [])].sort()).toEqual(['12', '20', '4']);
+    }
+  });
+
+  it('gates the terminal production push normally when the phrase is usable (usable)', async () => {
+    await writeConfig();
+    const phrase = 'spec-fixture-phrase-7Q2';
+    const app = createAiftpMcp({ cwd, confirmPhrase: phrase, runtime: terminalRuntime() });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as PreparedPlan;
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${String(prepared.confirmation_challenge)} ${phrase}`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain(phrase);
+  });
+
+  it('cannot be told apart from "unset" in Desktop mode, on any surface (M1)', async () => {
+    // Desktop mode refuses both states, and must refuse them with the SAME
+    // words: a message that said "too weak" would tell a guesser the phrase
+    // exists and is below the published minimum.
+    await writeConfig();
+    const surfacesFor = async (options: { confirmPhrase?: string }) => {
+      const app = createAiftpMcp({
+        cwd,
+        desktopMode: true,
+        ...options,
+        runtime: terminalRuntime(),
+      });
+      const prepared = parseText(
+        await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+      ) as PreparedPlan;
+      const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      });
+      expect(refused.isError).toBe(true);
+      return {
+        prepareMessage: prepared.prod_profile_message,
+        challenge: prepared.confirmation_challenge,
+        refusal: errorMessageOf(refused),
+      };
+    };
+
+    const absent = await surfacesFor({});
+    const rejected = await surfacesFor({ confirmPhrase: WEAK_PHRASE });
+    expect(rejected).toEqual(absent);
+    expect(rejected.refusal).toMatch(/^confirm-phrase-not-configured:/);
+    expect(rejected.challenge).toBeUndefined();
     expect(await readLogFileRaw()).not.toContain('sakura');
   });
 
