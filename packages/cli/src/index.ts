@@ -37,6 +37,7 @@ import {
   createExcluder,
   createWatchDebouncer,
   deletePassword,
+  ensureGitignoreEntry,
   extractHookPaths,
   formatDestinationBanner,
   generateKey,
@@ -71,6 +72,7 @@ import {
 } from '@aiftp-tools/core';
 import { Command, CommanderError } from 'commander';
 import prompts from 'prompts';
+import { registerConfirmPhraseCommand } from './confirm-phrase-command.js';
 import {
   type InheritedSections,
   InitFromInvalidError,
@@ -419,17 +421,6 @@ function renderConfig(
   appendInheritedSections(lines, inherited, effectiveQuirks, answers.serverKind === 'starserver');
 
   return lines.join('\n');
-}
-
-async function ensureGitignore(cwd: string): Promise<void> {
-  const path = join(cwd, '.gitignore');
-  const source = (await readFile(path, 'utf8').catch(() => '')) as string;
-  const lines = source.split(/\r?\n/u);
-  if (lines.includes('.aiftp/')) {
-    return;
-  }
-  const prefix = source.length > 0 && !source.endsWith('\n') ? '\n' : '';
-  await appendFile(path, `${prefix}.aiftp/\n`, 'utf8');
 }
 
 function requireString(value: unknown, name: string): string {
@@ -1776,6 +1767,8 @@ export function createCli(options: CliOptions = {}): Command {
     ...options.sites,
   });
 
+  registerConfirmPhraseCommand(program, { stdout, stderr });
+
   program
     .command('init')
     .description('Create .aiftp.toml and register credentials')
@@ -1916,7 +1909,7 @@ export function createCli(options: CliOptions = {}): Command {
         encoding: 'utf8',
         mode: 0o600,
       });
-      await ensureGitignore(cwd);
+      await ensureGitignoreEntry(cwd);
       await keychain.setPassword(answers.keychainService, answers.user, answers.password);
       const backupKeyEntryService = backupKeyService(answers.keychainService);
       const backupKeyExists = await keychain.hasPassword(backupKeyEntryService, answers.profile);

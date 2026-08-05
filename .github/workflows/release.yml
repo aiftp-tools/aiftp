@@ -1,0 +1,70 @@
+name: release
+
+# Attach the .mcpb bundle to a published GitHub Release. Publishing itself
+# (tag, `pnpm publish` x3, Release creation) stays manual and requires the
+# maintainer's explicit approval — this workflow only adds the asset.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  attach-mcpb:
+    name: Attach .mcpb to the release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.1
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @aiftp-tools/desktop-ext build:mcpb
+
+      - name: Verify the bundle version matches the tag
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # The built filename and the manifest's version both come from
+          # packages/desktop-ext/package.json (see build-mcpb.mjs), NOT the
+          # root package.json — those can drift if a release bumps the root
+          # and forgets desktop-ext. Read the same file the build reads, so
+          # a "PASS" here is actually a guarantee about the artifact we are
+          # about to upload.
+          expected="${RELEASE_TAG#v}"
+          actual="$(node -p "require('./packages/desktop-ext/package.json').version")"
+          if [ "$expected" != "$actual" ]; then
+            echo "FAIL: tag $RELEASE_TAG does not match desktop-ext package version $actual"
+            exit 1
+          fi
+          echo "PASS: $actual"
+
+      - name: Upload the asset
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Upload the exact file the previous step just verified, not a
+          # glob — "whatever is in dist/*.mcpb" is what let a stale-version
+          # artifact slip past a passing check before.
+          version="$(node -p "require('./packages/desktop-ext/package.json').version")"
+          bundle="packages/desktop-ext/dist/aiftp-${version}.mcpb"
+          test -f "$bundle" || { echo "FAIL: $bundle not found"; exit 1; }
+          gh release upload "$RELEASE_TAG" "$bundle" --clobber

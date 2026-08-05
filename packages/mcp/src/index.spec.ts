@@ -65,32 +65,46 @@ describe('mcp', () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  async function writeConfig(
-    options: { deletionPolicy?: string; warnOnProdProfile?: boolean } = {},
-  ): Promise<void> {
+  interface WriteConfigOptions {
+    deletionPolicy?: string;
+    warnOnProdProfile?: boolean;
+    /** Written verbatim as `prod_profile_patterns = <toml array>`. */
+    prodProfilePatterns?: readonly string[];
+    host?: string;
+    user?: string;
+    keychainService?: string;
+  }
+
+  async function writeConfig(options: WriteConfigOptions = {}): Promise<void> {
+    // `schema = 1` makes loadConfig auto-migrate to schema 2 and drop a
+    // `.aiftp.toml.v1.bak` beside it. Tests that rewrite the config
+    // mid-flight (the H3 destination-binding cases) would otherwise hit
+    // "refusing to migrate: backup already exists" instead of the
+    // behaviour under test.
+    await rm(join(cwd, '.aiftp.toml.v1.bak'), { force: true });
+    const safetyLines = [
+      ...(options.warnOnProdProfile === false ? ['warn_on_prod_profile = false'] : []),
+      ...(options.prodProfilePatterns
+        ? [`prod_profile_patterns = ${JSON.stringify(options.prodProfilePatterns)}`]
+        : []),
+      ...(options.deletionPolicy ? [`deletion_policy = "${options.deletionPolicy}"`] : []),
+    ];
     await writeFile(
       join(cwd, '.aiftp.toml'),
       [
         'schema = 1',
         '',
         '[profile.production]',
-        'host = "ftp.example.com"',
+        `host = "${options.host ?? 'ftp.example.com'}"`,
         'port = 21',
         'protocol = "ftps"',
-        'user = "deploy-user"',
+        `user = "${options.user ?? 'deploy-user'}"`,
         'remote_root = "/public_html"',
         'local_root = "."',
-        'keychain_service = "aiftp:production"',
+        `keychain_service = "${options.keychainService ?? 'aiftp:production'}"`,
         'server_kind = "starserver"',
         '',
-        ...(options.deletionPolicy || options.warnOnProdProfile === false
-          ? [
-              '[safety]',
-              ...(options.warnOnProdProfile === false ? ['warn_on_prod_profile = false'] : []),
-              ...(options.deletionPolicy ? [`deletion_policy = "${options.deletionPolicy}"`] : []),
-              '',
-            ]
-          : []),
+        ...(safetyLines.length > 0 ? ['[safety]', ...safetyLines, ''] : []),
       ].join('\n'),
       'utf8',
     );
@@ -98,6 +112,21 @@ describe('mcp', () => {
 
   function parseText(result: { content: Array<{ type: string; text?: string }> }): unknown {
     return JSON.parse(result.content[0]?.text ?? '{}');
+  }
+
+  /** The raw text of a result, for error responses that are not JSON. */
+  function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+    return result.content[0]?.text ?? '';
+  }
+
+  /**
+   * The refusal message a structured tool error carries, unwrapped from its
+   * JSON envelope. Assertions about wording (and about what a message must
+   * NOT reveal) belong on this, not on the escaped envelope.
+   */
+  function errorMessageOf(result: { content: Array<{ type: string; text?: string }> }): string {
+    const payload = parseText(result) as { error?: { message?: string } };
+    return payload.error?.message ?? '';
   }
 
   function addedSnapshotFile(path: string): TestSnapshotFile {
@@ -827,6 +856,8 @@ describe('mcp', () => {
         }),
       }),
     };
+    // v0.13 (Task 5, B4 row 4 / B7): no desktopMode, no confirmPhrase ->
+    // v0.12 behaviour is preserved, so this app needs neither.
     const app = createAiftpMcp({ cwd, runtime });
 
     const prepared = parseText(
@@ -1037,6 +1068,8 @@ describe('mcp', () => {
         }),
       }),
     };
+    // v0.13 (Task 5, B4 row 4 / B7): no desktopMode, no confirmPhrase ->
+    // v0.12 behaviour is preserved, so this app needs neither.
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
       await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
@@ -2382,13 +2415,16 @@ describe('mcp', () => {
     expect(wrongToken.isError).toBe(true);
     expect(uploads).toHaveLength(0);
 
-    // Correct values: rollback runs.
+    // Correct values: rollback runs. `acknowledge_production: true` because
+    // the test config uses `production`, which matches the default
+    // prod_profile_patterns (mirrors aiftp_push_confirm, v0.13 post-review).
     const confirmed = parseText(
       await callAiftpTool(app, 'aiftp_rollback_confirm', {
         profile: 'production',
         plan_id: prepared.plan_id,
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
       }),
     ) as { ok: boolean; rolled_back: string[] };
     expect(confirmed.ok).toBe(true);
@@ -2456,6 +2492,7 @@ describe('mcp', () => {
         diff_hash: prepared.diff_hash,
         confirm_token: prepared.confirm_token,
         acknowledge_deletions: true,
+        acknowledge_production: true,
       }),
     ) as { ok: boolean; rolled_back: string[]; deleted: string[] };
 
@@ -2466,7 +2503,10 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm requires acknowledge_deletions when deletes are planned', async () => {
-    await writeConfig();
+    // warnOnProdProfile: false isolates this test's concern (the deletion
+    // gate) from the prod-profile gate, matching aiftp_push_confirm's own
+    // equivalent test precedent.
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2487,7 +2527,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm accepts acknowledge_deletions when deletes are planned', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, deletes } = rollbackRuntimeFor([addedSnapshotFile('new-page.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2510,7 +2550,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm does not require acknowledge_deletions when no deletes are planned', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const { runtime, uploads, deletes } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
     const app = createAiftpMcp({ cwd, runtime });
     const prepared = parseText(
@@ -2534,7 +2574,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm persists rollback nextState to state.json', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const statePath = join(cwd, '.aiftp', 'state', 'production', 'state.json');
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });
     await writeFile(
@@ -2598,7 +2638,7 @@ describe('mcp', () => {
   });
 
   it('aiftp_rollback_confirm rejects replay of a consumed plan', async () => {
-    await writeConfig();
+    await writeConfig({ warnOnProdProfile: false });
     const runtime: AiftpMcpRuntime = {
       createBackupStore: async () => ({
         listSnapshots: async () => [
@@ -2646,6 +2686,310 @@ describe('mcp', () => {
     expect(JSON.stringify(replay.content)).toMatch(/plan_id|expired|consumed|unknown/i);
   });
 
+  // -----------------------------------------------------------------
+  // v0.13 (post-review): rollback must carry the same production gate
+  // push already has — NOT the confirm phrase (rollback is the recovery
+  // path and must stay reachable even if the phrase is lost), but
+  // `acknowledge_production` for profiles matching
+  // safety.prod_profile_patterns, mirroring aiftp_push_confirm exactly.
+  //   - prepare surfaces prod_profile_warning the same way push's does
+  //   - confirm requires acknowledge_production: true to apply
+  //   - confirm phrase is never mentioned or required on this path
+  // -----------------------------------------------------------------
+
+  it('aiftp_rollback_prepare surfaces prod_profile_warning when the profile matches a prod pattern', async () => {
+    await writeConfig();
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 })) as {
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(parsed.prod_profile_warning).toBe(true);
+    expect(parsed.prod_profile_message).toMatch(/acknowledge_production|prod_profile_patterns/);
+    // The confirm phrase must never be mentioned on the rollback path —
+    // rollback is the recovery path and must stay usable even when the
+    // phrase is lost or misconfigured.
+    expect(parsed.prod_profile_message).not.toMatch(
+      /合言葉|confirmation phrase|confirmation_challenge/i,
+    );
+  });
+
+  it('aiftp_rollback_prepare does not surface prod_profile_warning for a non-prod profile', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const parsed = parseText(await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 })) as {
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(parsed.prod_profile_warning).toBe(false);
+    expect(parsed.prod_profile_message).toBeUndefined();
+  });
+
+  it('aiftp_rollback_confirm schema rejects acknowledge_production: false outright', async () => {
+    // Mirrors the aiftp_push_confirm v0.9.1 fix: z.literal(true).optional()
+    // means `false` is a schema-level type error, not a runtime-guard trip.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd });
+    const result = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: 'whatever',
+      diff_hash: 'whatever',
+      confirm_token: 'whatever',
+      acknowledge_production: false,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(
+      /invalid_(literal|value)|expected.*true|literal/i,
+    );
+  });
+
+  it('aiftp_rollback_confirm refuses a prod-profile plan without acknowledge_production: true', async () => {
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      // intentionally omitting acknowledge_production
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(
+      /acknowledge_production|production rollback refused/i,
+    );
+    // Must not mention the confirm phrase — rollback never gates on it.
+    expect(JSON.stringify(refused.content)).not.toMatch(/合言葉|confirmation phrase/i);
+    expect(uploads).toHaveLength(0);
+  });
+
+  it('aiftp_rollback_confirm applies a prod-profile plan when acknowledge_production: true is passed', async () => {
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('aiftp_rollback_confirm applies a non-prod-profile plan with no acknowledge_production argument', async () => {
+    // Existing v0.12 users on non-prod profiles must be unaffected by this
+    // change: no new argument is required when the profile does not match
+    // safety.prod_profile_patterns.
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H1 (rollback half): rollback deletes remote
+  // files, and its acknowledge_production gate was still keyed off a value
+  // `.aiftp.toml` could zero out. Floor it in Desktop mode exactly the way
+  // push's gate is floored. The confirm phrase stays push-only: rollback is
+  // the recovery path and must survive a lost or misconfigured phrase.
+  // -----------------------------------------------------------------
+
+  it('still demands acknowledge_production for a rollback in Desktop mode when warn_on_prod_profile = false (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    // The display flag honours the operator's opt-out...
+    expect(prepared.prod_profile_warning).toBe(false);
+    // ...but the plan still says a human has to acknowledge it.
+    expect(prepared.prod_profile_message).toMatch(/acknowledge_production/);
+    // Rollback never mentions the confirm phrase, on any configuration.
+    expect(prepared.prod_profile_message).not.toMatch(
+      /合言葉|confirmation phrase|confirmation_challenge/i,
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/acknowledge_production/);
+    expect(JSON.stringify(refused.content)).not.toMatch(/合言葉|confirmation phrase/i);
+    expect(uploads).toEqual([]);
+  });
+
+  it('still demands acknowledge_production for a rollback in Desktop mode when prod_profile_patterns is emptied (H1)', async () => {
+    await writeConfig({ prodProfilePatterns: [] });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/acknowledge_production/);
+    expect(uploads).toEqual([]);
+  });
+
+  it('completes a Desktop-mode rollback with acknowledge_production and no confirm phrase (H1)', async () => {
+    // The property the whole rollback design exists to preserve: an
+    // attendee who never set a phrase — or set the wrong one — must still
+    // be able to undo a bad push. No `confirmation` argument is passed,
+    // and none is accepted by the schema.
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, desktopMode: true, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.rolled_back).toEqual(['index.html']);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('completes a Desktop-mode rollback even when a confirm phrase is configured (H1)', async () => {
+    // Same property, with a phrase set: the phrase is push-only, so it
+    // must neither be requested nor checked on the recovery path.
+    await writeConfig();
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime,
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+    expect(JSON.stringify(prepared)).not.toContain('spec-fixture-phrase-7Q2');
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean; rolled_back: string[] };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('keeps the v0.12 terminal rollback production wording byte-identical (H1)', async () => {
+    // Pin the exact strings a terminal user saw at b67edd0, so routing
+    // rollback through the new authorization plumbing cannot reword them.
+    await writeConfig();
+    const { runtime } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_message: string;
+    };
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_rollback_confirm along with the plan_id / diff_hash / confirm_token.',
+    );
+
+    const refused = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { error: { message: string } };
+    expect(refused.error.message).toBe(
+      'Production rollback refused: profile "production" matches safety.prod_profile_patterns. Re-call aiftp_rollback_confirm with acknowledge_production: true.',
+    );
+  });
+
+  it('keeps warn_on_prod_profile = false working as the terminal rollback escape hatch (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(false);
+    expect(prepared.prod_profile_message).toBeUndefined();
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
   it('reads config and state resources', async () => {
     await writeConfig();
     await mkdir(join(cwd, '.aiftp', 'state', 'production'), { recursive: true });
@@ -2664,5 +3008,1331 @@ describe('mcp', () => {
       schema: 1,
       files: {},
     });
+  });
+
+  it('aiftp_setup_status reports the missing credential with a Japanese hint', async () => {
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: false,
+        siteName: 'gwco',
+        profileName: 'production',
+        keychainService: 'aiftp:gwco-production',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'missing',
+        registry: 'registered',
+        gitignore: 'skipped-not-a-repo',
+        missing: ['credential'],
+      },
+    });
+    try {
+      await writeConfig();
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'spec-fixture-phrase-7Q2' });
+      const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+        ok: boolean;
+        checks: Array<Record<string, string>>;
+      };
+
+      expect(payload.ok).toBe(false);
+      const check = payload.checks.find((entry) => entry.id === 'credential');
+      expect(check?.message).toBe('bootstrap-incomplete: credential not stored');
+      expect(JSON.stringify(payload)).not.toContain('spec-fixture-phrase-7Q2');
+    } finally {
+      // try/finally (not a trailing statement): if an assertion above
+      // throws, AIFTP_DESKTOP_STARTUP must still be cleared so it cannot
+      // leak into later tests in this file.
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
+  it('aiftp_setup_status fails the registry check for real when the site is not in the fleet registry', async () => {
+    // Final-review fix: config_file/registry used to be unconditional
+    // passes. This proves the registry check now reads a real registry
+    // (via app.runtime.createSiteRegistry, same fallback pattern as
+    // resolveDestination) instead of always reporting pass.
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        profileName: 'production',
+        keychainService: 'aiftp:gwco-production',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        gitignore: 'skipped-not-a-repo',
+        missing: [] as string[],
+      },
+    });
+    try {
+      await writeConfig();
+      const runtime: AiftpMcpRuntime = { createSiteRegistry: () => ({ list: async () => [] }) };
+      const app = createAiftpMcp({ cwd, confirmPhrase: 'spec-fixture-phrase-7Q2', runtime });
+      const payload = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+        ok: boolean;
+        checks: Array<Record<string, string>>;
+      };
+
+      expect(payload.ok).toBe(false);
+      const registry = payload.checks.find((entry) => entry.id === 'registry');
+      expect(registry?.status).toBe('fail');
+      expect(registry?.message).toBe('bootstrap-incomplete: site not found in the fleet registry');
+
+      const registeredApp = createAiftpMcp({
+        cwd,
+        confirmPhrase: 'spec-fixture-phrase-7Q2',
+        runtime: {
+          createSiteRegistry: () => ({
+            list: async () => [{ name: 'gwco', path: cwd, default_profile: 'production' }],
+          }),
+        },
+      });
+      const registeredPayload = parseText(
+        await callAiftpTool(registeredApp, 'aiftp_setup_status', {}),
+      ) as { ok: boolean; checks: Array<Record<string, string>> };
+      const registeredCheck = registeredPayload.checks.find((entry) => entry.id === 'registry');
+      expect(registeredCheck?.status).toBe('pass');
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 (Task 5, amended 2026-08-02 per docs/superpowers/plans/
+  // 2026-07-30-v0.13-implementation-plan.md 「Task 5 修正条項」B1-B7):
+  // confirm-phrase gate for production pushes, scoped by desktopMode.
+  //
+  //   desktopMode | confirmPhrase | production push behaviour
+  //   true        | set           | confirm-phrase gate (row 1)
+  //   true        | unset         | fail CLOSED, Desktop wording (row 2)
+  //   false       | set           | confirm-phrase gate, terminal opt-in (row 3)
+  //   false       | unset         | v0.12 behaviour preserved, no phrase mention (row 4)
+  //
+  // desktopMode is an explicit flag (AIFTP_DESKTOP=1 / options.desktopMode),
+  // never inferred from AIFTP_DESKTOP_STARTUP (that's the startup-report
+  // transport, not a mode signal -- see B1).
+  // -----------------------------------------------------------------
+
+  function fakeBackupStoreForRealPush(): NonNullable<AiftpMcpRuntime['createBackupStore']> {
+    // Real (dry_run=false) confirm builds the default backup store, which
+    // would otherwise reach the real OS keychain (see the stale-plan-id
+    // test above for the same requirement).
+    return async () => ({
+      listSnapshots: async () => [],
+      verify: async () => ({ ok: true, checkedFiles: 0, errors: [] }),
+      prune: async () => [],
+      restoreFile: async () => Buffer.alloc(0),
+      createAutoSnapshot: async () => ({
+        id: 'stub-snap',
+        type: 'auto',
+        createdAt: '2026-05-19T00:00:00.000Z',
+        fileCount: 0,
+        totalBytes: 0,
+        files: [],
+      }),
+    });
+  }
+
+  async function readLogFileRaw(): Promise<string> {
+    return readFile(join(cwd, '.aiftp', 'log.jsonl'), 'utf8').catch(() => '');
+  }
+
+  it('gates a production push behind the confirmation phrase in Desktop mode (row 1)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({
+                uploaded: ['index.html'],
+                nextState: { schema: 1, files: {} },
+              }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      confirmation_challenge: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(true);
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+    expect(JSON.stringify(prepared)).not.toContain('spec-fixture-phrase-7Q2');
+
+    const base = {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    };
+
+    const missing = await callAiftpTool(app, 'aiftp_push_confirm', base);
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing.content)).toMatch(/confirmation-required:/);
+    expect(JSON.stringify(missing.content)).not.toContain('spec-fixture-phrase-7Q2');
+
+    // v0.13 Codex cross-review H2: a wrong phrase consumes the plan, so
+    // this mismatch costs the caller the whole challenge. The correct
+    // phrase is exercised against a freshly prepared plan below.
+    const wrong = await callAiftpTool(app, 'aiftp_push_confirm', {
+      ...base,
+      confirmation: `${prepared.confirmation_challenge} wrong-phrase`,
+    });
+    expect(wrong.isError).toBe(true);
+    expect(JSON.stringify(wrong.content)).toMatch(/confirmation-mismatch:/);
+    expect(JSON.stringify(wrong.content)).not.toContain('spec-fixture-phrase-7Q2');
+
+    const reprepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: reprepared.plan_id,
+        diff_hash: reprepared.diff_hash,
+        confirm_token: reprepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${reprepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+
+    // The phrase must never land in the on-disk operation log either.
+    expect(await readLogFileRaw()).not.toContain('spec-fixture-phrase-7Q2');
+  });
+
+  it('applies the confirm-phrase gate outside Desktop mode when a phrase is explicitly configured (row 3)', async () => {
+    // Terminal / Claude Code users can still opt in to the phrase gate by
+    // setting AIFTP_CONFIRM_PHRASE / options.confirmPhrase without ever
+    // setting desktopMode. B4 row 3.
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: { runPush: async () => dryRun },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const result = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+      // intentionally omitting `confirmation`
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/confirmation-required:/);
+    expect(JSON.stringify(result.content)).not.toContain('spec-fixture-phrase-7Q2');
+  });
+
+  it('fails closed on a production push in Desktop mode when no confirm phrase is configured (row 2)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toMatch(/Claude Desktop/);
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    expect(JSON.stringify(refused.content)).toMatch(/Claude Desktop/);
+    // No phrase was ever configured in this test, so there is nothing to
+    // leak by definition -- but guard against a future env-var
+    // interpolation bug that would leak the *name* of the mechanism.
+    expect(JSON.stringify(refused.content)).not.toMatch(/AIFTP_CONFIRM_PHRASE=\S/);
+  });
+
+  it('keeps the v0.12 acknowledge_production behaviour when Desktop mode is off and no phrase is configured (row 4, B6)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: false,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({
+                uploaded: ['index.html'],
+                nextState: { schema: 1, files: {} },
+              }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    // B5: outside Desktop mode, the response must not mention the confirm
+    // phrase or a Desktop settings screen at all.
+    expect(prepared.prod_profile_message).not.toMatch(/confirmation phrase|合言葉|Claude Desktop/);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('defaults desktopMode from AIFTP_DESKTOP=1 in production, with no fake injected (B3)', async () => {
+    // No options.desktopMode is passed here -- only the real environment
+    // variable that packages/desktop-ext/src/server-entry.ts sets (B2).
+    // This is the "no fake injected" test B3 requires for the production
+    // default, guarding against the injection-only-no-prod-fallback bug
+    // class this branch has hit three times.
+    const originalDesktop = process.env.AIFTP_DESKTOP;
+    process.env.AIFTP_DESKTOP = '1';
+    try {
+      await writeConfig();
+      const dryRun = createPushResult({ planned: ['index.html'] });
+      const app = createAiftpMcp({
+        cwd,
+        runtime: {
+          runPush: async (opts) =>
+            opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
+        },
+      });
+
+      const prepared = parseText(
+        await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+      ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+      // No confirmPhrase configured + desktopMode defaulted true from the
+      // env var alone -> fails closed (row 2), proving the default reads
+      // process.env.AIFTP_DESKTOP without any options.desktopMode fake.
+      const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    } finally {
+      if (originalDesktop === undefined) {
+        Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP');
+      } else {
+        process.env.AIFTP_DESKTOP = originalDesktop;
+      }
+    }
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H2: a mismatch spends the plan, but the AI
+  // can call aiftp_push_prepare again for a fresh challenge and try the
+  // next candidate. The countermeasure is a strength floor on the phrase
+  // (stateless — no attempt budget an attacker could burn to lock a class
+  // out mid-lesson). A phrase below the floor is treated as NOT configured,
+  // which is fail-closed inside Claude Desktop.
+  // -----------------------------------------------------------------
+
+  /** 11 code points: below CONFIRM_PHRASE_MIN_LENGTH. */
+  const WEAK_PHRASE = 'sakura-2026';
+
+  it('treats a too-weak phrase as no phrase at all, fail-closed in Desktop mode (H2)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const realPushes: string[] = [];
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: WEAK_PHRASE,
+      runtime: {
+        runPush: async (opts) => {
+          if (!opts.dryRun) realPushes.push(opts.profile);
+          return dryRun;
+        },
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge?: string;
+      prod_profile_message?: string;
+    };
+    // No challenge is minted: from the server's point of view there is no
+    // phrase to check against.
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. No usable confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Claude Desktop の設定 → 拡張機能 → aiftp で「合言葉」欄を入力し、Claude Desktop を再起動してください。合言葉は 12 文字以上・4 種類以上の文字が必要です。未設定の場合と短すぎる場合は同じ扱いで、本番反映は拒否されます。パスワード管理ツールで生成した20文字以上の文字列を推奨します（講座名や西暦のような推測しやすい文字列は避けてください）。',
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+    // Actionable, in Japanese, and states the rule without stating a phrase.
+    expect(JSON.stringify(refused.content)).toContain(
+      '合言葉は 12 文字以上・4 種類以上の文字が必要です。',
+    );
+    // Nothing was uploaded.
+    expect(realPushes).toEqual([]);
+
+    // No leak of the rejected phrase on any surface this test touched:
+    // both responses, and the on-disk operation log.
+    const surfaces = [JSON.stringify(prepared), JSON.stringify(refused), await readLogFileRaw()];
+    for (const surface of surfaces) {
+      expect(surface).not.toContain('sakura');
+      expect(surface).not.toContain(WEAK_PHRASE);
+      // A weak phrase never mints a challenge, so nothing was logged for it.
+      expect(surface).not.toContain('confirm-phrase-challenge');
+    }
+
+    // No leak of its LENGTH either. Asserted on the human-readable messages
+    // rather than the whole payload, because plan_id/confirm_token are
+    // random and would make a plain substring search for "11" flaky. Every
+    // number these messages may contain is pinned here: 12 and 4 are the
+    // published rule, 20 is the recommendation. A measured length (11)
+    // could not appear without failing this.
+    const humanMessages = [prepared.prod_profile_message ?? '', textOf(refused)];
+    for (const message of humanMessages) {
+      expect([...new Set(message.match(/\d+/gu) ?? [])].sort()).toEqual(['12', '20', '4']);
+    }
+  });
+
+  it('reports the same verdict from aiftp_setup_status as the gate, for a too-weak phrase (H2)', async () => {
+    await writeConfig();
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        missing: [],
+      },
+    });
+    try {
+      const weakApp = createAiftpMcp({ cwd, desktopMode: true, confirmPhrase: WEAK_PHRASE });
+      const unsetApp = createAiftpMcp({ cwd, desktopMode: true });
+      const strongApp = createAiftpMcp({
+        cwd,
+        desktopMode: true,
+        confirmPhrase: 'spec-fixture-phrase-7Q2',
+      });
+
+      const checkOf = async (app: ReturnType<typeof createAiftpMcp>) => {
+        const report = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+          checks: { id: string; status: string; message: string; hint?: string }[];
+        };
+        return report.checks.find((entry) => entry.id === 'confirm_phrase');
+      };
+
+      const weakCheck = await checkOf(weakApp);
+      // The gate refuses a weak phrase, so setup_status must not call it
+      // present -- and must be indistinguishable from the unset case.
+      expect(weakCheck?.status).toBe('fail');
+      expect(weakCheck?.message).toBe('bootstrap-incomplete: confirm phrase not set or too weak');
+      expect(weakCheck).toEqual(await checkOf(unsetApp));
+      expect((await checkOf(strongApp))?.status).toBe('pass');
+      expect(JSON.stringify(weakCheck)).not.toContain('sakura');
+      expect(JSON.stringify(weakCheck)).not.toContain(String(WEAK_PHRASE.length));
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
+  it('reports a confirm_phrase verdict that matches what the gate does, in all three states (M1)', async () => {
+    // The two must never disagree. They cannot, structurally -- both read
+    // the resolution produced by `resolveConfirmPhrase`, which is built on
+    // `isUsableConfirmPhrase` -- and this pins the resulting table.
+    await writeConfig();
+    process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify({
+      bootstrap: {
+        ok: true,
+        siteName: 'gwco',
+        configPath: join(cwd, '.aiftp.toml'),
+        config: 'created',
+        credential: 'stored',
+        registry: 'registered',
+        missing: [],
+      },
+    });
+    const usable = 'spec-fixture-phrase-7Q2';
+    try {
+      const observe = async (desktopMode: boolean, confirmPhrase?: string) => {
+        const app = createAiftpMcp({
+          cwd,
+          desktopMode,
+          ...(confirmPhrase === undefined ? {} : { confirmPhrase }),
+          runtime: terminalRuntime(),
+        });
+        const report = parseText(await callAiftpTool(app, 'aiftp_setup_status', {})) as {
+          checks: { id: string; status: string }[];
+        };
+        const prepared = parseText(
+          await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+        ) as PreparedPlan;
+        const confirmed = await callAiftpTool(app, 'aiftp_push_confirm', {
+          profile: 'production',
+          plan_id: prepared.plan_id,
+          diff_hash: prepared.diff_hash,
+          confirm_token: prepared.confirm_token,
+          acknowledge_production: true,
+          ...(prepared.confirmation_challenge === undefined
+            ? {}
+            : { confirmation: `${prepared.confirmation_challenge} ${confirmPhrase ?? ''}` }),
+        });
+        return {
+          check: report.checks.find((entry) => entry.id === 'confirm_phrase')?.status,
+          pushed: confirmed.isError !== true,
+          demandedPhrase: prepared.confirmation_challenge !== undefined,
+        };
+      };
+
+      // Desktop: a usable phrase gates and passes; both failure states are
+      // refused, and neither is reported as configured.
+      expect(await observe(true, usable)).toEqual({
+        check: 'pass',
+        pushed: true,
+        demandedPhrase: true,
+      });
+      expect(await observe(true, WEAK_PHRASE)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+      expect(await observe(true, undefined)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+
+      // Terminal: same verdicts, except that "absent" keeps the documented
+      // v0.12 acknowledge_production-only path. "Rejected" does not.
+      expect(await observe(false, usable)).toEqual({
+        check: 'pass',
+        pushed: true,
+        demandedPhrase: true,
+      });
+      expect(await observe(false, WEAK_PHRASE)).toEqual({
+        check: 'fail',
+        pushed: false,
+        demandedPhrase: false,
+      });
+      expect(await observe(false, undefined)).toEqual({
+        check: 'fail',
+        pushed: true,
+        demandedPhrase: false,
+      });
+    } finally {
+      Reflect.deleteProperty(process.env, 'AIFTP_DESKTOP_STARTUP');
+    }
+  });
+
+  it('accepts a long multi-word passphrase and still gates on it (H2)', async () => {
+    await writeConfig();
+    const passphrase = 'correct battery staple horse fence';
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: passphrase,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    // The strength rule must not reject good input: a challenge is minted.
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${prepared.confirmation_challenge} ${passphrase}`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain(passphrase);
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review round 3, M1: the phrase has THREE states, not
+  // two. "Absent" (nothing supplied) keeps the v0.12 terminal behaviour;
+  // "rejected" (supplied, below the floor) is refused everywhere, because a
+  // user who typed a phrase asked for a gate and must get a gate or an
+  // error -- never a silent downgrade. "Usable" gates as before.
+  // -----------------------------------------------------------------
+
+  function terminalRuntime(): AiftpMcpRuntime {
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    return {
+      runPush: async (opts) =>
+        opts.dryRun
+          ? dryRun
+          : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+      createBackupStore: fakeBackupStoreForRealPush(),
+    };
+  }
+
+  interface PreparedPlan {
+    plan_id: string;
+    diff_hash: string;
+    confirm_token: string;
+    confirmation_challenge?: string;
+    prod_profile_message?: string;
+  }
+
+  it('keeps the terminal path byte-identical when NO phrase is supplied (absent)', async () => {
+    // Row 4, restated as the "absent" state: this is every existing v0.12
+    // npm user, and nothing about their flow may change.
+    await writeConfig();
+    const app = createAiftpMcp({ cwd, runtime: terminalRuntime() });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as PreparedPlan;
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.',
+    );
+    expect(prepared.prod_profile_message).not.toMatch(/confirmation phrase|合言葉|Claude Desktop/);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('refuses the terminal production push when the supplied phrase is too weak (rejected, M1)', async () => {
+    // The regression this fixes: a terminal user who set a weak phrase
+    // believing they had enabled the gate used to fall into the "absent"
+    // compatibility branch and push on acknowledge_production alone.
+    await writeConfig();
+    const realPushes: string[] = [];
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      confirmPhrase: WEAK_PHRASE,
+      runtime: {
+        runPush: async (opts) => {
+          if (!opts.dryRun) realPushes.push(opts.profile);
+          return dryRun;
+        },
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as PreparedPlan;
+    // No challenge: there is no usable phrase to check one against. But the
+    // message must NOT be the v0.12 "acknowledge_production is enough" text,
+    // which would now be a lie.
+    expect(prepared.confirmation_challenge).toBeUndefined();
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. No usable confirmation phrase is configured, so aiftp_push_confirm will refuse this plan even with acknowledge_production: true. Set AIFTP_CONFIRM_PHRASE in the MCP server\'s environment and restart it. A confirm phrase must be at least 12 Unicode code points after trimming and contain at least 4 distinct code points; a password-manager string of 20 or more characters clears it comfortably. It must be generated rather than invented, and generated by the human operator rather than by an AI assistant — a phrase the assistant has seen cannot gate the assistant. See "Production confirm phrase" in the aiftp README. The floor is a floor, not proof of strength.',
+    );
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(errorMessageOf(refused)).toMatch(/^confirm-phrase-not-configured:/);
+    // Terminal wording: an npm user has no Claude Desktop settings screen.
+    expect(errorMessageOf(refused)).not.toContain('Claude Desktop');
+    // ...and no runnable generator command, on either surface: the client
+    // reading this could run it and see the phrase it is meant not to know.
+    for (const message of [prepared.prod_profile_message ?? '', errorMessageOf(refused)]) {
+      expect(message).not.toContain('confirm-phrase generate');
+    }
+    // Nothing was uploaded, and no confirm-phrase event was logged.
+    expect(realPushes).toEqual([]);
+
+    for (const surface of [
+      JSON.stringify(prepared),
+      JSON.stringify(refused),
+      await readLogFileRaw(),
+    ]) {
+      expect(surface).not.toContain('sakura');
+      expect(surface).not.toContain(WEAK_PHRASE);
+      expect(surface).not.toContain('confirm-phrase-challenge');
+    }
+    // No length leak: the only numbers in the human-facing text are the
+    // published rule (12 / 4) and the recommendation (20).
+    for (const message of [prepared.prod_profile_message ?? '', errorMessageOf(refused)]) {
+      expect([...new Set(message.match(/\d+/gu) ?? [])].sort()).toEqual(['12', '20', '4']);
+    }
+  });
+
+  it('gates the terminal production push normally when the phrase is usable (usable)', async () => {
+    await writeConfig();
+    const phrase = 'spec-fixture-phrase-7Q2';
+    const app = createAiftpMcp({ cwd, confirmPhrase: phrase, runtime: terminalRuntime() });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as PreparedPlan;
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${String(prepared.confirmation_challenge)} ${phrase}`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain(phrase);
+  });
+
+  it('cannot be told apart from "unset" in Desktop mode, on any surface (M1)', async () => {
+    // Desktop mode refuses both states, and must refuse them with the SAME
+    // words: a message that said "too weak" would tell a guesser the phrase
+    // exists and is below the published minimum.
+    await writeConfig();
+    const surfacesFor = async (options: { confirmPhrase?: string }) => {
+      const app = createAiftpMcp({
+        cwd,
+        desktopMode: true,
+        ...options,
+        runtime: terminalRuntime(),
+      });
+      const prepared = parseText(
+        await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+      ) as PreparedPlan;
+      const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+      });
+      expect(refused.isError).toBe(true);
+      return {
+        prepareMessage: prepared.prod_profile_message,
+        challenge: prepared.confirmation_challenge,
+        refusal: errorMessageOf(refused),
+      };
+    };
+
+    const absent = await surfacesFor({});
+    const rejected = await surfacesFor({ confirmPhrase: WEAK_PHRASE });
+    expect(rejected).toEqual(absent);
+    expect(rejected.refusal).toMatch(/^confirm-phrase-not-configured:/);
+    expect(rejected.challenge).toBeUndefined();
+    expect(await readLogFileRaw()).not.toContain('sakura');
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H1: `.aiftp.toml` is a project file the AI
+  // itself can edit, so `safety.*` must not be able to switch the Desktop
+  // confirm-phrase gate off. In Desktop mode the gate is unconditional;
+  // on the terminal `safety.*` still governs, unchanged from v0.12.
+  // -----------------------------------------------------------------
+
+  it('still demands the confirm phrase in Desktop mode when warn_on_prod_profile = false (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      confirmation_challenge?: string;
+    };
+    // The display flag honours the operator's `safety.*` opt-out...
+    expect(prepared.prod_profile_warning).toBe(false);
+    // ...but the authorization gate does not: a challenge is still minted.
+    expect(String(prepared.confirmation_challenge)).toMatch(/^[A-HJ-NP-Z2-9]{6}$/u);
+
+    const base = {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    };
+    const missing = await callAiftpTool(app, 'aiftp_push_confirm', base);
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing.content)).toMatch(/confirmation-required:/);
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        ...base,
+        confirmation: `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+    expect(await readLogFileRaw()).not.toContain('spec-fixture-phrase-7Q2');
+  });
+
+  it('still demands acknowledge_production in Desktop mode when warn_on_prod_profile = false (H1)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: { runPush: async () => dryRun },
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/acknowledge_production/);
+  });
+
+  it('still fails closed in Desktop mode when prod_profile_patterns is emptied (H1)', async () => {
+    await writeConfig({ prodProfilePatterns: [] });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      // No confirmPhrase: emptying the patterns must not turn this into a
+      // free push, it must stay the fail-closed row-2 refusal.
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun ? dryRun : createPushResult({ uploaded: ['index.html'] }),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(false);
+    expect(prepared.prod_profile_message).toMatch(/Claude Desktop/);
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/confirm-phrase-not-configured:/);
+  });
+
+  it('keeps warn_on_prod_profile = false working as the terminal escape hatch (H1)', async () => {
+    // The v0.12 CI escape hatch. Outside Desktop mode nothing about this
+    // row changed: no challenge, no prod message, and no
+    // acknowledge_production argument required.
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_warning: boolean;
+      prod_profile_message?: string;
+      confirmation_challenge?: string;
+    };
+    expect(prepared.prod_profile_warning).toBe(false);
+    expect(prepared.prod_profile_message).toBeUndefined();
+    expect(prepared.confirmation_challenge).toBeUndefined();
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('keeps the v0.12 terminal production wording byte-identical (H1)', async () => {
+    // The H1 fix routes the terminal path through new authorization
+    // plumbing. Pin the exact strings an existing v0.12 npm user sees so a
+    // future refactor cannot reword them by accident.
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({ cwd, runtime: { runPush: async () => dryRun } });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      prod_profile_message: string;
+    };
+    expect(prepared.prod_profile_message).toBe(
+      'Profile "production" matches safety.prod_profile_patterns. To confirm, pass acknowledge_production: true to aiftp_push_confirm along with the plan_id / diff_hash / confirm_token.',
+    );
+
+    const refused = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { error: { message: string } };
+    expect(refused.error.message).toBe(
+      'Production push refused: profile "production" matches safety.prod_profile_patterns. Re-call aiftp_push_confirm with acknowledge_production: true.',
+    );
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H2: one challenge, one attempt. The phrase
+  // is the only secret in the pair (the challenge is handed to the
+  // caller), and an instructor-chosen phrase is dictionary-guessable, so
+  // a mismatch must cost the caller a whole prepare round-trip.
+  // -----------------------------------------------------------------
+
+  it('burns the plan on a confirm-phrase mismatch (H2)', async () => {
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    const base = {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+    };
+
+    const wrong = await callAiftpTool(app, 'aiftp_push_confirm', {
+      ...base,
+      confirmation: `${prepared.confirmation_challenge} wrong-phrase`,
+    });
+    expect(wrong.isError).toBe(true);
+    expect(JSON.stringify(wrong.content)).toMatch(/confirmation-mismatch:/);
+    expect(JSON.stringify(wrong.content)).toMatch(/aiftp_push_prepare/);
+
+    // Second attempt against the same challenge — even with the correct
+    // phrase — must be refused as a spent plan.
+    const retry = await callAiftpTool(app, 'aiftp_push_confirm', {
+      ...base,
+      confirmation: `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
+    });
+    expect(retry.isError).toBe(true);
+    expect(JSON.stringify(retry.content)).toMatch(/Unknown or expired plan_id/);
+    expect(JSON.stringify(retry.content)).not.toContain('spec-fixture-phrase-7Q2');
+
+    // A fresh prepare mints a fresh challenge and the push goes through.
+    const reprepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    expect(reprepared.plan_id).not.toBe(prepared.plan_id);
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: reprepared.plan_id,
+        diff_hash: reprepared.diff_hash,
+        confirm_token: reprepared.confirm_token,
+        acknowledge_production: true,
+        confirmation: `${reprepared.confirmation_challenge} spec-fixture-phrase-7Q2`,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('does not burn the plan on non-secret confirm mistakes (H2)', async () => {
+    // Missing acknowledge_production / wrong diff_hash / wrong
+    // confirm_token are ordinary caller mistakes, not guesses at a secret.
+    // Burning the plan on those would make them needlessly expensive.
+    await writeConfig();
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      desktopMode: true,
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as {
+      plan_id: string;
+      diff_hash: string;
+      confirm_token: string;
+      confirmation_challenge: string;
+    };
+    const confirmation = `${prepared.confirmation_challenge} spec-fixture-phrase-7Q2`;
+
+    const noAck = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+      confirmation,
+    });
+    expect(noAck.isError).toBe(true);
+    expect(JSON.stringify(noAck.content)).toMatch(/acknowledge_production/);
+
+    const badHash = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: 'a'.repeat(64),
+      confirm_token: prepared.confirm_token,
+      acknowledge_production: true,
+      confirmation,
+    });
+    expect(badHash.isError).toBe(true);
+
+    const badToken = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: 'wrong-token',
+      acknowledge_production: true,
+      confirmation,
+    });
+    expect(badToken.isError).toBe(true);
+
+    // The plan survived all three: the original challenge still works.
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+        acknowledge_production: true,
+        confirmation,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  // -----------------------------------------------------------------
+  // v0.13 Codex cross-review, H3: the plan hash covered only profile /
+  // remote_root / file set, so editing `.aiftp.toml`'s host, user,
+  // protocol or keychain service between prepare and confirm redirected
+  // the upload (and the deletes) to a server the human never approved.
+  // -----------------------------------------------------------------
+
+  it('refuses a push whose destination host changed between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const calls: Array<{ dryRun?: boolean }> = [];
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) => {
+          calls.push({ dryRun: opts.dryRun });
+          if (!opts.dryRun) throw new Error('real push must not run after a destination change');
+          return dryRun;
+        },
+      },
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await writeConfig({ warnOnProdProfile: false, host: 'ftp.attacker.example' });
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/destination-changed:/);
+    expect(JSON.stringify(refused.content)).toMatch(/host/);
+    expect(JSON.stringify(refused.content)).toMatch(/aiftp_push_prepare/);
+    // The changed value itself is never echoed back.
+    expect(JSON.stringify(refused.content)).not.toContain('ftp.attacker.example');
+    expect(calls.every((call) => call.dryRun === true)).toBe(true);
+  });
+
+  it('refuses a push whose destination user changed between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) => {
+          if (!opts.dryRun) throw new Error('real push must not run after a destination change');
+          return dryRun;
+        },
+      },
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await writeConfig({ warnOnProdProfile: false, user: 'someone-else' });
+
+    const refused = await callAiftpTool(app, 'aiftp_push_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/destination-changed:/);
+    expect(JSON.stringify(refused.content)).toMatch(/user/);
+    expect(JSON.stringify(refused.content)).not.toContain('someone-else');
+  });
+
+  it('applies a push whose destination is unchanged between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const dryRun = createPushResult({ planned: ['index.html'] });
+    const app = createAiftpMcp({
+      cwd,
+      runtime: {
+        runPush: async (opts) =>
+          opts.dryRun
+            ? dryRun
+            : createPushResult({ uploaded: ['index.html'], nextState: { schema: 1, files: {} } }),
+        createBackupStore: fakeBackupStoreForRealPush(),
+      },
+    });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_push_prepare', { profile: 'production' }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    // Rewrite the identical config: a touched-but-unchanged file must not
+    // be mistaken for a redirected destination.
+    await writeConfig({ warnOnProdProfile: false });
+
+    const accepted = parseText(
+      await callAiftpTool(app, 'aiftp_push_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean };
+    expect(accepted.ok).toBe(true);
+  });
+
+  it('refuses a rollback whose destination host changed between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await writeConfig({ warnOnProdProfile: false, host: 'ftp.attacker.example' });
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/destination-changed:/);
+    expect(JSON.stringify(refused.content)).toMatch(/host/);
+    expect(JSON.stringify(refused.content)).toMatch(/aiftp_rollback_prepare/);
+    expect(JSON.stringify(refused.content)).not.toContain('ftp.attacker.example');
+    expect(uploads).toEqual([]);
+  });
+
+  it('refuses a rollback whose destination user changed between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await writeConfig({ warnOnProdProfile: false, user: 'someone-else' });
+
+    const refused = await callAiftpTool(app, 'aiftp_rollback_confirm', {
+      profile: 'production',
+      plan_id: prepared.plan_id,
+      diff_hash: prepared.diff_hash,
+      confirm_token: prepared.confirm_token,
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toMatch(/destination-changed:/);
+    expect(JSON.stringify(refused.content)).toMatch(/user/);
+    expect(uploads).toEqual([]);
+  });
+
+  it('applies a rollback whose destination is unchanged between prepare and confirm (H3)', async () => {
+    await writeConfig({ warnOnProdProfile: false });
+    const { runtime, uploads } = rollbackRuntimeFor([modifiedSnapshotFile('index.html')]);
+    const app = createAiftpMcp({ cwd, runtime });
+    const prepared = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_prepare', { steps: 1 }),
+    ) as { plan_id: string; diff_hash: string; confirm_token: string };
+
+    await writeConfig({ warnOnProdProfile: false });
+
+    const confirmed = parseText(
+      await callAiftpTool(app, 'aiftp_rollback_confirm', {
+        profile: 'production',
+        plan_id: prepared.plan_id,
+        diff_hash: prepared.diff_hash,
+        confirm_token: prepared.confirm_token,
+      }),
+    ) as { ok: boolean };
+    expect(confirmed.ok).toBe(true);
+    expect(uploads).toEqual(['/public_html/index.html']);
+  });
+
+  it('registers the aiftp_setup prompt', () => {
+    const app = createAiftpMcp({ cwd });
+    const registered = (app.server as unknown as Record<string, Record<string, unknown>>)
+      ._registeredPrompts;
+    expect(Object.keys(registered)).toContain('aiftp_setup');
   });
 });

@@ -16,6 +16,30 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.13.0] — 2026-08-04
+
+**Minor release** — Claude Desktop 用の `.mcpb` 拡張を追加。ターミナルと Node.js の導入なしで aiftp を使えるようにし、本番反映に人間の合言葉ゲートを設けた。
+
+### Added
+
+- **Claude Desktop 拡張（`.mcpb`）** — GitHub Release に `aiftp-0.13.0.mcpb` を添付。ダブルクリックで導入でき、Node.js の導入も MCP 設定 JSON の手編集も不要。設定 UI で選んだサイトフォルダを起動時に冪等ブートストラップし（`.aiftp.toml` 生成・キーチェーン保存・サイト台帳登録）、以後は CLI 版とまったく同じ状態を共有する。**未署名配布**（理由と安全性の根拠は `docs/desktop-extension.md`）。
+- **`aiftp_setup_status` ツール** — 拡張の設定が揃っているかを 6 項目（bootstrap / プロジェクトフォルダ / `.aiftp.toml` / キーチェーン / サイト台帳 / 合言葉）で報告する読み取り専用ツール。失敗した項目には**日本語の `hint`** が付く。設定不足でサーバ起動を失敗させると Claude Desktop は「接続エラー」としか表示しないため、起動は常に成功させ不足はここで返す設計。
+- **`aiftp_setup` prompt** — 接続確認 → テスト領域へ push → 本番反映 → ロールバックの 4 ステップを案内する MCP prompt。本リポジトリ初の prompt。
+- **本番 push の合言葉ゲート** — `aiftp_push_prepare` がプランごとのチャレンジコードを返し、`aiftp_push_confirm` は `confirmation: "<チャレンジ> <合言葉>"` の完全一致を要求する（タイミング安全比較・ハッシュのみ保持）。合言葉はツール出力に一切出ないため、**人間がチャットに入力するまで confirm は通らない**。提示と受理は `.aiftp/log.jsonl` に記録される。**同一会話内での再利用という既知の限界**は `docs/desktop-extension.md` に明記した。**Claude Desktop 拡張から使う場合、このゲートはプロファイル名や `.aiftp.toml` の `safety.*` 設定にかかわらず、すべての push に適用される**（`.aiftp.toml` は AI 自身が書き換えられるファイルなので、そこに書かれた設定でゲートを外せてはならない。`safety.*` はゲートを**広げる**方向にのみ効く）。合言葉が未設定の場合、**ターミナル / Claude Code からの利用は** v0.12 と同じ `acknowledge_production` のみのゲートになる（CLI 利用者との互換。`warn_on_prod_profile = false` も従来どおり CI 用の抜け道として機能する）。**Claude Desktop 拡張からの利用ではこのフォールバックは適用されず、push はエラーで拒否される**（詳細は `docs/desktop-extension.md`）。
+- **合言葉は1チャレンジにつき1回のみ** — `confirmation` が一致しなかった時点でそのプランは破棄され、`aiftp_push_prepare` からやり直しになる。チャレンジコードは呼び出し側に渡る公開値であり、秘密なのは合言葉だけなので、同一チャレンジへの無制限な再試行を許すと人間が選んだ合言葉は総当たりで推測できてしまう。`acknowledge_production` の渡し忘れ・`diff_hash` のずれ・`confirm_token` の誤りは秘密の推測ではないため、プランを破棄しない。
+- **合言葉の強度要件（12文字以上・4種類以上の文字）** — 合言葉は前後の空白を除いて **12 文字以上**（Unicode コードポイント単位で数えるため、日本語は見たままの文字数）、かつ **4 種類以上の異なる文字**を含む必要がある。満たさない値は**拒否**される（詳細は次項）。`aiftp_setup_status` の `confirm_phrase` も `fail` を返す（ゲートと `setup_status` は同じ判定関数を使うので、片方だけ「設定済み」と表示されることはない）。理由: 1チャレンジ1回の制限があっても、AI は `aiftp_push_prepare` を呼び直せば新しいチャレンジを取得できるため、試行回数そのものには上限がない。人間が選びがちな「講座名＋西暦」のような短い文字列は、それだけで総当たりの対象になる。**試行回数の制限（カウンタ・クールダウン・ロックアウト）は意図的に実装していない** — 悪意ある AI がわざと失敗させて枠を使い切れば、研修の最中にクラス全体が本番反映できなくなるため。強度チェックは状態を持たず、攻撃者から発動させられない。**この要件はターミナル利用にも同じく適用される**（合言葉は v0.13 の新機能で、v0.12 利用者は誰も設定していないため、既存の動作は変わらない）。なお 12 文字は**下限であって強度の保証ではない**。長くても推測しやすい文字列は通ってしまうため、合言葉は次項の生成コマンドで作ることを推奨する。エラーメッセージと `hint` は「未設定」と「条件を満たさない」を区別せず、合言葉そのものも文字数も一切出さない（区別すると「短い」という情報自体が推測の手がかりになるため）。
+- **合言葉の状態は3つ（未設定 / 条件を満たさない / 条件を満たす）** — 「未設定」と「条件を満たさない」は**別扱い**にする。**未設定**（環境変数なし・空文字）はターミナル / Claude Code では v0.12 と同じ `acknowledge_production` のみのゲートのまま（既存 CLI 利用者との互換）、Claude Desktop 拡張では fail-closed。**条件を満たさない値を設定した場合は、ターミナルからの利用でも `confirm-phrase-not-configured:` で拒否する**。合言葉を入力した時点でゲートを掛ける意思表示なので、それを黙って「未設定」に格下げすると、**設定した本人はゲートが効いていると思っているのに実際には効いていない**という状態を作ってしまうため。拒否メッセージは Claude Desktop 拡張でもターミナルでも「未設定」と同じ文面で、どちらの状態かも、合言葉も、その文字数も明かさない。
+- **`aiftp confirm-phrase generate`（CLI）** — 合言葉を生成して標準出力に1行だけ出す新コマンド。`node:crypto` の暗号論的乱数で、読み間違えやすい `I` `O` `0` `1` を除いた32文字のアルファベットから30文字を一様に選び、**150 ビットのエントロピー**（30 × log2(32)）を持つ。取り扱いの説明は標準エラー出力に出るため、そのまま読んでも `2>/dev/null` でコピーしても使える。**MCP には出さない**（ツール・プロンプト・リソースのいずれにも生成機能を追加していない）— MCP を経由した合言葉は人間が使う前に AI の文脈へ入ってしまい、ゲートの前提が崩れるため。**引数を一切取らない**（秘密を出力することはあっても、受け取ることはない）。**MCP サーバーが返すエラーメッセージにもこのコマンド名は載せていない** — 載せると AI クライアントがそれを実行して合言葉を自分の標準出力から読み取れてしまい、AI が知っている合言葉はその AI に対するゲートとして機能しなくなるため（コマンド名は CLI のヘルプ・Claude Desktop の設定欄・README・docs という人間だけが読む場所にのみ書く）。強度の下限（12文字・4種類）は据え置きで、下限を上げる代わりに「生成して貼る」を推奨手順にした — 下限をいくら上げても「長いが推測しやすい文字列」は防げないため。
+- **接続先のプラン束縛（push / rollback）** — `aiftp_push_prepare` と `aiftp_rollback_prepare` が、承認対象の接続先（ホスト / ポート / プロトコル / ユーザー名 / キーチェーン名 / `remote_root` / TLS 関連設定 / 本番判定）のハッシュをプランに保持する。`aiftp_push_confirm` / `aiftp_rollback_confirm` は**アップロード直前に**設定ファイルを読み直して同じハッシュを計算し、差異があれば `destination-changed:` で拒否する（変化した項目名のみを提示し、値は出さない）。これがないと、prepare と confirm の間に `.aiftp.toml` の `host` や `user` を書き換えるだけで、ファイル集合も `remote_root` も変わらないため `diff_hash` の drift 検査を素通りしたまま、**人間が承認していないサーバーへ**アップロードと削除を実行できてしまう。
+
+### Changed
+
+- **ロールバックの本番プロファイルゲート（`aiftp_rollback_confirm`）、破壊的変更** — 最終レビューで、`aiftp_rollback_confirm` が本番反映と違って**一切のゲートを持たない**（`plan_id` / `diff_hash` / `confirm_token` と、AI 自身が渡せるリテラル `acknowledge_deletions: true` だけで、リモートサーバへの書き込み・削除が実行できる）ことが判明した。`aiftp_rollback_prepare` は `safety.prod_profile_patterns` に対してプロファイルを照合し、一致すれば `prod_profile_warning: true` を返す。一致した場合、`aiftp_rollback_confirm` は `acknowledge_production: true` を明示的に渡さない限り拒否される（`false` はスキーマレベルで拒否し、実行時ガードへのすり抜けを許さない — push と同じ設計）。**このゲートについては2点を別々に決めている**: ①**どのプランをゲートするか** — push と同じ規則に従い、Claude Desktop 拡張ではプロファイル名や `safety.*` にかかわらず常に `acknowledge_production` を要求する（`.aiftp.toml` は AI 自身が書き換えられるファイルであり、ロールバックはリモートのファイルを削除しうるぶん push より強く当てはまる）。ターミナルからの利用は従来どおり `safety.prod_profile_patterns` に従う。②**何を満たせば通るか** — `acknowledge_production: true` のみで、**合言葉ゲートは意図的に対象外のまま**（ロールバックは復旧手段であり、合言葉を忘れた・設定し忘れた受講者でも本番を壊れたままにしないため）。②の理由が正当化するのは「合言葉を求めないこと」だけで、「設定ファイルの書き換えでゲートごと消せること」ではない。**破壊的変更**: 既存の v0.12 ターミナル利用者は、`safety.prod_profile_patterns`（既定値 `prod*` / `production*` / `main*`）に一致するプロファイルへロールバックする際、新たに `acknowledge_production: true` を渡す必要がある。一致しないプロファイルへのロールバックは無変更。
+- **`.mcpb` ステージングツリー検査の強化** — 配布物に紛れ込むビルドマシン由来のパスを検出する検査が、`os.homedir()` 配下のパスしか探していなかった。CI ワークスペースや `/private/tmp`、別ボリュームでビルドすると、絶対パスが入ったまま検査を通過してしまう。禁止パスを引数で受け取る形に変え（ビルドはホームディレクトリとリポジトリルートの両方を渡す）、そのままの形・JSON エスケープ形・スラッシュ変換形の3通りで照合するようにした。あわせて `package.json` 内の POSIX 絶対パス / Windows ドライブパス / UNC パス / 絶対パスを指す `file:` 指定を検出し、シンボリックリンクも（従来は `isFile()` が false になるため素通りしていた）リンク先を検査して、絶対パスまたはツリー外を指すものを拒否する。検査は `scripts/build-mcpb.mjs` 内のインライン関数から単体テスト付きのモジュール（`src/staged-tree-guard.ts`）へ移した。
+- **init プリミティブを core へ移設** — キーチェーンのサービス名生成（`buildKeychainService`）と `.gitignore` への `.aiftp/` 追加（`ensureGitignoreEntry`）を `@aiftp-tools/cli` から `@aiftp-tools/core` へ移した。CLI の挙動は変わらない。Desktop 拡張が同じ規約を再実装せずに済むようにするための整理。
+
+---
+
 ## [0.12.4] — 2026-07-27
 
 **Patch release** — Windows CI の flaky を根本解決し、`[preflight]` 設定を実際に効くよう接続、サイト台帳と `known_hosts` のセキュリティ強化、エラーメッセージの改善。**ユーザー向けの挙動変更は `[preflight]` の接続と `json_check` の既定値のみ**（下記参照）。
@@ -981,7 +1005,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.12.4...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.0
 [0.12.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.4
 [0.12.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.3
 [0.12.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.1

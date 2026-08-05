@@ -107,3 +107,49 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: bash ./.github/workflows/scripts/mcp-smoke.sh
+
+      - name: .mcpb asset is attached and well-formed
+        if: github.event_name == 'release' && runner.os == 'macOS' && matrix.node == 22
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          bundle="./mcpb-check/aiftp-${version}.mcpb"
+          mkdir -p ./mcpb-check
+
+          # release.yml is a SEPARATE workflow, also triggered by this same
+          # `release: published` event. It builds the .mcpb from source
+          # (pnpm install + build + build:mcpb on a macOS runner) and only
+          # then uploads it as a release asset -- that can take several
+          # minutes. wait-for-publish above only waits for npm, which (per
+          # the documented release order) is already published by the time
+          # the Release fires, so it returns almost immediately and does
+          # NOT guarantee the .mcpb asset exists yet. Workflows cannot
+          # `needs:` across separate workflow files, so poll instead of
+          # asserting once, the same way wait-for-publish polls npm.
+          found=0
+          for attempt in {1..20}; do
+            if gh release download "$RELEASE_TAG" --pattern '*.mcpb' --dir ./mcpb-check --clobber 2>/dev/null && [ -f "$bundle" ]; then
+              echo "PASS: found $bundle (attempt $attempt/20)"
+              found=1
+              break
+            fi
+            echo "Waiting for the .mcpb release asset (attempt $attempt/20)"
+            sleep 30
+          done
+
+          if [ "$found" -ne 1 ]; then
+            echo "FAIL: $bundle was not attached to the release within 10 minutes"
+            exit 1
+          fi
+
+          unzip -p "$bundle" manifest.json > ./mcpb-check/manifest.json
+          node -e "
+            const m = require('./mcpb-check/manifest.json');
+            const expected = process.env.RELEASE_TAG.replace(/^v/, '');
+            if (m.version !== expected) { console.error('FAIL: manifest ' + m.version + ' != ' + expected); process.exit(1); }
+            if (m.name !== 'aiftp') { console.error('FAIL: manifest name ' + m.name); process.exit(1); }
+            console.log('PASS: .mcpb ' + m.version);
+          "

@@ -82,7 +82,12 @@ export {
   templateIds,
 } from './templates/index.js';
 
-export { isProdProfile } from './safety.js';
+export { isProdProfile, requiresProductionConfirmation } from './safety.js';
+export {
+  type DestinationFingerprint,
+  computeDestinationFingerprint,
+  describeDestinationChange,
+} from './destination-fingerprint.js';
 
 export { type ParseFfftpIniOptions, parseFfftpIni } from './importers/ffftp.js';
 
@@ -262,3 +267,26 @@ export {
 // sites barrel so the CLI (`aiftp sites`) and MCP (`aiftp_sites_list`)
 // consume SiteRegistry / resolveSite / SiteEntry from @aiftp-tools/core.
 export * from './sites/index.js';
+
+export {
+  buildKeychainService,
+  sanitizeKeychainSiteName,
+} from './init/keychain-name.js';
+export {
+  ensureGitignoreEntry,
+  type EnsureGitignoreOptions,
+  type EnsureGitignoreOutcome,
+} from './init/gitignore.js';
+
+export {
+  type BootstrapDeps,
+  type BootstrapInput,
+  type BootstrapRegistrySurface,
+  type BootstrapResult,
+  BootstrapValidationError,
+  type ConfigOutcome,
+  type CredentialOutcome,
+  type RegistryOutcome,
+  runBootstrap,
+  validateBootstrapInput,
+} from './bootstrap/index.js';
