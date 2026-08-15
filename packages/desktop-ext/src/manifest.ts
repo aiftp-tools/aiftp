@@ -42,7 +42,10 @@ export function buildManifest(version: string): DesktopManifest {
   return {
     manifest_version: '0.3',
     name: 'aiftp',
-    display_name: 'aiftp — FTP/FTPS 安全デプロイ',
+    // Claude Desktop uses this as a path component for the MCP server. A
+    // forward slash trips its path-escape guard on Windows ("path escape:
+    // ..."), so the separator here must stay slash-free.
+    display_name: 'aiftp — FTP・FTPS 安全デプロイ',
     version,
     description:
       'AI が書いたコードを FTP/FTPS/SFTP のレンタルサーバへ安全に反映します。自動バックアップ・2段確認・認証情報ファイルの構造的除外つき。',

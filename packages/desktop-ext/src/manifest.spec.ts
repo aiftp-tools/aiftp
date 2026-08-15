@@ -8,6 +8,12 @@ describe('buildManifest', () => {
     expect(manifest.version).toBe('0.13.0');
   });
 
+  // Windows dogfood 2026-08-15: Claude Desktop builds a path from this name,
+  // and a slash made enabling the extension fail with `path escape: "..."`.
+  it('keeps the display name free of path separators', () => {
+    expect(manifest.display_name).not.toMatch(/[/\\]/u);
+  });
+
   it('declares both target platforms and the Node floor', () => {
     expect(manifest.compatibility.platforms).toEqual(['darwin', 'win32']);
     expect(manifest.compatibility.runtimes.node).toBe('>=22.0.0');
