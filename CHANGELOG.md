@@ -16,7 +16,7 @@ Release tags live in the GitHub repository:
 
 ---
 
-## [0.13.0] — 2026-08-04
+## [0.13.0] — 2026-08-15
 
 **Minor release** — Claude Desktop 用の `.mcpb` 拡張を追加。ターミナルと Node.js の導入なしで aiftp を使えるようにし、本番反映に人間の合言葉ゲートを設けた。
 
@@ -37,6 +37,10 @@ Release tags live in the GitHub repository:
 - **ロールバックの本番プロファイルゲート（`aiftp_rollback_confirm`）、破壊的変更** — 最終レビューで、`aiftp_rollback_confirm` が本番反映と違って**一切のゲートを持たない**（`plan_id` / `diff_hash` / `confirm_token` と、AI 自身が渡せるリテラル `acknowledge_deletions: true` だけで、リモートサーバへの書き込み・削除が実行できる）ことが判明した。`aiftp_rollback_prepare` は `safety.prod_profile_patterns` に対してプロファイルを照合し、一致すれば `prod_profile_warning: true` を返す。一致した場合、`aiftp_rollback_confirm` は `acknowledge_production: true` を明示的に渡さない限り拒否される（`false` はスキーマレベルで拒否し、実行時ガードへのすり抜けを許さない — push と同じ設計）。**このゲートについては2点を別々に決めている**: ①**どのプランをゲートするか** — push と同じ規則に従い、Claude Desktop 拡張ではプロファイル名や `safety.*` にかかわらず常に `acknowledge_production` を要求する（`.aiftp.toml` は AI 自身が書き換えられるファイルであり、ロールバックはリモートのファイルを削除しうるぶん push より強く当てはまる）。ターミナルからの利用は従来どおり `safety.prod_profile_patterns` に従う。②**何を満たせば通るか** — `acknowledge_production: true` のみで、**合言葉ゲートは意図的に対象外のまま**（ロールバックは復旧手段であり、合言葉を忘れた・設定し忘れた受講者でも本番を壊れたままにしないため）。②の理由が正当化するのは「合言葉を求めないこと」だけで、「設定ファイルの書き換えでゲートごと消せること」ではない。**破壊的変更**: 既存の v0.12 ターミナル利用者は、`safety.prod_profile_patterns`（既定値 `prod*` / `production*` / `main*`）に一致するプロファイルへロールバックする際、新たに `acknowledge_production: true` を渡す必要がある。一致しないプロファイルへのロールバックは無変更。
 - **`.mcpb` ステージングツリー検査の強化** — 配布物に紛れ込むビルドマシン由来のパスを検出する検査が、`os.homedir()` 配下のパスしか探していなかった。CI ワークスペースや `/private/tmp`、別ボリュームでビルドすると、絶対パスが入ったまま検査を通過してしまう。禁止パスを引数で受け取る形に変え（ビルドはホームディレクトリとリポジトリルートの両方を渡す）、そのままの形・JSON エスケープ形・スラッシュ変換形の3通りで照合するようにした。あわせて `package.json` 内の POSIX 絶対パス / Windows ドライブパス / UNC パス / 絶対パスを指す `file:` 指定を検出し、シンボリックリンクも（従来は `isFile()` が false になるため素通りしていた）リンク先を検査して、絶対パスまたはツリー外を指すものを拒否する。検査は `scripts/build-mcpb.mjs` 内のインライン関数から単体テスト付きのモジュール（`src/staged-tree-guard.ts`）へ移した。
 - **init プリミティブを core へ移設** — キーチェーンのサービス名生成（`buildKeychainService`）と `.gitignore` への `.aiftp/` 追加（`ensureGitignoreEntry`）を `@aiftp-tools/cli` から `@aiftp-tools/core` へ移した。CLI の挙動は変わらない。Desktop 拡張が同じ規約を再実装せずに済むようにするための整理。
+
+### Fixed
+
+- **拡張の表示名からパス区切り文字を除去（Windows で有効化に失敗する問題）** — Claude Desktop は拡張の `display_name` を MCP サーバの識別子としてパスの一部に使う。表示名に含めていたスラッシュ（`FTP/FTPS`）がパス脱出ガードに引っかかり、Windows で有効化すると **「拡張機能サーバーに接続できません」** と表示され、ログに `path escape: "aiftp — FTP/FTPS 安全デプロイ"` が記録されていた。実際にはリトライで接続が成立するため機能はしていたが、利用者は最初の画面で手が止まる。区切りを中黒に変え（`aiftp — FTP・FTPS 安全デプロイ`）、表示名にパス区切り文字が入ったら失敗する回帰テストを追加した。macOS はファイル名中のスラッシュを内部で読み替えるため再現しない、**Windows 実機でのみ現れる不具合**（2026-08-15 の Windows 実機ドッグフードで発見・修正後に同一機で解消を確認）。
 
 ---
 
