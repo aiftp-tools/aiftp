@@ -16,7 +16,9 @@ import {
   callAiftpTool,
   createAiftpMcp,
   readAiftpResource,
+  toolDescriptions,
 } from './index.js';
+import { buildSetupStatus } from './setup-status.js';
 
 function createPushResult(overrides?: Partial<PushResult>): PushResult {
   return {
@@ -1356,6 +1358,50 @@ describe('mcp', () => {
     const app = createAiftpMcp({ cwd });
 
     expect(app.tools).toContain('aiftp_init_template_list');
+  });
+
+  it('describes every aiftp_setup_status check id in the tool description', async () => {
+    // The description is how an AI client decides whether this tool answers
+    // the question in front of it. A check that exists but is not described
+    // is a check the model will not know to ask for -- so keep the two in
+    // lockstep rather than trusting a reviewer to notice the drift.
+    const report = await buildSetupStatus({
+      startup: JSON.stringify({
+        bootstrap: {
+          ok: true,
+          siteName: 'gwco',
+          profileName: 'production',
+          keychainService: 'aiftp:gwco-production',
+          configPath: '/abs/site/.aiftp.toml',
+          config: 'created',
+          credential: 'stored',
+          registry: 'registered',
+          backupKey: 'created',
+          missing: [],
+        },
+        settings: { host: 'ftp.example.test', profileName: 'production' },
+        startedAt: '2026-09-06T00:00:00.000Z',
+      }),
+      confirmPhrase: 'spec-fixture-phrase-7Q2',
+      pathExists: async () => true,
+      siteRegistered: async () => true,
+      backupKeyExists: async () => true,
+      readProfile: async () => ({
+        host: 'ftp.example.test',
+        user: 'deployer',
+        protocol: 'ftps',
+        remote_root: '/public_html',
+        keychain_service: 'aiftp:gwco-production',
+      }),
+    });
+    const description = toolDescriptions.aiftp_setup_status;
+
+    expect(report.checks.length).toBe(8);
+    for (const check of report.checks) {
+      expect(description, `check "${check.id}" is not mentioned in the description`).toContain(
+        check.id,
+      );
+    }
   });
 
   it('aiftp_init_template_list returns 7 templates', async () => {
