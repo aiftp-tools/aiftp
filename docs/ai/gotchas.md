@@ -44,6 +44,15 @@
 - **ターミナル利用者（v0.12 既存ユーザー）の挙動を変えない**
 - MCP elicitation は Claude Desktop に存在しない（Claude Code のみ）
 - ⚠️ **破壊的変更（v0.13）**: `aiftp_rollback_confirm` が `safety.prod_profile_patterns` 一致時に `acknowledge_production: true` を要求する
+- 🔴 **`.aiftp.toml` に該当プロファイルのブロックが無いと bootstrap は黙って何もしない** — `reconcileOwnedFields`（`packages/core/src/bootstrap/index.ts`）は `findProfileBlockRange` が空振りするとそのまま返し、`config = 'existing'` になる。**設定と反映先が食い違ったまま全チェックが pass する**構図だった。v0.13.1 の `setup_status` の `config_match` はこれを捕まえるためにある
+- 🔴 **拡張機能の設定はプロセス起動時の環境変数だけ** — 動作中のプロセスからは Desktop 側の設定変更を検知できない（原理的に不可能）。`setup_status` の `notice`（読み込み時刻）はこの制約を利用者に伝えるためのもの。「変更を検知して自動再読み込み」は実装できないので設計に入れない
+
+## Desktop 拡張の再インストール（2026-09-06 実測）
+
+- 🔴 **同じバージョン番号のままでは上書きインストールで中身が入れ替わらない** — 必ず**アンインストールしてから**入れ直す。実体が入れ替わったかは `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.tanaka-yuichiro.aiftp` の**タイムスタンプと中身**（新しい識別子を grep）で確認する。バージョン番号は根拠にならない
+- 🔴 **再インストール直後、拡張は「無効」のまま起動しない** — `main.log` に `Extension ... has missing required configuration, not enabling automatically` が出る。再インストールで**パスワードと合言葉だけが消える**ため。この 2 つを入れ直し、**有効化トグルを ON** にするまで MCP サーバーは一度も起動しない（`mcp-server-aiftp*.log` に起動行が出ないのが目印）
+- 🔴 **設定を入れ直すとき、サイト名とリモートフォルダの打ち直しを間違えやすい** — 2026-09-06 に実際にサイト名が `GWco`、remote_root が本番ルートになり、ドッグフード用フォルダの `.aiftp.toml` が**本番 public_html を向いた**（push 前に気づいたため実害なし）。**台帳は大文字小文字違いを別サイトとして受け付ける**ので `gwco` と `GWco` が並ぶ
+- ⚠️ **`config_match` は「設定どおりか」しか見ない。「設定が正しいか」は見ない** — 設定そのものを打ち間違えると pass する。反映先の妥当性は宛先バナーと `expected_site` で確認する
 
 ## 認証情報の実務知識（実測で判明）
 

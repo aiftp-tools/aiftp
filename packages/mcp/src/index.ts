@@ -31,6 +31,7 @@ import {
   type StatusResult,
   VERSION,
   type VerifyResult,
+  backupKeyService,
   buildDeployClientOptions,
   checkAll,
   computeDestinationFingerprint,
@@ -491,7 +492,12 @@ const toolSchemas = {
   aiftp_setup_status: noArgsSchema,
 } satisfies Record<AiftpToolName, z.ZodType>;
 
-const toolDescriptions = {
+/**
+ * Exported so the test suite can hold each description against what the tool
+ * actually does — a check that exists but is undescribed is a check no AI
+ * client will know to ask for.
+ */
+export const toolDescriptions = {
   aiftp_status: 'Show local deployment diff.',
   aiftp_push: 'Run a dry-run push. For a real push, use aiftp_push_prepare + aiftp_push_confirm.',
   aiftp_push_prepare:
@@ -538,7 +544,7 @@ const toolDescriptions = {
   aiftp_rollback_confirm:
     'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials). Requires acknowledge_deletions: true when the prepare step returned one or more plannedDeletes.',
   aiftp_setup_status:
-    'Report whether the Claude Desktop extension is fully configured: bootstrap, project directory, .aiftp.toml, keychain credential, fleet registration, production confirm phrase. Each failing check carries a Japanese `hint`. Credentials are never surfaced. Read-only.',
+    'Report whether the Claude Desktop extension is correctly configured, as eight checks: bootstrap, project_dir, config_file, config_match, credential, backup_key, registry, confirm_phrase. Beyond presence, it verifies correctness: config_match re-reads .aiftp.toml and compares host / user / protocol / remote_root / keychain_service against the extension settings (catching a config bootstrap could not reconcile), and backup_key reads the OS keychain directly rather than trusting the startup report. A `notice` field reports when the settings were loaded, since edits made after that need a Claude Desktop restart. Each failing check carries a Japanese `hint`. Credentials are never surfaced. Read-only.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -1769,6 +1775,33 @@ async function handleSetupStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   const report = await buildSetupStatus({
     startup: process.env.AIFTP_DESKTOP_STARTUP,
     confirmPhrase: app.confirmPhrase,
+    readProfile: async (configPath: string, profileName: string) => {
+      try {
+        const config = await loadConfig(configPath);
+        const profile = config.profile[profileName];
+        if (!profile) return undefined;
+        return {
+          host: profile.host,
+          user: profile.user,
+          protocol: profile.protocol,
+          remote_root: profile.remote_root,
+          keychain_service: profile.keychain_service,
+        };
+      } catch {
+        // An unreadable or unparseable config is already reported by the
+        // `config_file` check; treat it here as "no profile to compare"
+        // rather than letting setup_status throw and report nothing at all.
+        return undefined;
+      }
+    },
+    backupKeyExists: async (keychainService: string, profileName: string) => {
+      try {
+        const has = app.runtime.hasPassword ?? hasPassword;
+        return await has(backupKeyService(keychainService), profileName);
+      } catch {
+        return false;
+      }
+    },
     pathExists: async (path: string) => {
       try {
         return (await stat(path)) !== undefined;

@@ -12,7 +12,13 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
-(Pending work for v0.12.x and beyond.)
+### Added
+
+- **`aiftp_setup_status` が設定の「正しさ」を検証するようになった** — チェックが 6 項目から 8 項目に増えた。
+  - `config_match`: `.aiftp.toml` を毎回読み直し、bootstrap が所有する 5 フィールド（host / user / protocol / remote_root / keychain_service）が拡張機能の設定と実際に一致しているかを確認する。**`.aiftp.toml` が既に存在し、そこに該当プロファイルのブロックが無い場合、bootstrap はそのファイルを書き換えない**ため、これまでは全項目 pass のまま反映先だけが設定と違う状態になりえた。
+  - `backup_key`: バックアップ暗号化鍵が OS キーチェーンに実際に存在するかを、起動時の報告ではなくキーチェーンを直接読んで確認する。
+- **bootstrap がバックアップ暗号化鍵を自動生成するようになった** — Claude Desktop 拡張だけで完結するようになり、ターミナルでの `aiftp backup init` は不要。**既存の鍵は絶対に上書きしない**（上書きは過去スナップショットを復号不能にする不可逆操作のため、`aiftp backup init --force` に限定）。キーチェーン書き込みに失敗してもサーバーの起動は止めず、`setup_status` の `backup_key` に `fail` として現れる。
+- **`aiftp_setup_status` が設定の読み込み時刻を `notice` として常時表示するようになった** — 拡張機能の設定は起動時の値だけが使われ、動作中の変更は反映されない。表示時刻より後に設定を触っていれば Claude Desktop の再起動が必要だと分かる。
 
 ---
 

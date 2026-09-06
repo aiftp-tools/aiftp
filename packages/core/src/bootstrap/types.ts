@@ -26,11 +26,14 @@ export interface BootstrapDeps {
   readonly credentialExists?: (service: string, account: string) => Promise<boolean>;
   readonly createRegistry?: () => BootstrapRegistrySurface;
   readonly ensureGitignore?: (cwd: string) => Promise<string>;
+  /** Base64 AES-256 key material. Injectable so tests stay deterministic. */
+  readonly generateBackupKey?: () => string;
 }
 
 export type ConfigOutcome = 'created' | 'updated' | 'existing';
 export type CredentialOutcome = 'stored' | 'already-stored' | 'missing';
 export type RegistryOutcome = 'registered' | 'already-registered' | 'renamed';
+export type BackupKeyOutcome = 'created' | 'already-present' | 'failed';
 
 export interface BootstrapResult {
   readonly ok: boolean;
@@ -41,6 +44,7 @@ export interface BootstrapResult {
   readonly config: ConfigOutcome;
   readonly credential: CredentialOutcome;
   readonly registry: RegistryOutcome;
+  readonly backupKey: BackupKeyOutcome;
   readonly gitignore: string;
   readonly missing: readonly string[];
   readonly hint?: string;

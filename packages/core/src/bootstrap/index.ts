@@ -1,11 +1,14 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
+import { backupKeyService } from '../backup/default-store.js';
 import { appendProfileBlock, findProfileBlockRange, setProfileField } from '../config-edit.js';
+import { generateKey } from '../encryption.js';
 import { ensureGitignoreEntry } from '../init/gitignore.js';
 import { buildKeychainService } from '../init/keychain-name.js';
 import { hasPassword, setPassword } from '../keychain.js';
 import { SiteRegistry } from '../sites/registry.js';
 import {
+  type BackupKeyOutcome,
   type BootstrapDeps,
   type BootstrapInput,
   type BootstrapResult,
@@ -21,6 +24,9 @@ export { validateBootstrapInput } from './validate.js';
 
 const CREDENTIAL_HINT =
   'Claude Desktop の設定 → 拡張機能 → aiftp で「パスワード」欄を入力し、Claude Desktop を再起動してください。';
+
+const BACKUP_KEY_HINT =
+  'バックアップ用の暗号鍵を OS キーチェーンに保存できませんでした。キーチェーンへのアクセスを許可したうえで Claude Desktop を再起動してください。';
 
 async function defaultPathExists(path: string): Promise<boolean> {
   try {
@@ -183,7 +189,47 @@ export async function runBootstrap(
 
   // 7. .gitignore
   const gitignore = await ensureGitignore(input.localRoot);
-  const missing = credential === 'missing' ? ['credential'] : [];
+
+  // 8. backup key. The Desktop path has no terminal, so `aiftp backup init`
+  //    is not a step an attendee can be asked to run — without a key the
+  //    first production push fails at backup time, long after setup looked
+  //    fine. Same service/account pair the CLI command uses, so the two
+  //    paths can never disagree about where the key lives.
+  //
+  //    An existing key is NEVER overwritten: replacing it makes every prior
+  //    snapshot permanently undecryptable, and nothing in the Desktop flow
+  //    is worth that risk. Overwriting stays a deliberate, terminal-only
+  //    act (`aiftp backup init --force`).
+  //
+  //    A keychain failure here must not stop the server from starting
+  //    (spec §5.1) — it is recorded and surfaced through
+  //    `aiftp_setup_status`'s `backup_key` check instead.
+  const backupKeyEntryService = backupKeyService(keychainService);
+  let backupKey: BackupKeyOutcome;
+  try {
+    if (await credentialExists(backupKeyEntryService, input.profileName)) {
+      backupKey = 'already-present';
+    } else {
+      const generate = deps.generateBackupKey ?? (() => generateKey().toString('base64'));
+      await storeCredential(backupKeyEntryService, input.profileName, generate());
+      backupKey = 'created';
+    }
+  } catch {
+    backupKey = 'failed';
+  }
+
+  const missing = [
+    ...(credential === 'missing' ? ['credential'] : []),
+    ...(backupKey === 'failed' ? ['backup_key'] : []),
+  ];
+  // The credential hint is the more actionable of the two (it names a field
+  // the operator can fill in), so it wins when both are missing.
+  const hint =
+    credential === 'missing'
+      ? CREDENTIAL_HINT
+      : backupKey === 'failed'
+        ? BACKUP_KEY_HINT
+        : undefined;
 
   return {
     ok: missing.length === 0,
@@ -194,8 +240,9 @@ export async function runBootstrap(
     config,
     credential,
     registry,
+    backupKey,
     gitignore,
     missing,
-    ...(credential === 'missing' ? { hint: CREDENTIAL_HINT } : {}),
+    ...(hint ? { hint } : {}),
   };
 }

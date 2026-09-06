@@ -211,7 +211,10 @@ describe('runBootstrap', () => {
     const result = await runBootstrap({ ...withoutCredential, localRoot, credential: '   ' }, deps);
 
     expect(result.credential).toBe('missing');
-    expect(deps.stored.size).toBe(0);
+    // The backup key is stored unconditionally, so assert on the credential
+    // entry itself rather than on the size of the whole keychain fake.
+    expect(deps.stored.has('aiftp:gwco-production\u0000deployer')).toBe(false);
+    expect([...deps.stored.values()]).not.toContain('   ');
   });
 
   it('throws the conflict error before writing config or storing the credential', async () => {
@@ -292,6 +295,66 @@ describe('runBootstrap', () => {
     await rm(localRoot, { recursive: true, force: true });
     await expect(runBootstrap({ ...input, localRoot }, fakeDeps())).rejects.toThrow(
       'bootstrap-invalid: local_root does not exist',
+    );
+  });
+
+  it('creates a backup key in the keychain when none exists yet', async () => {
+    const deps = fakeDeps();
+
+    const result = await runBootstrap({ ...input, localRoot }, deps);
+
+    expect(result.backupKey).toBe('created');
+    expect(result.missing).toEqual([]);
+    // Same service/account pair `aiftp backup init` uses, so the CLI and the
+    // Desktop path can never disagree about where the key lives.
+    expect(deps.stored.get('aiftp:gwco-production:backup-key\u0000production')).toBeDefined();
+  });
+
+  it('never overwrites an existing backup key (prior snapshots stay decryptable)', async () => {
+    const deps = fakeDeps();
+    const existing = 'ZXhpc3Rpbmcta2V5LWZpeHR1cmU=';
+    deps.stored.set('aiftp:gwco-production:backup-key\u0000production', existing);
+
+    const result = await runBootstrap({ ...input, localRoot }, deps);
+
+    expect(result.backupKey).toBe('already-present');
+    expect(deps.stored.get('aiftp:gwco-production:backup-key\u0000production')).toBe(existing);
+  });
+
+  it('records a failed backup key instead of throwing, so the server still starts', async () => {
+    const deps = fakeDeps();
+    const storeCredential = deps.storeCredential;
+    const failing: BootstrapDeps = {
+      ...deps,
+      storeCredential: async (service, account, value) => {
+        if (service.endsWith(':backup-key')) {
+          throw new Error('keychain unavailable');
+        }
+        await storeCredential?.(service, account, value);
+      },
+    };
+
+    const result = await runBootstrap({ ...input, localRoot }, failing);
+
+    expect(result.backupKey).toBe('failed');
+    expect(result.ok).toBe(false);
+    expect(result.missing).toEqual(['backup_key']);
+    expect(result.hint).toContain('バックアップ');
+    // The rest of the bootstrap still completed.
+    expect(result.config).toBe('created');
+    expect(result.credential).toBe('stored');
+  });
+
+  it('uses the injected backup key generator', async () => {
+    const deps = fakeDeps();
+
+    await runBootstrap(
+      { ...input, localRoot },
+      { ...deps, generateBackupKey: () => 'ZGV0ZXJtaW5pc3RpYy1maXh0dXJl' },
+    );
+
+    expect(deps.stored.get('aiftp:gwco-production:backup-key\u0000production')).toBe(
+      'ZGV0ZXJtaW5pc3RpYy1maXh0dXJl',
     );
   });
 
