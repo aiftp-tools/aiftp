@@ -15,14 +15,41 @@ const bootstrapOk = {
   config: 'created',
   credential: 'stored',
   registry: 'registered',
+  backupKey: 'created',
   missing: [] as string[],
 };
 
+/** The Desktop settings form values behind `bootstrapOk`. */
+const settingsOk = {
+  siteName: 'gwco',
+  localRoot: '/abs/site',
+  host: 'ftp.example.test',
+  protocol: 'ftps',
+  username: 'deployer',
+  remoteRoot: '/public_html',
+  profileName: 'production',
+};
+
+/** The `.aiftp.toml` profile that matches `settingsOk` exactly. */
+const profileOk = {
+  host: 'ftp.example.test',
+  user: 'deployer',
+  protocol: 'ftps',
+  remote_root: '/public_html',
+  keychain_service: 'aiftp:gwco-production',
+};
+
 const happy = {
-  startup: JSON.stringify({ bootstrap: bootstrapOk }),
+  startup: JSON.stringify({
+    bootstrap: bootstrapOk,
+    settings: settingsOk,
+    startedAt: '2026-09-06T00:00:00.000Z',
+  }),
   confirmPhrase: phrase,
   pathExists: async () => true,
   siteRegistered: async () => true,
+  backupKeyExists: async () => true,
+  readProfile: async () => profileOk,
 };
 
 describe('buildSetupStatus', () => {
@@ -33,7 +60,9 @@ describe('buildSetupStatus', () => {
       'bootstrap',
       'project_dir',
       'config_file',
+      'config_match',
       'credential',
+      'backup_key',
       'registry',
       'confirm_phrase',
     ]);
@@ -106,16 +135,127 @@ describe('buildSetupStatus', () => {
     expect(report.ok).toBe(true);
   });
 
-  it('keeps the six frozen check ids', async () => {
+  it('keeps the eight frozen check ids', async () => {
     const report = await buildSetupStatus({ ...happy, confirmPhrase: weakPhrase });
     expect(report.checks.map((entry) => entry.id)).toEqual([
       'bootstrap',
       'project_dir',
       'config_file',
+      'config_match',
       'credential',
+      'backup_key',
       'registry',
       'confirm_phrase',
     ]);
+  });
+
+  it('passes config_match when .aiftp.toml agrees with the extension settings', async () => {
+    const report = await buildSetupStatus(happy);
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+    expect(check?.status).toBe('pass');
+  });
+
+  it('fails config_match and names every field that disagrees', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      readProfile: async () => ({
+        ...profileOk,
+        host: 'stale.example.test',
+        remote_root: '/old_html',
+      }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('host');
+    expect(check?.message).toContain('stale.example.test');
+    expect(check?.message).toContain('ftp.example.test');
+    expect(check?.message).toContain('remote_root');
+    expect(check?.message).not.toContain('user');
+  });
+
+  it('fails config_match when .aiftp.toml has no matching profile block', async () => {
+    // The exact case reconcileOwnedFields silently skips: bootstrap reports
+    // `existing` and every other check passes while the config is wrong.
+    const report = await buildSetupStatus({
+      ...happy,
+      startup: JSON.stringify({
+        bootstrap: { ...bootstrapOk, config: 'existing' },
+        settings: settingsOk,
+      }),
+      readProfile: async () => undefined,
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('production');
+  });
+
+  it('does not blame the profile when .aiftp.toml itself is missing', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      pathExists: async (path: string) => !path.endsWith('.aiftp.toml'),
+    });
+    const configFile = report.checks.find((entry) => entry.id === 'config_file');
+    const configMatch = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(configFile?.status).toBe('fail');
+    expect(configMatch?.status).toBe('fail');
+    expect(configMatch?.message).toContain('.aiftp.toml is missing');
+    expect(configMatch?.message).not.toContain('no profile');
+  });
+
+  it('tells the operator the installed extension is outdated when settings are absent', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      startup: JSON.stringify({ bootstrap: bootstrapOk }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('extension-outdated');
+    expect(check?.hint).toContain('再インストール');
+  });
+
+  it('fails backup_key when no key is stored in the keychain', async () => {
+    const report = await buildSetupStatus({ ...happy, backupKeyExists: async () => false });
+    const check = report.checks.find((entry) => entry.id === 'backup_key');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.hint).toContain('再起動');
+  });
+
+  it('measures the backup key itself rather than trusting the startup report', async () => {
+    const calls: Array<[string, string]> = [];
+    const report = await buildSetupStatus({
+      ...happy,
+      // The report claims the key was created; the keychain says otherwise.
+      backupKeyExists: async (service, account) => {
+        calls.push([service, account]);
+        return false;
+      },
+    });
+
+    expect(calls).toEqual([['aiftp:gwco-production', 'production']]);
+    expect(report.checks.find((entry) => entry.id === 'backup_key')?.status).toBe('fail');
+  });
+
+  it('carries the startup time forward as an advisory notice', async () => {
+    const report = await buildSetupStatus(happy);
+    expect(report.notice).toContain('2026-09-06T00:00:00.000Z');
+    expect(report.notice).toContain('再起動');
+  });
+
+  it('never leaks the confirm phrase through the new checks', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      backupKeyExists: async () => false,
+      readProfile: async () => ({ ...profileOk, host: 'stale.example.test' }),
+    });
+    expect(JSON.stringify(report)).not.toContain(phrase);
   });
 
   it('surfaces a startup error as the bootstrap check failure', async () => {
@@ -231,12 +371,11 @@ describe('buildSetupStatus', () => {
 
   it('reports the bootstrap check as fail and lists what is missing when boot.ok is false', async () => {
     const report = await buildSetupStatus({
+      ...happy,
       startup: JSON.stringify({
         bootstrap: { ...bootstrapOk, ok: false, missing: ['registry'] },
+        settings: settingsOk,
       }),
-      confirmPhrase: phrase,
-      pathExists: async () => true,
-      siteRegistered: async () => true,
     });
     const bootstrap = report.checks.find((check) => check.id === 'bootstrap');
     expect(report.ok).toBe(false);

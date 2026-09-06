@@ -31,6 +31,7 @@ import {
   type StatusResult,
   VERSION,
   type VerifyResult,
+  backupKeyService,
   buildDeployClientOptions,
   checkAll,
   computeDestinationFingerprint,
@@ -1769,6 +1770,33 @@ async function handleSetupStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<Ca
   const report = await buildSetupStatus({
     startup: process.env.AIFTP_DESKTOP_STARTUP,
     confirmPhrase: app.confirmPhrase,
+    readProfile: async (configPath: string, profileName: string) => {
+      try {
+        const config = await loadConfig(configPath);
+        const profile = config.profile[profileName];
+        if (!profile) return undefined;
+        return {
+          host: profile.host,
+          user: profile.user,
+          protocol: profile.protocol,
+          remote_root: profile.remote_root,
+          keychain_service: profile.keychain_service,
+        };
+      } catch {
+        // An unreadable or unparseable config is already reported by the
+        // `config_file` check; treat it here as "no profile to compare"
+        // rather than letting setup_status throw and report nothing at all.
+        return undefined;
+      }
+    },
+    backupKeyExists: async (keychainService: string, profileName: string) => {
+      try {
+        const has = app.runtime.hasPassword ?? hasPassword;
+        return await has(backupKeyService(keychainService), profileName);
+      } catch {
+        return false;
+      }
+    },
     pathExists: async (path: string) => {
       try {
         return (await stat(path)) !== undefined;
