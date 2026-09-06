@@ -44,6 +44,8 @@
 - **ターミナル利用者（v0.12 既存ユーザー）の挙動を変えない**
 - MCP elicitation は Claude Desktop に存在しない（Claude Code のみ）
 - ⚠️ **破壊的変更（v0.13）**: `aiftp_rollback_confirm` が `safety.prod_profile_patterns` 一致時に `acknowledge_production: true` を要求する
+- 🔴 **`.aiftp.toml` に該当プロファイルのブロックが無いと bootstrap は黙って何もしない** — `reconcileOwnedFields`（`packages/core/src/bootstrap/index.ts`）は `findProfileBlockRange` が空振りするとそのまま返し、`config = 'existing'` になる。**設定と反映先が食い違ったまま全チェックが pass する**構図だった。v0.13.1 の `setup_status` の `config_match` はこれを捕まえるためにある
+- 🔴 **拡張機能の設定はプロセス起動時の環境変数だけ** — 動作中のプロセスからは Desktop 側の設定変更を検知できない（原理的に不可能）。`setup_status` の `notice`（読み込み時刻）はこの制約を利用者に伝えるためのもの。「変更を検知して自動再読み込み」は実装できないので設計に入れない
 
 ## 認証情報の実務知識（実測で判明）
 
