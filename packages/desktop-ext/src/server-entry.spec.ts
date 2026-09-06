@@ -2,11 +2,28 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BootstrapResult } from '@aiftp-tools/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readDesktopEnv, startDesktopServer } from './server-entry.js';
 
 // Not a real credential — a fixture used to prove the value never leaks.
 const fixtureValue = 'fixture-only-not-real';
+
+function bootstrapOkFor(localRoot: string): BootstrapResult {
+  return {
+    ok: true,
+    siteName: 'gwco',
+    profileName: 'production',
+    keychainService: 'aiftp:gwco-production',
+    configPath: join(localRoot, '.aiftp.toml'),
+    config: 'created',
+    credential: 'stored',
+    registry: 'registered',
+    backupKey: 'created',
+    gitignore: 'skipped-not-a-repo',
+    missing: [],
+  };
+}
 
 describe('readDesktopEnv', () => {
   it('maps the manifest env vars onto bootstrap input fields', () => {
@@ -96,6 +113,7 @@ describe('startDesktopServer', () => {
           config: 'created',
           credential: 'stored',
           registry: 'registered',
+          backupKey: 'created',
           gitignore: 'skipped-not-a-repo',
           missing: [],
         }),
@@ -128,6 +146,62 @@ describe('startDesktopServer', () => {
     expect(JSON.stringify(report)).not.toContain(fixtureValue);
   });
 
+  it('records the settings snapshot and the startup time in the report', async () => {
+    const before = Date.now();
+    const report = await startDesktopServer(
+      {
+        AIFTP_PROJECT_DIR: localRoot,
+        AIFTP_BOOTSTRAP_SITE: 'gwco',
+        AIFTP_BOOTSTRAP_HOST: 'ftp.example.test',
+        AIFTP_BOOTSTRAP_PROTOCOL: 'ftps',
+        AIFTP_BOOTSTRAP_USER: 'deployer',
+        AIFTP_BOOTSTRAP_REMOTE_ROOT: '/public_html',
+        AIFTP_BOOTSTRAP_CREDENTIAL: fixtureValue,
+      },
+      { startMcp: async () => {}, runBootstrap: async () => bootstrapOkFor(localRoot) },
+    );
+
+    expect(report.settings).toEqual({
+      siteName: 'gwco',
+      localRoot,
+      host: 'ftp.example.test',
+      protocol: 'ftps',
+      username: 'deployer',
+      remoteRoot: '/public_html',
+      profileName: 'production',
+    });
+    expect(Date.parse(report.startedAt ?? '')).toBeGreaterThanOrEqual(before);
+  });
+
+  it('keeps the credential out of the settings snapshot', async () => {
+    const report = await startDesktopServer(
+      {
+        AIFTP_PROJECT_DIR: localRoot,
+        AIFTP_BOOTSTRAP_SITE: 'gwco',
+        AIFTP_BOOTSTRAP_HOST: 'ftp.example.test',
+        AIFTP_BOOTSTRAP_PROTOCOL: 'ftps',
+        AIFTP_BOOTSTRAP_USER: 'deployer',
+        AIFTP_BOOTSTRAP_REMOTE_ROOT: '/public_html',
+        AIFTP_BOOTSTRAP_CREDENTIAL: fixtureValue,
+      },
+      { startMcp: async () => {}, runBootstrap: async () => bootstrapOkFor(localRoot) },
+    );
+
+    expect(JSON.stringify(report.settings)).not.toContain(fixtureValue);
+    expect(report.settings).not.toHaveProperty('credential');
+  });
+
+  it('still records the settings snapshot when bootstrap fails', async () => {
+    const report = await startDesktopServer(
+      { AIFTP_PROJECT_DIR: localRoot, AIFTP_BOOTSTRAP_HOST: 'ftp.example.test' },
+      { startMcp: async () => {} },
+    );
+
+    expect(report.error).toBeDefined();
+    expect(report.settings?.host).toBe('ftp.example.test');
+    expect(report.startedAt).toBeDefined();
+  });
+
   it('rejects and persists the mcp-start failure when startMcp itself throws', async () => {
     await expect(
       startDesktopServer(
@@ -150,6 +224,7 @@ describe('startDesktopServer', () => {
             config: 'created',
             credential: 'stored',
             registry: 'registered',
+            backupKey: 'created',
             gitignore: 'skipped-not-a-repo',
             missing: [],
           }),

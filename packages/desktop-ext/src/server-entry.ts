@@ -10,9 +10,54 @@ export interface DesktopServerDeps {
   readonly runBootstrap?: (input: Partial<BootstrapInput>) => Promise<BootstrapResult>;
 }
 
+/**
+ * The Desktop settings the server was started with, minus the credential.
+ * `aiftp_setup_status`'s `config_match` check compares this against the
+ * profile actually present in `.aiftp.toml`, which is how a config that
+ * bootstrap could not reconcile (no matching profile block) gets caught
+ * before a push rather than during one.
+ */
+export interface DesktopSettingsSnapshot {
+  readonly siteName?: string;
+  readonly localRoot?: string;
+  readonly host?: string;
+  readonly protocol?: string;
+  readonly username?: string;
+  readonly remoteRoot?: string;
+  readonly profileName?: string;
+}
+
 export interface DesktopStartupReport {
   readonly bootstrap?: BootstrapResult;
   readonly error?: { readonly message: string; readonly hint: string };
+  /**
+   * Extension settings are handed to this process as environment variables
+   * at spawn time and never change while it runs, so a settings edit the
+   * operator makes afterwards is invisible here. Recording when the values
+   * were read lets `aiftp_setup_status` say exactly that, instead of
+   * silently reporting a stale configuration as healthy.
+   */
+  readonly startedAt?: string;
+  readonly settings?: DesktopSettingsSnapshot;
+}
+
+/**
+ * Copies the non-secret settings, field by field. Deliberately an allow-list
+ * rather than "everything except `credential`": a future secret added to
+ * `BootstrapInput` would silently ride along in a deny-list, and this object
+ * is persisted into an environment variable and echoed back through
+ * `aiftp_setup_status`.
+ */
+function settingsSnapshot(input: Partial<BootstrapInput>): DesktopSettingsSnapshot {
+  return {
+    ...(input.siteName === undefined ? {} : { siteName: input.siteName }),
+    ...(input.localRoot === undefined ? {} : { localRoot: input.localRoot }),
+    ...(input.host === undefined ? {} : { host: input.host }),
+    ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+    ...(input.username === undefined ? {} : { username: input.username }),
+    ...(input.remoteRoot === undefined ? {} : { remoteRoot: input.remoteRoot }),
+    ...(input.profileName === undefined ? {} : { profileName: input.profileName }),
+  };
 }
 
 const GENERIC_HINT =
@@ -99,11 +144,12 @@ export async function startDesktopServer(
     });
 
   const input = readDesktopEnv(env);
-  let report: DesktopStartupReport = {};
+  const context = { startedAt: new Date().toISOString(), settings: settingsSnapshot(input) };
+  let report: DesktopStartupReport = { ...context };
   try {
-    report = { bootstrap: await bootstrapFn(input) };
+    report = { ...context, bootstrap: await bootstrapFn(input) };
   } catch (error) {
-    report = { error: errorDetails(error) };
+    report = { ...context, error: errorDetails(error) };
   }
 
   process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify(report);
@@ -121,7 +167,11 @@ export async function startDesktopServer(
     const combined = existing
       ? { message: `${existing.message}; mcp-start-failed: ${mcpMessage}`, hint: existing.hint }
       : { message: `mcp-start-failed: ${mcpMessage}`, hint: mcpHint };
-    report = { ...(report.bootstrap ? { bootstrap: report.bootstrap } : {}), error: combined };
+    report = {
+      ...context,
+      ...(report.bootstrap ? { bootstrap: report.bootstrap } : {}),
+      error: combined,
+    };
     process.env.AIFTP_DESKTOP_STARTUP = JSON.stringify(report);
     throw mcpError;
   }
