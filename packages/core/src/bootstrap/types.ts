@@ -28,6 +28,16 @@ export interface BootstrapDeps {
   readonly ensureGitignore?: (cwd: string) => Promise<string>;
   /** Base64 AES-256 key material. Injectable so tests stay deterministic. */
   readonly generateBackupKey?: () => string;
+  /**
+   * Atomic create-if-absent for the backup key. Separate from
+   * `storeCredential` because that one overwrites, which must never happen
+   * to a key that already encrypted a snapshot.
+   */
+  readonly createBackupKeyIfAbsent?: (
+    service: string,
+    account: string,
+    value: string,
+  ) => Promise<'created' | 'already-present'>;
 }
 
 export type ConfigOutcome = 'created' | 'updated' | 'existing';

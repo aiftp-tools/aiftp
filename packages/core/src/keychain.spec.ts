@@ -141,6 +141,57 @@ describe('createDarwinKeychainBackend: setPassword keeps the secret out of argv'
   });
 });
 
+describe('createDarwinKeychainBackend: createPasswordIfAbsent is atomic', () => {
+  const fixtureValue = 'fixture-only-not-real-key';
+
+  function recordingExec(code: number): {
+    exec: ExecFn;
+    calls: Array<{ args: readonly string[]; stdin?: string }>;
+  } {
+    const calls: Array<{ args: readonly string[]; stdin?: string }> = [];
+    const exec: ExecFn = async (_cmd, args, options) => {
+      calls.push({ args, ...(options?.stdin === undefined ? {} : { stdin: options.stdin }) });
+      return { stdout: '', stderr: '', code };
+    };
+    return { exec, calls };
+  }
+
+  it('omits -U so the OS itself refuses to overwrite an existing entry', async () => {
+    const { exec, calls } = recordingExec(0);
+
+    const outcome = await createDarwinKeychainBackend(exec).createPasswordIfAbsent(
+      'svc',
+      'account',
+      fixtureValue,
+    );
+
+    expect(outcome).toBe('created');
+    // `-U` is what makes `security` overwrite. Leaving it out turns the write
+    // into a create-if-absent that cannot lose a key to a concurrent writer,
+    // which a read-then-write pair can.
+    expect(calls[0]?.stdin).not.toContain('-U');
+    expect(calls[0]?.stdin).toContain('add-generic-password');
+  });
+
+  it('treats errSecDuplicateItem as "already present", not as a failure', async () => {
+    // Measured: `security` exits 45 for a duplicate and leaves the stored
+    // value untouched.
+    const { exec } = recordingExec(45);
+
+    await expect(
+      createDarwinKeychainBackend(exec).createPasswordIfAbsent('svc', 'account', fixtureValue),
+    ).resolves.toBe('already-present');
+  });
+
+  it('still reports other failures', async () => {
+    const { exec } = recordingExec(1);
+
+    await expect(
+      createDarwinKeychainBackend(exec).createPasswordIfAbsent('svc', 'account', fixtureValue),
+    ).rejects.toBeInstanceOf(KeychainError);
+  });
+});
+
 describe('keychain: argument validation (cross-platform)', () => {
   it('rejects empty service in setPassword', async () => {
     await expect(setPassword('', 'account', 'pw')).rejects.toBeInstanceOf(KeychainError);

@@ -12,6 +12,15 @@ const SECURITY_BIN = 'security';
 const ERR_SEC_ITEM_NOT_FOUND = 44;
 
 /**
+ * `security` exit code for errSecDuplicateItem. Returned by
+ * `add-generic-password` when the entry already exists **and** `-U` was not
+ * given; measured on macOS 25.6 to leave the stored value untouched. This is
+ * what makes `createPasswordIfAbsent` atomic: the check and the write are one
+ * operation inside the OS, with no window for a concurrent writer.
+ */
+const ERR_SEC_DUPLICATE_ITEM = 45;
+
+/**
  * Maximum stdout/stderr buffer the child process may produce (1 MiB).
  * Password material is small; this caps abuse of unexpected output.
  */
@@ -97,8 +106,23 @@ export type ExecFn = (
   options?: ExecOptions,
 ) => Promise<ExecResult>;
 
+export type CreateIfAbsentOutcome = 'created' | 'already-present';
+
 export interface KeychainBackend {
   setPassword(service: string, account: string, password: string): Promise<void>;
+  /**
+   * Stores `password` only if no entry exists yet, and reports which happened.
+   * Exists because `hasPassword()` followed by `setPassword()` is a
+   * check-then-act pair: two processes can both observe "absent" and the
+   * second write wins. For material that must never be replaced — the backup
+   * encryption key, where a replacement makes every prior snapshot
+   * permanently unreadable — that guarantee has to be enforced, not assumed.
+   */
+  createPasswordIfAbsent(
+    service: string,
+    account: string,
+    password: string,
+  ): Promise<CreateIfAbsentOutcome>;
   getPassword(service: string, account: string): Promise<string>;
   deletePassword(service: string, account: string): Promise<void>;
 }
@@ -246,6 +270,37 @@ export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
           `Failed to store Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
         );
       }
+    },
+
+    async createPasswordIfAbsent(service, account, password) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      if (typeof password !== 'string') {
+        throw new KeychainError('password must be a string');
+      }
+      // Deliberately no `-U`: that flag is what turns this into an
+      // overwrite. Without it the OS refuses a duplicate outright, which is
+      // the whole point.
+      const result = await exec(SECURITY_BIN, ['-i'], {
+        stdin: `${[
+          'add-generic-password',
+          '-s',
+          quoteForSecurityInteractive(service, 'service'),
+          '-a',
+          quoteForSecurityInteractive(account, 'account'),
+          '-w',
+          quoteForSecurityInteractive(encodeStored(password), 'password'),
+        ].join(' ')}\n`,
+      });
+      if (result.code === ERR_SEC_DUPLICATE_ITEM) {
+        return 'already-present';
+      }
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to store Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
+        );
+      }
+      return 'created';
     },
 
     async getPassword(service, account) {
@@ -419,6 +474,36 @@ $secret = [Console]::In.ReadToEnd().TrimEnd([char]13, [char]10)
 [AiftpCredWriter]::Write($target, $user, $secret)
 `;
 
+/**
+ * The `Add-Type` block of one of the scripts above: everything up to and
+ * including the closing `"@`. Slicing the proven scripts rather than
+ * restating the C# keeps a single definition of each P/Invoke — the read
+ * path in particular has real-machine mileage and must not drift.
+ */
+function powerShellTypeBlockOf(script: string): string {
+  return script.slice(0, script.indexOf('\n"@') + 3);
+}
+
+/**
+ * Check and write inside one process. Windows offers no atomic
+ * create-if-absent for credentials (`CredWrite` always overwrites and
+ * `cmdkey` has no such mode), so this cannot match the macOS guarantee; what
+ * it does remove is the multi-process window a `getPassword` + `setPassword`
+ * pair leaves open, during which another launch can slip a different key in
+ * between the two calls.
+ */
+const PS_CRED_CREATE_IF_ABSENT_SCRIPT = `
+${powerShellTypeBlockOf(PS_CRED_READ_SCRIPT)}
+${powerShellTypeBlockOf(PS_CRED_WRITE_SCRIPT)}
+$secret = [Console]::In.ReadToEnd().TrimEnd([char]13, [char]10)
+if ([AiftpCredManager]::Read($target) -ne $null) {
+  [Console]::Out.Write('already-present')
+} else {
+  [AiftpCredWriter]::Write($target, $user, $secret)
+  [Console]::Out.Write('created')
+}
+`;
+
 function escapePowerShellSingleQuoted(value: string): string {
   return value.replace(/'/gu, "''");
 }
@@ -445,6 +530,35 @@ export function createWindowsKeychainBackend(exec: ExecFn): KeychainBackend {
           `Failed to store Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || result.stdout.trim()}`,
         );
       }
+    },
+
+    async createPasswordIfAbsent(service, account, password) {
+      assertNonEmpty(service, 'service');
+      assertNonEmpty(account, 'account');
+      if (typeof password !== 'string') {
+        throw new KeychainError('password must be a string');
+      }
+      const target = windowsTarget(service, account);
+      const preamble = `$target = '${escapePowerShellSingleQuoted(target)}'\n$user = '${escapePowerShellSingleQuoted(account)}'\n`;
+      const result = await exec(
+        POWERSHELL_BIN,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `${preamble}${PS_CRED_CREATE_IF_ABSENT_SCRIPT}`,
+        ],
+        { stdin: encodeStored(password) },
+      );
+      if (result.code !== 0) {
+        throw new KeychainError(
+          `Failed to store Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || result.stdout.trim()}`,
+        );
+      }
+      // Anything other than an explicit "created" is treated as "an entry is
+      // already there": guessing "created" on an unrecognised answer would
+      // report a key as freshly generated when it may not be.
+      return result.stdout.trim() === 'created' ? 'created' : 'already-present';
     },
 
     async getPassword(service, account) {
@@ -524,6 +638,19 @@ export async function setPassword(
 
 export async function getPassword(service: string, account: string): Promise<string> {
   return backend().getPassword(service, account);
+}
+
+/**
+ * Stores `password` only if the entry does not exist yet. Use this instead of
+ * `hasPassword()` + `setPassword()` whenever replacing the value would
+ * destroy something — the backup key being the case that matters.
+ */
+export async function createPasswordIfAbsent(
+  service: string,
+  account: string,
+  password: string,
+): Promise<CreateIfAbsentOutcome> {
+  return backend().createPasswordIfAbsent(service, account, password);
 }
 
 export async function deletePassword(service: string, account: string): Promise<void> {

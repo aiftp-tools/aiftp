@@ -33,6 +33,12 @@ function fakeDeps(): BootstrapDeps & {
       stored.set(`${service}\u0000${account}`, value);
     },
     credentialExists: async (service, account) => stored.has(`${service}\u0000${account}`),
+    createBackupKeyIfAbsent: async (service, account, value) => {
+      const key = `${service}\u0000${account}`;
+      if (stored.has(key)) return 'already-present';
+      stored.set(key, value);
+      return 'created';
+    },
     createRegistry: () => ({
       list: async () => entries,
       add: async (entry) => {
@@ -323,14 +329,10 @@ describe('runBootstrap', () => {
 
   it('records a failed backup key instead of throwing, so the server still starts', async () => {
     const deps = fakeDeps();
-    const storeCredential = deps.storeCredential;
     const failing: BootstrapDeps = {
       ...deps,
-      storeCredential: async (service, account, value) => {
-        if (service.endsWith(':backup-key')) {
-          throw new Error('keychain unavailable');
-        }
-        await storeCredential?.(service, account, value);
+      createBackupKeyIfAbsent: async () => {
+        throw new Error('keychain unavailable');
       },
     };
 
