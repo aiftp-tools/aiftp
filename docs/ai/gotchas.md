@@ -54,6 +54,22 @@
 - 🔴 **設定を入れ直すとき、サイト名とリモートフォルダの打ち直しを間違えやすい** — 2026-09-06 に実際にサイト名が `GWco`、remote_root が本番ルートになり、ドッグフード用フォルダの `.aiftp.toml` が**本番 public_html を向いた**（push 前に気づいたため実害なし）。**台帳は大文字小文字違いを別サイトとして受け付ける**ので `gwco` と `GWco` が並ぶ
 - ⚠️ **`config_match` は「設定どおりか」しか見ない。「設定が正しいか」は見ない** — 設定そのものを打ち間違えると pass する。反映先の妥当性は宛先バナーと `expected_site` で確認する
 
+## redaction 契約（正本の場所に注意・2026-09-07）
+
+- 🔴 **正本は `docs/superpowers/specs/2026-07-07-v0.12-codex-review.md` の MEDIUM-1 節。memory の要約で判断しない**
+  MCP 応答に出してはいけない: `host` / `user` / `port` / `password` / **`keychain_service`** / `account` / `ssh_key_path`
+  出してよい: `remote_root` / `local_root` / `protocol` / `server_kind` / `profile` / `site` / `label` / `diff_hash`
+  → 2026-09-06 に「認証情報のみ秘匿・remote_root は許可」という memory の要約だけを見て `host` / `user` / `keychain_service` を応答に出す実装を書き、Codex レビューで HIGH 指摘を受けた
+- ⚠️ **秘匿対象は部分表示もハッシュも不可** — いずれも低エントロピーで、推測して照合できる
+
+## 信頼できない入力を optional にするときの落とし穴（2026-09-07）
+
+- 🔴 **「古いビルドを救うために optional にする」と、その欠落がそのまま検証の抜け穴になる**
+  `AIFTP_DESKTOP_STARTUP` の `settings` を全フィールド optional にし、欠けた期待値を比較からスキップしたところ、
+  `settings: {profileName:"production"}` だけ渡せば `.aiftp.toml` が全項目誤りでも `config_match: pass` になった（fail-open）
+- ✅ **正しい形**: 「オブジェクト全体の欠落」＝旧ビルドとして扱い、「オブジェクトが存在するなら中身は全部必須」にする
+- 🔴 **存在確認だけの検証は緑のまま壊れる** — `hasPassword` は鍵が壊れていても pass。**鍵は実際に読んで長さと形式まで確認する**（値は応答に出さない）
+
 ## 認証情報の実務知識（実測で判明）
 
 - 🔴 **Keychain 保存値は `aiftp-v1:` + base64**（`packages/core/src/keychain.ts` の `encodeStored`）。生値を `security -w` で読むと 530 になる

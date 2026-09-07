@@ -48,8 +48,8 @@ const happy = {
   confirmPhrase: phrase,
   pathExists: async () => true,
   siteRegistered: async () => true,
-  backupKeyExists: async () => true,
-  readProfile: async () => profileOk,
+  backupKeyStatus: async () => 'ok' as const,
+  readProfile: async () => ({ kind: 'ok' as const, profile: profileOk }),
 };
 
 describe('buildSetupStatus', () => {
@@ -159,19 +159,21 @@ describe('buildSetupStatus', () => {
     const report = await buildSetupStatus({
       ...happy,
       readProfile: async () => ({
-        ...profileOk,
-        host: 'stale.example.test',
-        remote_root: '/old_html',
+        kind: 'ok' as const,
+        profile: { ...profileOk, host: 'stale.example.test', remote_root: '/old_html' },
       }),
     });
     const check = report.checks.find((entry) => entry.id === 'config_match');
 
     expect(report.ok).toBe(false);
     expect(check?.status).toBe('fail');
+    // `host` is named but its values stay off the wire (redaction contract);
+    // `remote_root` is deploy metadata, so both values are shown.
     expect(check?.message).toContain('host');
-    expect(check?.message).toContain('stale.example.test');
-    expect(check?.message).toContain('ftp.example.test');
+    expect(check?.message).not.toContain('stale.example.test');
+    expect(check?.message).not.toContain('ftp.example.test');
     expect(check?.message).toContain('remote_root');
+    expect(check?.message).toContain('/old_html');
     expect(check?.message).not.toContain('user');
   });
 
@@ -184,7 +186,7 @@ describe('buildSetupStatus', () => {
         bootstrap: { ...bootstrapOk, config: 'existing' },
         settings: settingsOk,
       }),
-      readProfile: async () => undefined,
+      readProfile: async () => ({ kind: 'no-profile' as const }),
     });
     const check = report.checks.find((entry) => entry.id === 'config_match');
 
@@ -220,7 +222,7 @@ describe('buildSetupStatus', () => {
   });
 
   it('fails backup_key when no key is stored in the keychain', async () => {
-    const report = await buildSetupStatus({ ...happy, backupKeyExists: async () => false });
+    const report = await buildSetupStatus({ ...happy, backupKeyStatus: async () => 'missing' });
     const check = report.checks.find((entry) => entry.id === 'backup_key');
 
     expect(report.ok).toBe(false);
@@ -233,9 +235,9 @@ describe('buildSetupStatus', () => {
     const report = await buildSetupStatus({
       ...happy,
       // The report claims the key was created; the keychain says otherwise.
-      backupKeyExists: async (service, account) => {
+      backupKeyStatus: async (service: string, account: string) => {
         calls.push([service, account]);
-        return false;
+        return 'missing' as const;
       },
     });
 
@@ -252,10 +254,174 @@ describe('buildSetupStatus', () => {
   it('never leaks the confirm phrase through the new checks', async () => {
     const report = await buildSetupStatus({
       ...happy,
-      backupKeyExists: async () => false,
-      readProfile: async () => ({ ...profileOk, host: 'stale.example.test' }),
+      backupKeyStatus: async () => 'missing' as const,
+      readProfile: async () => ({
+        kind: 'ok' as const,
+        profile: { ...profileOk, host: 'stale.example.test' },
+      }),
     });
     expect(JSON.stringify(report)).not.toContain(phrase);
+  });
+
+  // --- Codex 独立レビュー HIGH-1: redaction 契約 ---
+
+  it('never puts host / user / keychain_service values in a config_match failure', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      readProfile: async () => ({
+        kind: 'ok' as const,
+        profile: {
+          ...profileOk,
+          host: 'leaked.example.test',
+          user: 'leaked-account',
+          keychain_service: 'aiftp:leaked-production',
+        },
+      }),
+    });
+    const serialized = JSON.stringify(report);
+
+    // The v0.12 redaction contract forbids host / user / keychain_service on
+    // the wire. Both sides of the comparison must stay off it -- the expected
+    // value is just as much a credential as the actual one.
+    for (const secret of [
+      'leaked.example.test',
+      'leaked-account',
+      'aiftp:leaked-production',
+      'ftp.example.test',
+      'deployer',
+      'aiftp:gwco-production',
+    ]) {
+      expect(serialized, `"${secret}" must not appear in the report`).not.toContain(secret);
+    }
+    // The operator still learns which fields are wrong.
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('host');
+    expect(check?.message).toContain('user');
+    expect(check?.message).toContain('keychain_service');
+  });
+
+  it('still shows both values for protocol and remote_root (deploy metadata, not credentials)', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      readProfile: async () => ({
+        kind: 'ok' as const,
+        profile: { ...profileOk, remote_root: '/old_html', protocol: 'ftp' },
+      }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('/old_html');
+    expect(check?.message).toContain('/public_html');
+    expect(check?.message).toContain('ftp');
+  });
+
+  // --- Codex 独立レビュー HIGH-2: fail-open ---
+
+  it('fails closed when the settings snapshot is present but incomplete', async () => {
+    // Reproduces the reported fail-open: a partial `settings` used to make
+    // every comparison skip, so a completely wrong .aiftp.toml reported pass.
+    const report = await buildSetupStatus({
+      ...happy,
+      startup: JSON.stringify({
+        bootstrap: bootstrapOk,
+        settings: { profileName: 'production', localRoot: '/abs/site' },
+      }),
+      readProfile: async () => ({
+        kind: 'ok' as const,
+        profile: {
+          host: 'wrong.example.test',
+          user: 'wrong-user',
+          protocol: 'ftp',
+          remote_root: '/wrong',
+          keychain_service: 'aiftp:gwco-production',
+        },
+      }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('extension-outdated');
+  });
+
+  it('fails when the report disagrees with itself about the profile name', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      startup: JSON.stringify({
+        bootstrap: bootstrapOk,
+        settings: { ...settingsOk, profileName: 'staging' },
+      }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('report-inconsistent');
+  });
+
+  it('fails when the config path does not sit inside the configured site folder', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      startup: JSON.stringify({
+        bootstrap: bootstrapOk,
+        settings: { ...settingsOk, localRoot: '/somewhere/else' },
+      }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('report-inconsistent');
+  });
+
+  // --- Codex 独立レビュー MEDIUM-3: 鍵の実質検証 ---
+
+  it('fails backup_key when the stored key is not valid 32-byte material', async () => {
+    const report = await buildSetupStatus({ ...happy, backupKeyStatus: async () => 'invalid' });
+    const check = report.checks.find((entry) => entry.id === 'backup_key');
+
+    expect(report.ok).toBe(false);
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('backup-key-invalid');
+    // Recovery must warn that re-creating the key abandons old snapshots.
+    expect(check?.hint).toContain('復元できなくなります');
+  });
+
+  it('distinguishes an unreadable keychain from a missing key', async () => {
+    const report = await buildSetupStatus({ ...happy, backupKeyStatus: async () => 'unreadable' });
+    const check = report.checks.find((entry) => entry.id === 'backup_key');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('backup-key-unreadable');
+    expect(check?.message).not.toContain('not stored');
+  });
+
+  // --- Codex 独立レビュー LOW: missing / unreadable / invalid の分離 ---
+
+  it('never tells the operator to delete .aiftp.toml when it cannot be parsed', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      readProfile: async () => ({ kind: 'invalid' as const }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('config-invalid');
+    expect(check?.hint).not.toContain('削除');
+  });
+
+  it('reports an unreadable config separately from a missing profile', async () => {
+    const report = await buildSetupStatus({
+      ...happy,
+      readProfile: async () => ({ kind: 'unreadable' as const }),
+    });
+    const check = report.checks.find((entry) => entry.id === 'config_match');
+
+    expect(check?.status).toBe('fail');
+    expect(check?.message).toContain('config-unreadable');
+    expect(check?.hint).not.toContain('削除');
   });
 
   it('surfaces a startup error as the bootstrap check failure', async () => {

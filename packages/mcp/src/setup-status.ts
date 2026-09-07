@@ -1,4 +1,4 @@
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { CONFIRM_PHRASE_REQUIREMENT_JA, isUsableConfirmPhrase } from './confirm-phrase.js';
 
@@ -30,30 +30,52 @@ export interface SetupProfileSnapshot {
   readonly keychain_service: string;
 }
 
+/**
+ * Why this is a discriminated union rather than `SetupProfileSnapshot |
+ * undefined`: collapsing "no such profile", "cannot read the file" and "the
+ * TOML does not parse" into one value made the check tell a non-technical
+ * operator that their profile was missing -- and the old hint invited them to
+ * delete a `.aiftp.toml` they may have hand-written. Each cause now gets its
+ * own message and its own recovery.
+ */
+export type SetupProfileRead =
+  | { readonly kind: 'ok'; readonly profile: SetupProfileSnapshot }
+  | { readonly kind: 'no-profile' }
+  | { readonly kind: 'unreadable' }
+  | { readonly kind: 'invalid' };
+
+/**
+ * `ok` means the keychain holds material that can actually decrypt a backup:
+ * present is not enough. A truncated or corrupted entry passes an existence
+ * check and then fails at the first push, which is the worst moment to learn
+ * about it. The key value itself never crosses this boundary -- only the
+ * verdict does -- so it cannot reach a tool response.
+ */
+export type BackupKeyStatus = 'ok' | 'missing' | 'invalid' | 'unreadable';
+
 export interface SetupStatusDeps {
   readonly startup: string | undefined;
   readonly confirmPhrase: string | undefined;
   readonly pathExists: (path: string) => Promise<boolean>;
   /**
    * Reads the bootstrap-owned fields out of the profile actually present in
-   * `.aiftp.toml` right now, or `undefined` when that profile block does not
-   * exist. Resolves the blind spot in `reconcileOwnedFields`
+   * `.aiftp.toml` right now. Resolves the blind spot in `reconcileOwnedFields`
    * (`packages/core/src/bootstrap/index.ts`): a config file with no matching
    * profile is left untouched and reported as `existing`, so without this
    * read every check can pass while the config points somewhere else.
    */
-  readonly readProfile: (
-    configPath: string,
-    profileName: string,
-  ) => Promise<SetupProfileSnapshot | undefined>;
+  readonly readProfile: (configPath: string, profileName: string) => Promise<SetupProfileRead>;
   /**
-   * Whether the AES-256-GCM backup key is actually in the OS keychain.
-   * Measured the same way `siteRegistered` is — a real read, not a field
-   * copied out of the startup report — because a key the report claims was
-   * created can still be absent (deleted by hand, different keychain, a
-   * keychain write that failed after the report was written).
+   * Verdict on the AES-256-GCM backup key. Measured the same way
+   * `siteRegistered` is — a real read, not a field copied out of the startup
+   * report — because a key the report claims was created can still be absent
+   * or unusable (deleted by hand, different keychain, a keychain write that
+   * failed after the report was written, a truncated value).
    */
-  readonly backupKeyExists: (keychainService: string, profileName: string) => Promise<boolean>;
+  readonly backupKeyStatus: (
+    keychainService: string,
+    profileName: string,
+  ) => Promise<BackupKeyStatus>;
   /**
    * Whether `siteName` is actually present in the fleet registry, pointing
    * at `projectDir`. Backed by a real registry read (see
@@ -183,6 +205,142 @@ function startupNotice(startedAt: string | undefined): string | undefined {
   return `この設定は ${startedAt} に読み込まれたものです。それ以降に${SETTINGS} を変更した場合、変更はまだ反映されていません。${RESTART}`;
 }
 
+/**
+ * Fields whose *values* the v0.12 redaction contract keeps off the wire
+ * ("MCP responses MUST NOT expose: host, user, port, password,
+ * keychain_service, account, ssh_key_path"). A mismatch on one of these
+ * reports the field name only -- naming the field is what the operator needs
+ * to act, and neither side of the comparison is safe to print. Partial values
+ * and hashes are no better: these are low-entropy strings an observer could
+ * confirm by guessing.
+ */
+const REDACTED_MATCH_FIELDS: ReadonlySet<string> = new Set(['host', 'user', 'keychain_service']);
+
+function configMatchFail(message: string, hint: string): SetupCheck {
+  return { id: 'config_match', status: 'fail', message, hint };
+}
+
+async function buildConfigMatchCheck(
+  deps: SetupStatusDeps,
+  boot: z.infer<typeof bootstrapResultSchema>,
+  settings: z.infer<typeof settingsSchema>,
+  profileName: string,
+  projectDir: string,
+): Promise<SetupCheck> {
+  // The report is written by a separate process into an environment variable,
+  // so it is untrusted input. Before comparing anything, check that it agrees
+  // with itself -- a report whose two halves describe different sites cannot
+  // support any conclusion about the config.
+  if (settings.profileName !== undefined && settings.profileName !== profileName) {
+    return configMatchFail(
+      'report-inconsistent: the startup report names two different profiles',
+      REINSTALL,
+    );
+  }
+  if (settings.localRoot !== undefined && resolve(settings.localRoot) !== resolve(projectDir)) {
+    return configMatchFail(
+      'report-inconsistent: the config path is not inside the configured site folder',
+      REINSTALL,
+    );
+  }
+
+  // Every field must carry an expected value. Skipping absent ones (the
+  // previous behaviour) fails OPEN: a report supplying only `profileName`
+  // made all five comparisons vanish and reported a completely wrong config
+  // as matching. A `settings` object that is present but partial means the
+  // installed extension is not the one this server expects.
+  const comparisons: ReadonlyArray<readonly [string, string | undefined, string | undefined]> = [
+    ['host', settings.host, undefined],
+    ['user', settings.username, undefined],
+    ['protocol', settings.protocol, undefined],
+    ['remote_root', settings.remoteRoot, undefined],
+    ['keychain_service', boot.keychainService, undefined],
+  ];
+  const absent = comparisons.filter(([, expected]) => expected === undefined).map(([name]) => name);
+  if (absent.length > 0) {
+    return configMatchFail(
+      `extension-outdated: the settings snapshot is incomplete (missing: ${absent.join(', ')})`,
+      REINSTALL,
+    );
+  }
+
+  const read = await deps.readProfile(boot.configPath, profileName);
+  if (read.kind === 'unreadable') {
+    return configMatchFail(
+      'config-unreadable: .aiftp.toml exists but could not be read',
+      `.aiftp.toml を読み取れませんでした。ファイルのアクセス権を確認したうえで、${RESTART}`,
+    );
+  }
+  if (read.kind === 'invalid') {
+    // Never suggest deleting the file: it may be hand-written and hold
+    // settings nothing else knows about.
+    return configMatchFail(
+      'config-invalid: .aiftp.toml is not valid TOML',
+      `.aiftp.toml の書式が壊れています。直近の編集を元に戻すか、書式を修正したうえで、${RESTART}`,
+    );
+  }
+  if (read.kind === 'no-profile') {
+    return configMatchFail(
+      `config-mismatch: .aiftp.toml has no profile "${profileName}"`,
+      `.aiftp.toml に [profile.${profileName}] がないため、${SETTINGS} の設定が反映されていません。[profile.${profileName}] を追加するか、設定のプロファイル名を .aiftp.toml に合わせたうえで、${RESTART}`,
+    );
+  }
+
+  const profile = read.profile;
+  const actual: Record<string, string> = {
+    host: profile.host,
+    user: profile.user,
+    protocol: profile.protocol,
+    remote_root: profile.remote_root,
+    keychain_service: profile.keychain_service,
+  };
+  const mismatches = comparisons
+    .filter(([field, expected]) => expected !== actual[field])
+    .map(([field, expected]) =>
+      REDACTED_MATCH_FIELDS.has(field)
+        ? `${field}: differs (値は伏せています)`
+        : `${field}: .aiftp.toml="${actual[field]}" / 設定="${expected}"`,
+    );
+
+  return mismatches.length === 0
+    ? { id: 'config_match', status: 'pass', message: '.aiftp.toml matches the extension settings' }
+    : configMatchFail(
+        `config-mismatch: ${mismatches.join('; ')}`,
+        `.aiftp.toml が${SETTINGS} の設定と一致していません。どちらか正しい方に揃えたうえで、${RESTART}`,
+      );
+}
+
+function backupKeyCheck(status: BackupKeyStatus, profileName: string): SetupCheck {
+  switch (status) {
+    case 'ok':
+      return { id: 'backup_key', status: 'pass', message: 'backup key stored in the OS keychain' };
+    case 'unreadable':
+      return {
+        id: 'backup_key',
+        status: 'fail',
+        message: 'backup-key-unreadable: the keychain entry could not be read',
+        hint: `バックアップ用の暗号鍵をキーチェーンから読み取れませんでした。キーチェーンへのアクセスを許可したうえで、${RESTART}`,
+      };
+    case 'invalid':
+      // Recreating the key is the only fix, and it is irreversible for any
+      // snapshot encrypted with the old one -- say so rather than handing
+      // over a command that quietly destroys recoverability.
+      return {
+        id: 'backup_key',
+        status: 'fail',
+        message: 'backup-key-invalid: the stored value is not a usable 32-byte key',
+        hint: `バックアップ用の暗号鍵が壊れています。ターミナルで \`aiftp backup init --profile ${profileName} --force\` を実行すると作り直せますが、**この鍵で暗号化済みの過去のバックアップは復元できなくなります**。`,
+      };
+    default:
+      return {
+        id: 'backup_key',
+        status: 'fail',
+        message: 'bootstrap-incomplete: backup key not stored',
+        hint: `バックアップ用の暗号鍵が OS キーチェーンにありません。キーチェーンへのアクセスを許可したうえで、${RESTART}`,
+      };
+  }
+}
+
 export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStatusReport> {
   const parsedJson = parseStartupJson(deps.startup);
   if (parsedJson === undefined) {
@@ -308,46 +466,7 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
       hint: REINSTALL,
     });
   } else {
-    const profile = await deps.readProfile(boot.configPath, profileName);
-    if (profile === undefined) {
-      checks.push({
-        id: 'config_match',
-        status: 'fail',
-        message: `config-mismatch: .aiftp.toml has no profile "${profileName}"`,
-        hint: `.aiftp.toml に [profile.${profileName}] がないため、${SETTINGS} の設定が反映されていません。.aiftp.toml を削除するか [profile.${profileName}] を追加したうえで、${RESTART}`,
-      });
-    } else {
-      // Only fields the settings form actually supplied are compared: an
-      // absent expected value means "nothing to check", never "mismatch".
-      // None of these five are credentials, so both values can be shown --
-      // an operator cannot fix a mismatch they are not allowed to see.
-      const comparisons: ReadonlyArray<readonly [string, string | undefined, string]> = [
-        ['host', settings.host, profile.host],
-        ['user', settings.username, profile.user],
-        ['protocol', settings.protocol, profile.protocol],
-        ['remote_root', settings.remoteRoot, profile.remote_root],
-        ['keychain_service', boot.keychainService, profile.keychain_service],
-      ];
-      const mismatches = comparisons
-        .filter(([, expected, actual]) => expected !== undefined && expected !== actual)
-        .map(
-          ([field, expected, actual]) => `${field}: .aiftp.toml="${actual}" / 設定="${expected}"`,
-        );
-      checks.push(
-        mismatches.length === 0
-          ? {
-              id: 'config_match',
-              status: 'pass',
-              message: '.aiftp.toml matches the extension settings',
-            }
-          : {
-              id: 'config_match',
-              status: 'fail',
-              message: `config-mismatch: ${mismatches.join('; ')}`,
-              hint: `.aiftp.toml が${SETTINGS} の設定と一致していません。どちらか正しい方に揃えたうえで、${RESTART}`,
-            },
-      );
-    }
+    checks.push(await buildConfigMatchCheck(deps, boot, settings, profileName, projectDir));
   }
 
   checks.push(
@@ -373,14 +492,7 @@ export async function buildSetupStatus(deps: SetupStatusDeps): Promise<SetupStat
     });
   } else {
     checks.push(
-      (await deps.backupKeyExists(boot.keychainService, profileName))
-        ? { id: 'backup_key', status: 'pass', message: 'backup key stored in the OS keychain' }
-        : {
-            id: 'backup_key',
-            status: 'fail',
-            message: 'bootstrap-incomplete: backup key not stored',
-            hint: `バックアップ用の暗号鍵が OS キーチェーンにありません。キーチェーンへのアクセスを許可したうえで、${RESTART}`,
-          },
+      backupKeyCheck(await deps.backupKeyStatus(boot.keychainService, profileName), profileName),
     );
   }
 

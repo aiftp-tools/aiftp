@@ -20,6 +20,15 @@ Release tags live in the GitHub repository:
 - **bootstrap がバックアップ暗号化鍵を自動生成するようになった** — Claude Desktop 拡張だけで完結するようになり、ターミナルでの `aiftp backup init` は不要。**既存の鍵は絶対に上書きしない**（上書きは過去スナップショットを復号不能にする不可逆操作のため、`aiftp backup init --force` に限定）。キーチェーン書き込みに失敗してもサーバーの起動は止めず、`setup_status` の `backup_key` に `fail` として現れる。
 - **`aiftp_setup_status` が設定の読み込み時刻を `notice` として常時表示するようになった** — 拡張機能の設定は起動時の値だけが使われ、動作中の変更は反映されない。表示時刻より後に設定を触っていれば Claude Desktop の再起動が必要だと分かる。
 
+### Fixed
+
+Codex による独立レビュー（2026-09-07）の指摘に対応。
+
+- **[HIGH] `config_match` が host / user / keychain_service の実値をツール応答に出していた** — v0.12 の redaction 契約（`MCP responses MUST NOT expose: host, user, port, password, keychain_service, account, ssh_key_path`）違反。この 3 項目は**項目名だけを報告し、値は両側とも出さない**ようにした（低エントロピーなので部分表示・ハッシュも不可）。`protocol` / `remote_root` は契約上許可されているため従来どおり両方の値を表示する
+- **[HIGH] 部分的な `settings` で `config_match` が fail-open していた** — 期待値が欠けている項目を比較からスキップしていたため、`settings` に `profileName` だけを持つ起動レポートを渡すと **`.aiftp.toml` が全項目誤りでも `pass`** になった。`settings` が存在する場合は全項目を必須とし、欠けていれば `extension-outdated` として fail する。あわせて起動レポート自身の整合性（`profileName` の一致、`configPath` が設定のサイトフォルダ配下にあること）も検証する
+- **[MEDIUM] `backup_key` が存在確認だけだった** — 空でない不正な文字列や壊れた Base64 も `pass` になり、最初のバックアップで失敗していた。厳密な Base64 判定とデコード後 32 バイトの検証を追加（鍵の値は応答に出さず、判定結果のみを返す）。作り直しを促す場合は**過去のバックアップが復元できなくなる**ことを明示する
+- **[LOW] `.aiftp.toml` の「不存在」「読めない」「TOML として壊れている」を区別していなかった** — すべて「プロファイルが無い」と診断し、**hint がファイルの削除を勧めていた**（手書き設定を失わせる恐れ）。原因ごとに `config-unreadable` / `config-invalid` / `config-mismatch` を分け、削除を勧めないようにした
+
 ---
 
 ## [0.13.0] — 2026-08-15
