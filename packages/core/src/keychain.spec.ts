@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { ExecFn } from './keychain.js';
 import {
   KeychainError,
   KeychainNotFoundError,
   KeychainPlatformError,
+  createDarwinKeychainBackend,
   deletePassword,
   getPassword,
   hasPassword,
@@ -52,6 +54,77 @@ afterEach(async () => {
       // Already deleted by the test itself — ignore.
     }
   }
+});
+
+describe('createDarwinKeychainBackend: setPassword keeps the secret out of argv', () => {
+  // Not a real credential — a fixture used to prove the value never reaches argv.
+  const fixtureValue = 'fixture-only-not-real-p@ss';
+  const encoded = `aiftp-v1:${Buffer.from(fixtureValue, 'utf8').toString('base64')}`;
+
+  function recordingExec(): {
+    exec: ExecFn;
+    calls: Array<{ cmd: string; args: readonly string[]; stdin?: string }>;
+  } {
+    const calls: Array<{ cmd: string; args: readonly string[]; stdin?: string }> = [];
+    const exec: ExecFn = async (cmd, args, options) => {
+      calls.push({ cmd, args, ...(options?.stdin === undefined ? {} : { stdin: options.stdin }) });
+      return { stdout: '', stderr: '', code: 0 };
+    };
+    return { exec, calls };
+  }
+
+  it('spawns `security -i` and sends the whole command on stdin', async () => {
+    const { exec, calls } = recordingExec();
+
+    await createDarwinKeychainBackend(exec).setPassword('svc', 'account', fixtureValue);
+
+    const call = calls[0];
+    // Only `-i` reaches the process list; everything else, secret included,
+    // travels on stdin.
+    expect(call?.args).toEqual(['-i']);
+    for (const arg of call?.args ?? []) {
+      expect(arg).not.toContain(fixtureValue);
+      expect(arg).not.toContain(encoded);
+    }
+    expect(call?.stdin).toContain('add-generic-password');
+    expect(call?.stdin).toContain('-U');
+    expect(call?.stdin).toContain(encoded);
+  });
+
+  it('quotes the service and account so neither can inject extra arguments', async () => {
+    const { exec, calls } = recordingExec();
+
+    // `security -i` parses its stdin into arguments, which the previous argv
+    // form never did — so an unquoted site name could smuggle in a flag.
+    await createDarwinKeychainBackend(exec).setPassword('svc -w INJECTED', 'acct -A', fixtureValue);
+
+    expect(calls[0]?.stdin).toContain('"svc -w INJECTED"');
+    expect(calls[0]?.stdin).toContain('"acct -A"');
+  });
+
+  it('refuses a service or account that could break out of the quoting', async () => {
+    const { exec, calls } = recordingExec();
+    const backend = createDarwinKeychainBackend(exec);
+
+    for (const bad of ['svc"evil', 'svc\\evil', 'svc\nevil']) {
+      await expect(backend.setPassword(bad, 'account', fixtureValue)).rejects.toBeInstanceOf(
+        KeychainError,
+      );
+      await expect(backend.setPassword('svc', bad, fixtureValue)).rejects.toBeInstanceOf(
+        KeychainError,
+      );
+    }
+    // Nothing was spawned for any of the rejected inputs.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports a failed write as a KeychainError', async () => {
+    const exec: ExecFn = async () => ({ stdout: '', stderr: 'boom', code: 45 });
+
+    await expect(
+      createDarwinKeychainBackend(exec).setPassword('svc', 'account', fixtureValue),
+    ).rejects.toThrow(/Failed to store Keychain entry/u);
+  });
 });
 
 describe('keychain: argument validation (cross-platform)', () => {

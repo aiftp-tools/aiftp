@@ -5,6 +5,7 @@ import { KeychainNotFoundError, createWindowsKeychainBackend } from './keychain.
 interface ExecCall {
   cmd: string;
   args: readonly string[];
+  stdin?: string;
 }
 
 function makeExec(responses: Record<string, ExecResult | (() => ExecResult)>): {
@@ -12,8 +13,8 @@ function makeExec(responses: Record<string, ExecResult | (() => ExecResult)>): {
   calls: ExecCall[];
 } {
   const calls: ExecCall[] = [];
-  const exec: ExecFn = async (cmd, args) => {
-    calls.push({ cmd, args });
+  const exec: ExecFn = async (cmd, args, options) => {
+    calls.push({ cmd, args, ...(options?.stdin === undefined ? {} : { stdin: options.stdin }) });
     const key = `${cmd} ${args[0] ?? ''}`;
     const candidate = responses[key] ?? responses[cmd];
     if (!candidate) {
@@ -27,32 +28,45 @@ function makeExec(responses: Record<string, ExecResult | (() => ExecResult)>): {
 const success: ExecResult = { stdout: '', stderr: '', code: 0 };
 
 describe('createWindowsKeychainBackend: setPassword', () => {
-  it('invokes cmdkey /generic with the joined target name and base64-encoded password', async () => {
-    const { exec, calls } = makeExec({ cmdkey: success });
+  // Not a real credential — a fixture used to prove the value never reaches argv.
+  const fixtureValue = 'fixture-only-not-real-p@ss';
+
+  it('never puts the secret in the command line, and sends it on stdin instead', async () => {
+    const { exec, calls } = makeExec({ powershell: success });
     const backend = createWindowsKeychainBackend(exec);
 
-    await backend.setPassword('aiftp:production', 'deploy', 'p@ssw0rd!');
+    await backend.setPassword('aiftp:production', 'deploy', fixtureValue);
 
     expect(calls).toHaveLength(1);
     const call = calls[0];
-    expect(call?.cmd.toLowerCase()).toContain('cmdkey');
     const args = call?.args ?? [];
-    // Target name: <service>:<account>
-    expect(args.some((a) => a.startsWith('/generic:aiftp:production:deploy'))).toBe(true);
-    expect(args.some((a) => a.startsWith('/user:deploy'))).toBe(true);
-    // Password stored using the aiftp-v1 base64 envelope, same as macOS.
-    const passArg = args.find((a) => a.startsWith('/pass:'));
-    expect(passArg).toBeDefined();
-    expect(passArg).toContain('aiftp-v1:');
+    const encoded = `aiftp-v1:${Buffer.from(fixtureValue, 'utf8').toString('base64')}`;
+
+    // Anything in argv is world-readable from the process list for as long as
+    // the child lives. Neither the raw value nor its storage envelope may
+    // appear there — the envelope is reversible base64, not a secret.
+    for (const arg of args) {
+      expect(arg).not.toContain(fixtureValue);
+      expect(arg).not.toContain(encoded);
+    }
+    expect(args.some((a) => a.startsWith('/pass:'))).toBe(false);
+
+    // It travels on stdin, in the same aiftp-v1 envelope as before, with no
+    // trailing newline the reader would have to strip.
+    expect(call?.stdin).toBe(encoded);
+    // The target still has to reach the script somehow — via argv is fine,
+    // it is not a credential.
+    expect(args.join(' ')).toContain('aiftp:production:deploy');
   });
 
-  it('throws KeychainError on cmdkey non-zero exit', async () => {
+  it('reports a failed write as a KeychainError', async () => {
     const { exec } = makeExec({
-      cmdkey: { stdout: '', stderr: 'CMDKEY: Access denied', code: 1 },
+      powershell: { stdout: '', stderr: 'CredWrite failed: 5', code: 1 },
     });
     const backend = createWindowsKeychainBackend(exec);
-    await expect(backend.setPassword('svc', 'acc', 'pw')).rejects.toThrow(
-      /Access denied|Failed to store/,
+
+    await expect(backend.setPassword('aiftp:production', 'deploy', fixtureValue)).rejects.toThrow(
+      /Failed to store Credential Manager entry/u,
     );
   });
 });

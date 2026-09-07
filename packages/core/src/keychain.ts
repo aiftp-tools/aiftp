@@ -80,7 +80,22 @@ export interface ExecResult {
   code: number;
 }
 
-export type ExecFn = (cmd: string, args: readonly string[]) => Promise<ExecResult>;
+/**
+ * `stdin` exists so secrets never travel in `args`. Anything on a command
+ * line is readable from the process list (`ps`, Task Manager, any local
+ * process) for as long as the child runs, and may be captured by process
+ * accounting or an EDR agent. Existing injected fakes that ignore the third
+ * parameter keep working unchanged.
+ */
+export interface ExecOptions {
+  readonly stdin?: string;
+}
+
+export type ExecFn = (
+  cmd: string,
+  args: readonly string[],
+  options?: ExecOptions,
+) => Promise<ExecResult>;
 
 export interface KeychainBackend {
   setPassword(service: string, account: string, password: string): Promise<void>;
@@ -103,7 +118,7 @@ function isExecError(error: unknown): error is ExecError {
  * tests substitute a stub exec while keeping the backend logic pure.
  */
 function defaultExec(): ExecFn {
-  return async (cmd, args) => {
+  return async (cmd, args, options) => {
     // v0.12.4: fail closed when a test forgot to inject a fake keychain.
     // Reaching the real OS keychain from a unit test spawns `security`
     // (macOS) or `powershell` + `Add-Type -TypeDefinition` (Windows, which
@@ -122,7 +137,19 @@ function defaultExec(): ExecFn {
       );
     }
     try {
-      const { stdout, stderr } = await execFileAsync(cmd, [...args], { maxBuffer: MAX_BUFFER });
+      const pending = execFileAsync(cmd, [...args], { maxBuffer: MAX_BUFFER });
+      if (options?.stdin !== undefined) {
+        // `promisify(execFile)` exposes the spawned child on the returned
+        // promise, which is the only way to reach its stdin. Closing the
+        // stream is required: `security` waits on its prompt forever
+        // otherwise. An EPIPE here means the child exited first — its exit
+        // code is the real error, so do not mask it by rejecting on the
+        // write.
+        const child = (pending as unknown as { child?: { stdin?: NodeJS.WritableStream } }).child;
+        child?.stdin?.on('error', () => undefined);
+        child?.stdin?.end(options.stdin);
+      }
+      const { stdout, stderr } = await pending;
       return { stdout, stderr, code: 0 };
     } catch (error: unknown) {
       if (isExecError(error)) {
@@ -141,6 +168,30 @@ function defaultExec(): ExecFn {
 // macOS backend (security command)
 // ---------------------------------------------------------------------------
 
+/**
+ * `security -i` splits its input into arguments and honours double quotes,
+ * so every field is quoted. Values that could end the quoted run are refused
+ * outright rather than escaped: a service is always `aiftp:<site>-<profile>`
+ * and an account is an FTP username, so none of these characters is ever
+ * legitimate, and a reject is easier to reason about than an escape table.
+ */
+function isSecurityInteractiveSafe(value: string): boolean {
+  // Checked by code point rather than by regex: a character class would have
+  // to spell out the control range, which is exactly what this rejects.
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (character === '"' || character === '\\' || code < 0x20) return false;
+  }
+  return true;
+}
+
+function quoteForSecurityInteractive(value: string, name: string): string {
+  if (!isSecurityInteractiveSafe(value)) {
+    throw new KeychainError(`${name} must not contain quotes, backslashes or control characters`);
+  }
+  return `"${value}"`;
+}
+
 export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
   return {
     async setPassword(service, account, password) {
@@ -149,16 +200,30 @@ export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
       if (typeof password !== 'string') {
         throw new KeychainError('password must be a string');
       }
-      const result = await exec(SECURITY_BIN, [
-        'add-generic-password',
-        '-s',
-        service,
-        '-a',
-        account,
-        '-w',
-        encodeStored(password),
-        '-U',
-      ]);
+      // `security -i` reads whole commands from stdin, so nothing on this
+      // line — the password included — ever appears in the process list.
+      //
+      // Rejected alternative: `-w` with no value, which puts `security` into
+      // prompting mode and also reads from stdin. Measured on macOS 25.6:
+      // the prompt **silently truncates at 128 bytes** (a 1024-char password
+      // came back as 89 chars), which would store a wrong password and lock
+      // the user out with no error. `-i` has no such limit.
+      //
+      // The cost of `-i` is that it parses arguments, which the previous argv
+      // form did not: an unquoted service or account could smuggle in a flag.
+      // Hence quoting plus a hard reject below.
+      const result = await exec(SECURITY_BIN, ['-i'], {
+        stdin: `${[
+          'add-generic-password',
+          '-s',
+          quoteForSecurityInteractive(service, 'service'),
+          '-a',
+          quoteForSecurityInteractive(account, 'account'),
+          '-U',
+          '-w',
+          quoteForSecurityInteractive(encodeStored(password), 'password'),
+        ].join(' ')}\n`,
+      });
       if (result.code !== 0) {
         throw new KeychainError(
           `Failed to store Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
@@ -211,7 +276,7 @@ export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Windows backend (cmdkey for write/delete, PowerShell + Win32 CredRead for read)
+// Windows backend (PowerShell + Win32 CredWrite/CredRead; cmdkey only for delete)
 // ---------------------------------------------------------------------------
 
 const CMDKEY_BIN = 'cmdkey';
@@ -278,6 +343,65 @@ if ($result -eq $null) { exit 0 }
 [Console]::Out.Write($result)
 `;
 
+/**
+ * PowerShell script that writes the credential via Win32 `CredWrite`, taking
+ * the secret from **stdin** rather than from the command line.
+ *
+ * This replaces `cmdkey /pass:<value>`, which had no stdin form and therefore
+ * put the password — and, since v0.13.1, the AES backup key — in the process
+ * list for the lifetime of the child.
+ *
+ * `$target` and `$user` are bound by the preamble prepended before sending;
+ * neither is a credential. `Encoding.Unicode` matches PS_CRED_READ_SCRIPT and
+ * what `cmdkey` itself wrote, so entries created by either remain readable.
+ */
+const PS_CRED_WRITE_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class AiftpCredWriter {
+  [DllImport("Advapi32.dll", SetLastError=true, EntryPoint="CredWriteW", CharSet=CharSet.Unicode)]
+  private static extern bool CredWrite([In] ref CREDENTIAL userCredential, [In] uint flags);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public uint Flags;
+    public uint Type;
+    public string TargetName;
+    public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public uint CredentialBlobSize;
+    public IntPtr CredentialBlob;
+    public uint Persist;
+    public uint AttributeCount;
+    public IntPtr Attributes;
+    public string TargetAlias;
+    public string UserName;
+  }
+  public static void Write(string target, string user, string secret) {
+    byte[] bytes = Encoding.Unicode.GetBytes(secret);
+    IntPtr blob = Marshal.AllocHGlobal(bytes.Length);
+    try {
+      Marshal.Copy(bytes, 0, blob, bytes.Length);
+      CREDENTIAL cred = new CREDENTIAL();
+      cred.Type = 1;
+      cred.TargetName = target;
+      cred.CredentialBlobSize = (uint)bytes.Length;
+      cred.CredentialBlob = blob;
+      cred.Persist = 2;
+      cred.UserName = user;
+      if (!CredWrite(ref cred, 0)) {
+        throw new Exception("CredWrite failed: " + Marshal.GetLastWin32Error());
+      }
+    } finally { Marshal.FreeHGlobal(blob); }
+  }
+}
+"@
+$secret = [Console]::In.ReadToEnd().TrimEnd([char]13, [char]10)
+[AiftpCredWriter]::Write($target, $user, $secret)
+`;
+
 function escapePowerShellSingleQuoted(value: string): string {
   return value.replace(/'/gu, "''");
 }
@@ -291,11 +415,14 @@ export function createWindowsKeychainBackend(exec: ExecFn): KeychainBackend {
         throw new KeychainError('password must be a string');
       }
       const target = windowsTarget(service, account);
-      const result = await exec(CMDKEY_BIN, [
-        `/generic:${target}`,
-        `/user:${account}`,
-        `/pass:${encodeStored(password)}`,
-      ]);
+      const preamble = `$target = '${escapePowerShellSingleQuoted(target)}'\n$user = '${escapePowerShellSingleQuoted(account)}'\n`;
+      // The secret goes on stdin; only the target and user (neither a
+      // credential) reach the command line.
+      const result = await exec(
+        POWERSHELL_BIN,
+        ['-NoProfile', '-NonInteractive', '-Command', `${preamble}${PS_CRED_WRITE_SCRIPT}`],
+        { stdin: encodeStored(password) },
+      );
       if (result.code !== 0) {
         throw new KeychainError(
           `Failed to store Credential Manager entry for service='${service}' account='${account}': ${result.stderr.trim() || result.stdout.trim()}`,
