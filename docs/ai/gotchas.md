@@ -79,6 +79,12 @@
 - 制御文字（改行含む）は行指向プロトコル上エスケープできないので拒否する
 - **秘密値を stdin で渡すには `promisify(execFile)` の戻り値の `.child` を使う**（`child.stdin.end(値)`）。閉じないと `security` がプロンプトで待ち続ける。EPIPE は握りつぶす（子が先に終了しただけで、真の原因は終了コード側）
 
+## Windows へ `.ps1` を渡すとき（2026-09-07 実測・研修にも効く）
+
+- 🔴 **Windows PowerShell 5.1 は BOM 無し `.ps1` を ANSI（Shift-JIS）として読む** — UTF-8 で書いた日本語が化け、全角文字が引用符を飲み込んでパーサーごと壊れる。**純 ASCII で書く**（ASCII 範囲なら Shift-JIS と UTF-8 のバイト列は同一）か UTF-8 BOM を付ける。受講者へ `.ps1` を配る場面があれば同じ事故が起きる
+- 🔴 **PowerShell の中から `powershell -Command <文字列>` を呼ぶと引用符が剥がされる** — `Add-Type -TypeDefinition @"` が `@` になって C# が壊れた。**Node の `execFile` は argv を直接渡すのでこの問題は起きない**（製品の呼び出し経路は安全）。検証ハーネスで入れ子にすると「実装のバグ」に見える偽陽性が出るので、`-File` を使うか同一セッションで実行する
+- **検証スクリプトは実装から機械的に抽出する** — `createWindowsKeychainBackend` に記録用の `exec` を注入して実際に生成される args / stdin を捕まえ、それを埋め込む。手写しは実装とズレる
+
 ## 認証情報の実務知識（実測で判明）
 
 - 🔴 **Keychain 保存値は `aiftp-v1:` + base64**（`packages/core/src/keychain.ts` の `encodeStored`）。生値を `security -w` で読むと 530 になる
