@@ -79,6 +79,12 @@
 - 制御文字（改行含む）は行指向プロトコル上エスケープできないので拒否する
 - **秘密値を stdin で渡すには `promisify(execFile)` の戻り値の `.child` を使う**（`child.stdin.end(値)`）。閉じないと `security` がプロンプトで待ち続ける。EPIPE は握りつぶす（子が先に終了しただけで、真の原因は終了コード側）
 
+## 置き換えが破壊的な値の保存（2026-09-07）
+
+- 🔴 **`hasPassword()` + `setPassword()` は check-then-act で原子的でない** — 同時起動した 2 プロセスが双方「無い」と判断し、後勝ちで上書きしうる。**バックアップ鍵のように置き換えが不可逆な値には `createPasswordIfAbsent()` を使う**
+- ✅ **macOS は `-U` を外すだけで原子的な create-if-absent になる** — 重複時 `errSecDuplicateItem`（exit **45**。not-found の 44 と別）で拒否され、格納値は不変。10 並行実行で `created` が 1 件だけになることを実測
+- ⚠️ **Windows には同等の保証が無い** — `CredWrite` は常に上書き、`cmdkey` にも create-if-absent は無い。検査と書き込みを 1 プロセスにまとめて窓を狭めるのが現実解
+
 ## Windows へ `.ps1` を渡すとき（2026-09-07 実測・研修にも効く）
 
 - 🔴 **Windows PowerShell 5.1 は BOM 無し `.ps1` を ANSI（Shift-JIS）として読む** — UTF-8 で書いた日本語が化け、全角文字が引用符を飲み込んでパーサーごと壊れる。**純 ASCII で書く**（ASCII 範囲なら Shift-JIS と UTF-8 のバイト列は同一）か UTF-8 BOM を付ける。受講者へ `.ps1` を配る場面があれば同じ事故が起きる

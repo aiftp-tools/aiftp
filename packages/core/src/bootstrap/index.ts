@@ -5,7 +5,7 @@ import { appendProfileBlock, findProfileBlockRange, setProfileField } from '../c
 import { generateKey } from '../encryption.js';
 import { ensureGitignoreEntry } from '../init/gitignore.js';
 import { buildKeychainService } from '../init/keychain-name.js';
-import { hasPassword, setPassword } from '../keychain.js';
+import { createPasswordIfAbsent, hasPassword, setPassword } from '../keychain.js';
 import { SiteRegistry } from '../sites/registry.js';
 import {
   type BackupKeyOutcome,
@@ -82,6 +82,7 @@ export async function runBootstrap(
   const storeCredential = deps.storeCredential ?? setPassword;
   const credentialExists = deps.credentialExists ?? hasPassword;
   const createRegistry = deps.createRegistry ?? (() => new SiteRegistry());
+  const createBackupKeyIfAbsent = deps.createBackupKeyIfAbsent ?? createPasswordIfAbsent;
   const ensureGitignore =
     deps.ensureGitignore ?? ((cwd: string) => ensureGitignoreEntry(cwd, { requireGitRepo: true }));
 
@@ -204,16 +205,16 @@ export async function runBootstrap(
   //    A keychain failure here must not stop the server from starting
   //    (spec §5.1) — it is recorded and surfaced through
   //    `aiftp_setup_status`'s `backup_key` check instead.
+  //    Uses an atomic create-if-absent rather than "check, then write": the
+  //    latter is a check-then-act pair, and two launches racing through it
+  //    can both see "absent" and have the second write replace the first
+  //    process's key. On macOS the OS enforces this (errSecDuplicateItem);
+  //    on Windows the check and the write at least share one process.
   const backupKeyEntryService = backupKeyService(keychainService);
   let backupKey: BackupKeyOutcome;
   try {
-    if (await credentialExists(backupKeyEntryService, input.profileName)) {
-      backupKey = 'already-present';
-    } else {
-      const generate = deps.generateBackupKey ?? (() => generateKey().toString('base64'));
-      await storeCredential(backupKeyEntryService, input.profileName, generate());
-      backupKey = 'created';
-    }
+    const generate = deps.generateBackupKey ?? (() => generateKey().toString('base64'));
+    backupKey = await createBackupKeyIfAbsent(backupKeyEntryService, input.profileName, generate());
   } catch {
     backupKey = 'failed';
   }

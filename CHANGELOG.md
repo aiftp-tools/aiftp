@@ -37,7 +37,11 @@ Codex による独立レビュー（2026-09-07）の指摘に対応。
     - `-i` は引数を解釈するため、service / account を**引用**する（引用内ならフラグ風の文字列も値の一部として扱われることを実測）。引用符とバックスラッシュは**エスケープ**する — `-i` は引用内でもバックスラッシュを解釈するため、素で渡すと `DOMAIN\user` 形式のアカウントが `DOMAINuser` に化けて読み戻せなくなる。制御文字（改行含む）はエスケープ不能なので拒否する
   - **Windows**: `cmdkey` での書き込みをやめ、PowerShell + Win32 `CredWrite` へ変更し、秘密値を stdin で渡す。読み取り側の `CredRead` と同じ `Encoding.Unicode` を使うため、**`cmdkey` で保存済みの既存エントリもそのまま読める**。削除は引き続き `cmdkey`（対象名のみで秘密値を含まない）
   - 保存形式（`aiftp-v1:` + base64）は不変。既存の資格情報は再登録不要
-  - **Windows 実機で検証済み**（2026-09-07）— C# のコンパイル / `CredWrite` → `CredRead` の往復 / **`cmdkey` で作った既存エントリの読み取り** / 上書き / stdin 経由の受け渡し、の 5 点
+- **バックアップ鍵の生成が既存の鍵を上書きしなくなった**（Codex 独立レビュー MEDIUM 指摘）。従来は「存在確認 → 書き込み」の 2 段階だったため、2 つの Desktop プロセスが同時に起動すると双方が「鍵は無い」と判断し、後の書き込みが先に生成された鍵を置き換えうる（macOS の `-U` / Windows の `CredWrite` はどちらも上書き動作）。
+  - **macOS は OS レベルで原子的**: `add-generic-password` から `-U` を外すと、重複時に `errSecDuplicateItem`（exit 45）で拒否され、格納済みの値は変更されない。10 並行で実行しても `created` は 1 件だけになることを実キーチェーンで確認
+  - **Windows は 1 プロセス内で完結**: `CredWrite` に create-if-absent が無いため macOS と同じ保証は得られないが、検査と書き込みを 1 回の PowerShell 呼び出しにまとめ、複数プロセスが割り込む窓を消した
+  - 新 API `createPasswordIfAbsent()`。`hasPassword()` + `setPassword()` の組み合わせは、置き換えが破壊的な値には使わない
+- **Windows 実機で検証済み**（2026-09-07）— C# のコンパイル / `CredWrite` → `CredRead` の往復 / **`cmdkey` で作った既存エントリの読み取り** / 上書き / stdin 経由の受け渡し、の 5 点
 
 ---
 
