@@ -75,7 +75,7 @@ import {
   verifyConfirmation,
 } from './confirm-phrase.js';
 import { buildSetupPromptText } from './setup-prompt.js';
-import { buildSetupStatus } from './setup-status.js';
+import { type BackupKeyStatus, type SetupProfileRead, buildSetupStatus } from './setup-status.js';
 
 export { VERSION };
 
@@ -141,6 +141,12 @@ export interface AiftpMcpRuntime {
    * runtime and can exceed vitest's 5s timeout under CI load).
    */
   hasPassword?(service: string, account: string): Promise<boolean>;
+  /**
+   * v0.13.1: reads the backup key so `aiftp_setup_status` can verify it is
+   * usable, not merely present. Same injection rule as `hasPassword` — the
+   * default touches the real OS keychain, so tests MUST supply a fake.
+   */
+  getPassword?(service: string, account: string): Promise<string>;
 }
 
 export interface AiftpMcpOptions {
@@ -544,7 +550,7 @@ export const toolDescriptions = {
   aiftp_rollback_confirm:
     'Execute a prepared rollback: decrypt each file in the snapshot and upload it back to the configured remote_root. Hard-excluded files are NEVER re-uploaded (auth credentials). Requires acknowledge_deletions: true when the prepare step returned one or more plannedDeletes.',
   aiftp_setup_status:
-    'Report whether the Claude Desktop extension is correctly configured, as eight checks: bootstrap, project_dir, config_file, config_match, credential, backup_key, registry, confirm_phrase. Beyond presence, it verifies correctness: config_match re-reads .aiftp.toml and compares host / user / protocol / remote_root / keychain_service against the extension settings (catching a config bootstrap could not reconcile), and backup_key reads the OS keychain directly rather than trusting the startup report. A `notice` field reports when the settings were loaded, since edits made after that need a Claude Desktop restart. Each failing check carries a Japanese `hint`. Credentials are never surfaced. Read-only.',
+    'Report whether the Claude Desktop extension is correctly configured, as eight checks: bootstrap, project_dir, config_file, config_match, credential, backup_key, registry, confirm_phrase. Beyond presence, it verifies correctness: config_match re-reads .aiftp.toml and compares host / user / protocol / remote_root / keychain_service against the extension settings (catching a config bootstrap could not reconcile); a mismatch on host / user / keychain_service reports the field name only, never the values. backup_key reads the OS keychain directly rather than trusting the startup report, and verifies the stored value really is 32-byte key material. A `notice` field reports when the settings were loaded, since edits made after that need a Claude Desktop restart. Each failing check carries a Japanese `hint`. Credentials are never surfaced. Read-only.',
 } satisfies Record<AiftpToolName, string>;
 
 function projectPath(cwd: string, path: string): string {
@@ -1770,36 +1776,70 @@ async function resolveDestination(
   };
 }
 
+/** Node reports a denied read via `code`, not via the message text. */
+function isPermissionError(error: unknown): boolean {
+  const code =
+    error !== null && typeof error === 'object' && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
+/**
+ * A backup key is 32 bytes of AES-256 material stored base64. `Buffer.from`
+ * is lenient — it silently drops characters it cannot decode — so the shape
+ * is checked with a strict pattern first; without it a truncated or garbled
+ * entry would decode to something short and still look plausible.
+ */
+function isUsableBackupKey(stored: string): boolean {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(stored)) return false;
+  return Buffer.from(stored, 'base64').length === BACKUP_KEY_BYTES;
+}
+
+const BACKUP_KEY_BYTES = 32;
+
 async function handleSetupStatus(app: AiftpMcpApp, rawArgs: unknown): Promise<CallToolResult> {
   noArgsSchema.parse(rawArgs ?? {});
   const report = await buildSetupStatus({
     startup: process.env.AIFTP_DESKTOP_STARTUP,
     confirmPhrase: app.confirmPhrase,
-    readProfile: async (configPath: string, profileName: string) => {
+    readProfile: async (configPath: string, profileName: string): Promise<SetupProfileRead> => {
       try {
         const config = await loadConfig(configPath);
         const profile = config.profile[profileName];
-        if (!profile) return undefined;
+        if (!profile) return { kind: 'no-profile' };
         return {
-          host: profile.host,
-          user: profile.user,
-          protocol: profile.protocol,
-          remote_root: profile.remote_root,
-          keychain_service: profile.keychain_service,
+          kind: 'ok',
+          profile: {
+            host: profile.host,
+            user: profile.user,
+            protocol: profile.protocol,
+            remote_root: profile.remote_root,
+            keychain_service: profile.keychain_service,
+          },
         };
-      } catch {
-        // An unreadable or unparseable config is already reported by the
-        // `config_file` check; treat it here as "no profile to compare"
-        // rather than letting setup_status throw and report nothing at all.
-        return undefined;
+      } catch (error: unknown) {
+        // Separated on purpose: "cannot read" and "does not parse" lead to
+        // different fixes, and reporting either as "the profile is missing"
+        // pointed the operator at the wrong file.
+        return { kind: isPermissionError(error) ? 'unreadable' : 'invalid' };
       }
     },
-    backupKeyExists: async (keychainService: string, profileName: string) => {
+    backupKeyStatus: async (
+      keychainService: string,
+      profileName: string,
+    ): Promise<BackupKeyStatus> => {
+      const service = backupKeyService(keychainService);
       try {
-        const has = app.runtime.hasPassword ?? hasPassword;
-        return await has(backupKeyService(keychainService), profileName);
-      } catch {
-        return false;
+        const read = app.runtime.getPassword ?? getPassword;
+        // The value is inspected here and never returned: only the verdict
+        // crosses back into setup-status, so key material cannot reach a
+        // tool response.
+        return isUsableBackupKey(await read(service, profileName)) ? 'ok' : 'invalid';
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('Keychain entry not found')) return 'missing';
+        return isPermissionError(error) ? 'unreadable' : 'missing';
       }
     },
     pathExists: async (path: string) => {
