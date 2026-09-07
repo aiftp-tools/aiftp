@@ -25,6 +25,14 @@
 - 🔴 **アンインストールすると sensitive 項目（`password` / `confirm_phrase`）だけが消える** — 他の項目は残るため「設定は生きている」ように見える。必須項目が欠けると Claude Desktop は `mcp_config` を解決できず、**`No MCP config found for extension ...` を warn で出すだけでサーバーを起動しない**。error ではなく warn なので見落としやすい
 - ⚷ **設定値の実体は `~/Library/Application Support/Claude/Claude Extensions Settings/<extension-id>.json`**（Windows は `%APPDATA%\\Claude\\...`）。`userConfig` に **パスワードと合言葉が平文**で入る。切り分けでバックアップしたら作業後に必ず削除する
 
+## リリース時の実測知見（2026-09-07）
+
+- 🔴 **公開前に `npm whoami` を必ず確認する** — トークン失効時、scoped パッケージは公開で `E404` を返すため「パッケージ名の問題」に見える。`whoami` なら `E401` と明確に出る。`~/.npmrc` に行があっても期限切れのことがある
+- 🔴 **レジストリの読み取りは公開後 数分遅れる。しかも `npm view` も registry API 直叩きも古い応答を返す** — 「キャッシュを迂回したから確実」とは言えない（CDN/レプリカ由来）。**`pnpm` が「There are no new packages that should be published」と言うなら、そちらが正しい可能性を先に疑う**。未公開と断定する前に数分待って再確認する
+- 🔴 **作業ディレクトリが親（`~/Projects/Web/AIftp`）だと `pnpm --filter` は無言で何もしない** — workspace ルートは `aiftp/`。親にも紛らわしい `packages/cli` がある。**`cd` してから実行する**
+- **版番号 bump は 7 箇所**（root + packages 4 つの `package.json`、`docs/desktop-extension.md` の対応バージョン行）＋ CHANGELOG 3 箇所。`version-consistency.spec.ts` が担保するが、**同ドキュメント内の `.mcpb` ファイル名はテスト対象外**なので手で直す
+- **Release を publish すると `release.yml`（`.mcpb` 自動ビルド・添付）と `smoke.yml`（公開済みパッケージを検査）が走る** — `.mcpb` の手動ビルド・アップロードは不要。smoke が意味を持つよう **レジストリ公開 → Release** の順にする
+
 ## npm publish（2026-08 の変更）
 
 - 🔴 **publish に 2FA のワンタイムパスワードが必要**になった。AI は代行できない → **publish 3本は田中さんがターミナルで実行**（`--otp=` を付ければブラウザ不要）
