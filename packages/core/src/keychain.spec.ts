@@ -102,11 +102,25 @@ describe('createDarwinKeychainBackend: setPassword keeps the secret out of argv'
     expect(calls[0]?.stdin).toContain('"acct -A"');
   });
 
-  it('refuses a service or account that could break out of the quoting', async () => {
+  it('escapes quotes and backslashes rather than dropping or rejecting them', async () => {
+    const { exec, calls } = recordingExec();
+
+    // `DOMAIN\\user` is a real account shape. Measured against `security -i`:
+    // an unescaped backslash is eaten (stored as `DOMAINuser`, unreadable),
+    // so it must be doubled, not refused — refusing would break a setup that
+    // worked before this change.
+    await createDarwinKeychainBackend(exec).setPassword('svc"quoted', 'DOMAIN\\user', fixtureValue);
+
+    const stdin = calls[0]?.stdin ?? '';
+    expect(stdin).toContain('"svc\\"quoted"');
+    expect(stdin).toContain('"DOMAIN\\\\user"');
+  });
+
+  it('refuses control characters, which no escape can carry over a line protocol', async () => {
     const { exec, calls } = recordingExec();
     const backend = createDarwinKeychainBackend(exec);
 
-    for (const bad of ['svc"evil', 'svc\\evil', 'svc\nevil']) {
+    for (const bad of ['svc\nevil', 'svc\revil', 'svc\u0000evil']) {
       await expect(backend.setPassword(bad, 'account', fixtureValue)).rejects.toBeInstanceOf(
         KeychainError,
       );

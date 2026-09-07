@@ -175,21 +175,38 @@ function defaultExec(): ExecFn {
  * and an account is an FTP username, so none of these characters is ever
  * legitimate, and a reject is easier to reason about than an escape table.
  */
-function isSecurityInteractiveSafe(value: string): boolean {
+function hasControlCharacter(value: string): boolean {
   // Checked by code point rather than by regex: a character class would have
   // to spell out the control range, which is exactly what this rejects.
   for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (character === '"' || character === '\\' || code < 0x20) return false;
+    if ((character.codePointAt(0) ?? 0) < 0x20) return true;
   }
-  return true;
+  return false;
 }
 
+/**
+ * `security -i` splits its input into arguments, honours double quotes, and
+ * — measured on macOS 25.6 — processes backslash escapes inside them
+ * (`\\` yields one backslash, `\"` yields a quote). Both facts matter:
+ *
+ *   - Without quoting, a service or account could inject flags. The argv form
+ *     this replaced could not, so the risk is new.
+ *   - Without escaping the backslash, a domain-style account such as
+ *     `DOMAIN\user` is silently corrupted: it was measured to store as
+ *     `DOMAINuser`, which then cannot be read back at all. Rejecting such
+ *     accounts would be loud but would still break a setup that used to work,
+ *     so they are escaped instead.
+ *
+ * Control characters have no escape that survives a line-oriented protocol —
+ * a raw newline simply ends the command — and are never legitimate in a
+ * service or account, so those are refused.
+ */
 function quoteForSecurityInteractive(value: string, name: string): string {
-  if (!isSecurityInteractiveSafe(value)) {
-    throw new KeychainError(`${name} must not contain quotes, backslashes or control characters`);
+  if (hasControlCharacter(value)) {
+    throw new KeychainError(`${name} must not contain control characters`);
   }
-  return `"${value}"`;
+  const escaped = value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+  return `"${escaped}"`;
 }
 
 export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
