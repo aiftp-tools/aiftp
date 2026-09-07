@@ -1,13 +1,13 @@
 # Claude Desktop 拡張（.mcpb）
 
-- **対応バージョン**: 0.13.0
+- **対応バージョン**: 0.13.1
 - **対応 OS**: macOS / Windows
 - **ライセンス**: MIT（無料）
 - **Node.js 要件（実測済み）**: 拡張マニフェストは `compatibility.runtimes.node: ">=22.0.0"` を宣言しています。Claude Desktop は `server.type: "node"` の拡張を**同梱の Node.js で起動する**ため、お使いのパソコンに Node.js を別途インストールする必要はありません。macOS 版 Claude Desktop 1.25927.0 に同梱されている Node.js を実測したところ **v24.18.0**（Electron 42.7.0 同梱）で、上記の要求を満たしていました。Windows 版 1.30096.1 でも実機確認しており、ログに `Using UtilityProcess for extension ...: appConfig.isUsingBuiltInNodeForMcp is true and built-in node is compatible` と記録され、**同梱 Node.js で起動して要求を満たしている**ことを確認済みです（パソコンに別途 Node.js が入っていても、そちらは使われません）。将来のバージョンは未実測なので、拡張が起動しない場合はトラブルシューティング（下記 5 章）を確認してください。
 
 ## 1. 導入手順（ターミナル不要）
 
-1. GitHub Release から `aiftp-0.13.0.mcpb` をダウンロードする。
+1. GitHub Release から `aiftp-0.13.1.mcpb` をダウンロードする。
 2. Claude Desktop に追加する。**macOS はダブルクリック**で開きます。**Windows はダブルクリックでは開きません** — `.mcpb` の関連付けが登録されていないため、**Claude のショートカットアイコンにファイルをドラッグ＆ドロップ**するか、右クリック →「プログラムから開く」→ Claude を選んでください（2026-08-15 に Windows 11 / Claude Desktop 1.30096.1 で確認）。
 3. 設定 UI で以下の項目を入力する: サイト名 / サイトフォルダ / ホスト名 / プロトコル / ユーザー名 / サーバー側フォルダ / パスワード / 合言葉。
 4. Claude Desktop を再起動する。
