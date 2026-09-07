@@ -12,6 +12,12 @@ Release tags live in the GitHub repository:
 
 ## [Unreleased]
 
+(次のサイクルの作業。)
+
+---
+
+## [0.13.1] — 2026-09-07
+
 ### Added
 
 - **`aiftp_setup_status` が設定の「正しさ」を検証するようになった** — チェックが 6 項目から 8 項目に増えた。
@@ -1038,7 +1044,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.1
 [0.13.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.0
 [0.12.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.4
 [0.12.3]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.3
