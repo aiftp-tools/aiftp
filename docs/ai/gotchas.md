@@ -93,6 +93,13 @@
 - ✅ **macOS は `-U` を外すだけで原子的な create-if-absent になる** — 重複時 `errSecDuplicateItem`（exit **45**。not-found の 44 と別）で拒否され、格納値は不変。10 並行実行で `created` が 1 件だけになることを実測
 - ⚠️ **Windows には同等の保証が無い** — `CredWrite` は常に上書き、`cmdkey` にも create-if-absent は無い。検査と書き込みを 1 プロセスにまとめて窓を狭めるのが現実解
 
+## 同時起動とキーチェーン書き込み（2026-10-04 実測・v0.13.2 で対応）
+
+- 🔴 **Claude Desktop は起動のたびに拡張を 2〜3 プロセス同時に起動する**（main.log の UtilityProcess 起動行で確認・再起動でも毎回起きる）。起動時処理（bootstrap）で毎回キーチェーンに書くと、プロセス同士がぶつかる
+- 🔴 **`-U` 付きでも同時書き込みは exit 45 で負ける** — 項目なしで 2 本同時: 10/10 で片方が `CreateFromContent: already exists`。**項目ありで 3 本同時に同じ値: 90 回中 58 回が `ModifyContent: already exists`**。「`-U` は上書きだから安全」は誤り
+- ⚠️ **書き込み中の読み取りは一瞬失敗しうる** — 3 本同時書き込みの最中に `find-generic-password` を 90 回実行すると、exit 44（not found）が 1 回、139（`security` の異常終了）が 1 回出た。読み取り失敗を「未保存」と断定しない
+- ✅ **対策（v0.13.2）**: ①bootstrap は保存済みの値と同じなら書かない ②macOS の `setPassword` は exit 45 のとき 100〜300ms 待って読み戻し、同じ値なら成功、違えば 1 回だけ再試行。ビルド済みのコードで 3 本・10 本同時に計 190 回実行して失敗 0
+
 ## Windows へ `.ps1` を渡すとき（2026-09-07 実測・研修にも効く）
 
 - 🔴 **Windows PowerShell 5.1 は BOM 無し `.ps1` を ANSI（Shift-JIS）として読む** — UTF-8 で書いた日本語が化け、全角文字が引用符を飲み込んでパーサーごと壊れる。**純 ASCII で書く**（ASCII 範囲なら Shift-JIS と UTF-8 のバイト列は同一）か UTF-8 BOM を付ける。受講者へ `.ps1` を配る場面があれば同じ事故が起きる
