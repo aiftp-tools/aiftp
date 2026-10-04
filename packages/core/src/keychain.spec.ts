@@ -133,11 +133,94 @@ describe('createDarwinKeychainBackend: setPassword keeps the secret out of argv'
   });
 
   it('reports a failed write as a KeychainError', async () => {
-    const exec: ExecFn = async () => ({ stdout: '', stderr: 'boom', code: 45 });
+    const exec: ExecFn = async () => ({ stdout: '', stderr: 'boom', code: 1 });
 
     await expect(
       createDarwinKeychainBackend(exec).setPassword('svc', 'account', fixtureValue),
     ).rejects.toThrow(/Failed to store Keychain entry/u);
+  });
+});
+
+describe('createDarwinKeychainBackend: concurrent writes', () => {
+  const password = 'fixture-only-race';
+  const encoded = `aiftp-v1:${Buffer.from(password).toString('base64')}`;
+
+  it.each([
+    { name: 'same decoded value', stdout: `${encoded}\n`, readCode: 0, retryCode: 0, writes: 1 },
+    { name: 'different value', stdout: 'different\n', readCode: 0, retryCode: 0, writes: 2 },
+    { name: 'missing during write', stdout: '', readCode: 44, retryCode: 0, writes: 2 },
+    { name: 'retry still fails', stdout: 'different', readCode: 0, retryCode: 45, writes: 2 },
+  ])('$name', async ({ stdout, readCode, retryCode, writes }) => {
+    const calls: Array<{ args: readonly string[]; stdin?: string }> = [];
+    const delays: number[] = [];
+    let writeCount = 0;
+    const exec: ExecFn = async (_cmd, args, options) => {
+      calls.push({ args, stdin: options?.stdin });
+      if (args[0] === 'find-generic-password')
+        return { stdout, stderr: 'read failed', code: readCode };
+      writeCount++;
+      return { stdout: '', stderr: 'race stderr', code: writeCount === 1 ? 45 : retryCode };
+    };
+    const backend = createDarwinKeychainBackend(exec, {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      random: () => 0.5,
+    });
+    const pending = backend.setPassword('svc', 'account', password);
+    if (retryCode === 45) {
+      await expect(pending).rejects.toBeInstanceOf(KeychainError);
+      // A failed retry retains the original error format and stderr.
+      await expect(pending).rejects.toThrow(/Failed to store Keychain entry.*race stderr/u);
+    } else {
+      await expect(pending).resolves.toBeUndefined();
+    }
+    expect(writeCount).toBe(writes);
+    expect(calls.filter((call) => call.args[0] === 'find-generic-password')).toHaveLength(1);
+    expect(delays).toEqual([200]);
+    for (const call of calls.filter((call) => call.args[0] === '-i')) {
+      expect(call.args).toEqual(['-i']);
+      expect(call.args.join(' ')).not.toContain(password);
+      expect(call.args.join(' ')).not.toContain(encoded);
+      expect(call.stdin).toContain(encoded);
+      expect(call.stdin).toContain('-U');
+    }
+  });
+
+  it('does not wait or read on non-duplicate errors', async () => {
+    const calls: Array<readonly string[]> = [];
+    const delays: number[] = [];
+    const exec: ExecFn = async (_cmd, args) => {
+      calls.push(args);
+      return { stdout: '', stderr: 'denied', code: 1 };
+    };
+    await expect(
+      createDarwinKeychainBackend(exec, {
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      }).setPassword('svc', 'account', password),
+    ).rejects.toBeInstanceOf(KeychainError);
+    expect(calls).toEqual([['-i']]);
+    expect(delays).toEqual([]);
+  });
+
+  it.each([0, 0.999999])('waits within 100–300ms with random=%s', async (random) => {
+    const delays: number[] = [];
+    const exec: ExecFn = async (_cmd, args) =>
+      args[0] === '-i'
+        ? { stdout: '', stderr: 'race', code: 45 }
+        : { stdout: encoded, stderr: '', code: 0 };
+    await createDarwinKeychainBackend(exec, {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      random: () => random,
+    }).setPassword('svc', 'account', password);
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBeGreaterThanOrEqual(100);
+    expect(delays[0]).toBeLessThanOrEqual(300);
+    expect(delays[0]).toBe(100 + random * 200);
   });
 });
 

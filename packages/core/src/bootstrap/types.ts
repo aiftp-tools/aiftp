@@ -22,6 +22,7 @@ export interface BootstrapDeps {
   readonly pathExists?: (path: string) => Promise<boolean>;
   readonly readTextFile?: (path: string) => Promise<string>;
   readonly writeTextFile?: (path: string, contents: string) => Promise<void>;
+  readonly readCredential?: (service: string, account: string) => Promise<string>;
   readonly storeCredential?: (service: string, account: string, value: string) => Promise<void>;
   readonly credentialExists?: (service: string, account: string) => Promise<boolean>;
   readonly createRegistry?: () => BootstrapRegistrySurface;

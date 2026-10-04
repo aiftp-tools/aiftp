@@ -233,8 +233,14 @@ function quoteForSecurityInteractive(value: string, name: string): string {
   return `"${escaped}"`;
 }
 
-export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
-  return {
+export function createDarwinKeychainBackend(
+  exec: ExecFn,
+  options: { sleep?: (ms: number) => Promise<void>; random?: () => number } = {},
+): KeychainBackend {
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const random = options.random ?? Math.random;
+  const backend: KeychainBackend = {
     async setPassword(service, account, password) {
       assertNonEmpty(service, 'service');
       assertNonEmpty(account, 'account');
@@ -253,18 +259,32 @@ export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
       // The cost of `-i` is that it parses arguments, which the previous argv
       // form did not: an unquoted service or account could smuggle in a flag.
       // Hence quoting plus a hard reject below.
-      const result = await exec(SECURITY_BIN, ['-i'], {
-        stdin: `${[
-          'add-generic-password',
-          '-s',
-          quoteForSecurityInteractive(service, 'service'),
-          '-a',
-          quoteForSecurityInteractive(account, 'account'),
-          '-U',
-          '-w',
-          quoteForSecurityInteractive(encodeStored(password), 'password'),
-        ].join(' ')}\n`,
-      });
+      const write = () =>
+        exec(SECURITY_BIN, ['-i'], {
+          stdin: `${[
+            'add-generic-password',
+            '-s',
+            quoteForSecurityInteractive(service, 'service'),
+            '-a',
+            quoteForSecurityInteractive(account, 'account'),
+            '-U',
+            '-w',
+            quoteForSecurityInteractive(encodeStored(password), 'password'),
+          ].join(' ')}\n`,
+        });
+      let result = await write();
+      if (result.code === ERR_SEC_DUPLICATE_ITEM) {
+        // Measured on macOS 25.6 (2026-10-04): concurrent -U writes lost
+        // with exit 45 in 10/10 creates and 58/90 updates. Reads during a
+        // write also transiently failed; wait, check the winner, then retry once.
+        await sleep(100 + random() * 200);
+        try {
+          if ((await backend.getPassword(service, account)) === password) return;
+        } catch {
+          // A transient read failure still gets the single write retry.
+        }
+        result = await write();
+      }
       if (result.code !== 0) {
         throw new KeychainError(
           `Failed to store Keychain entry for service='${service}' account='${account}': ${result.stderr.trim()}`,
@@ -345,6 +365,7 @@ export function createDarwinKeychainBackend(exec: ExecFn): KeychainBackend {
       }
     },
   };
+  return backend;
 }
 
 // ---------------------------------------------------------------------------
