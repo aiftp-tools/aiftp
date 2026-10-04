@@ -49,6 +49,15 @@ describe('readDesktopEnv', () => {
     });
   });
 
+  it('trims copied tabs and trailing spaces from remote root and host', () => {
+    const result = readDesktopEnv({
+      AIFTP_BOOTSTRAP_REMOTE_ROOT: '\t/glocalworks.co.jp/public_html/aiftp-test  ',
+      AIFTP_BOOTSTRAP_HOST: '\tftp.example.test  ',
+    });
+    expect(result.remoteRoot).toBe('/glocalworks.co.jp/public_html/aiftp-test');
+    expect(result.host).toBe('ftp.example.test');
+  });
+
   it('omits fields whose env var is an empty string', () => {
     const result = readDesktopEnv({ AIFTP_PROJECT_DIR: '/abs/site', AIFTP_BOOTSTRAP_SITE: '' });
     expect(result.siteName).toBeUndefined();

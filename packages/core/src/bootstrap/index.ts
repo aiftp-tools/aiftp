@@ -5,7 +5,7 @@ import { appendProfileBlock, findProfileBlockRange, setProfileField } from '../c
 import { generateKey } from '../encryption.js';
 import { ensureGitignoreEntry } from '../init/gitignore.js';
 import { buildKeychainService } from '../init/keychain-name.js';
-import { createPasswordIfAbsent, hasPassword, setPassword } from '../keychain.js';
+import { createPasswordIfAbsent, getPassword, hasPassword, setPassword } from '../keychain.js';
 import { SiteRegistry } from '../sites/registry.js';
 import {
   type BackupKeyOutcome,
@@ -79,6 +79,7 @@ export async function runBootstrap(
     deps.writeTextFile ??
     ((path: string, contents: string) =>
       writeFile(path, contents, { encoding: 'utf8', mode: 0o600 }));
+  const readCredential = deps.readCredential ?? getPassword;
   const storeCredential = deps.storeCredential ?? setPassword;
   const credentialExists = deps.credentialExists ?? hasPassword;
   const createRegistry = deps.createRegistry ?? (() => new SiteRegistry());
@@ -154,12 +155,21 @@ export async function runBootstrap(
   }
 
   // 5. credential — the Desktop settings form is authoritative: a corrected
-  //    or rotated password must be able to reach the keychain. Re-storing
-  //    the same value on every launch is harmless. Whitespace-only input is
-  //    treated as "not supplied" (a stray space is not a real password).
+  //    or rotated password must be able to reach the keychain. Skip writes
+  //    of identical values to avoid races between concurrent launches.
+  //    Whitespace-only input is treated as "not supplied" (a stray space
+  //    is not a real password).
   let credential: CredentialOutcome;
   if (input.credential !== undefined && input.credential.trim().length > 0) {
-    await storeCredential(keychainService, input.username, input.credential);
+    let matches = false;
+    try {
+      matches = (await readCredential(keychainService, input.username)) === input.credential;
+    } catch {
+      // A failed read must not prevent storing a supplied credential.
+    }
+    if (!matches) {
+      await storeCredential(keychainService, input.username, input.credential);
+    }
     credential = 'stored';
   } else if (await credentialExists(keychainService, input.username)) {
     credential = 'already-stored';

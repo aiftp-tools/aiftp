@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { KeychainNotFoundError } from '../keychain.js';
 import type { SiteEntry } from '../sites/types.js';
 import { runBootstrap } from './index.js';
 import type { BootstrapDeps } from './types.js';
@@ -31,6 +32,11 @@ function fakeDeps(): BootstrapDeps & {
     entries,
     storeCredential: async (service, account, value) => {
       stored.set(`${service}\u0000${account}`, value);
+    },
+    readCredential: async (service, account) => {
+      const value = stored.get(`${service}\u0000${account}`);
+      if (value === undefined) throw new KeychainNotFoundError(service, account);
+      return value;
     },
     credentialExists: async (service, account) => stored.has(`${service}\u0000${account}`),
     createBackupKeyIfAbsent: async (service, account, value) => {
@@ -87,6 +93,66 @@ describe('runBootstrap', () => {
     await rm(localRoot, { recursive: true, force: true });
   });
 
+  it.each([
+    { name: 'identical', read: async () => fixtureValue, writes: 0 },
+    { name: 'different', read: async () => 'other', writes: 1 },
+    {
+      name: 'not found',
+      read: async () => {
+        throw new KeychainNotFoundError('svc', 'acct');
+      },
+      writes: 1,
+    },
+    {
+      name: 'general error',
+      read: async () => {
+        throw new Error('read failed');
+      },
+      writes: 1,
+    },
+  ])('handles $name credential reads', async ({ read, writes }) => {
+    const readCredential = vi.fn(read);
+    const storeCredential = vi.fn(async () => {});
+    const result = await runBootstrap(
+      { ...input, localRoot },
+      {
+        ...fakeDeps(),
+        readCredential,
+        storeCredential,
+      },
+    );
+    expect(readCredential).toHaveBeenCalledWith('aiftp:gwco-production', input.username);
+    expect(storeCredential).toHaveBeenCalledTimes(writes);
+    if (writes)
+      expect(storeCredential).toHaveBeenCalledWith(
+        'aiftp:gwco-production',
+        input.username,
+        fixtureValue,
+      );
+    expect(result.credential).toBe('stored');
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([undefined, '   '])('does not read an unsupplied credential (%s)', async (credential) => {
+    const readCredential = vi.fn(async () => fixtureValue);
+    const storeCredential = vi.fn(async () => {});
+    const credentialExists = vi.fn(async () => true);
+    const result = await runBootstrap(
+      { ...input, localRoot, credential },
+      {
+        ...fakeDeps(),
+        readCredential,
+        storeCredential,
+        credentialExists,
+      },
+    );
+    expect(readCredential).not.toHaveBeenCalled();
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(credentialExists).toHaveBeenCalledWith('aiftp:gwco-production', input.username);
+    expect(result.credential).toBe('already-stored');
+    expect(result.ok).toBe(true);
+  });
+
   it('creates .aiftp.toml, stores the credential, and registers the site', async () => {
     const deps = fakeDeps();
     const result = await runBootstrap({ ...input, localRoot }, deps);
@@ -130,9 +196,8 @@ describe('runBootstrap', () => {
 
     expect(second.ok).toBe(true);
     expect(second.config).toBe('existing');
-    // A credential is supplied on every launch, so per the "settings form is
-    // authoritative" ruling it is re-stored (not "already-stored") even
-    // though the value happens to be unchanged.
+    // Supplied credentials keep the stored outcome even when an unchanged
+    // value lets bootstrap skip the write.
     expect(second.credential).toBe('stored');
     expect(second.registry).toBe('already-registered');
     expect(await readFile(join(localRoot, '.aiftp.toml'), 'utf8')).toBe(firstToml);
