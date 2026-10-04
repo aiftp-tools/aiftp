@@ -16,6 +16,18 @@ Release tags live in the GitHub repository:
 
 ---
 
+## [0.13.2] — 2026-10-04
+
+### Fixed
+
+- **Claude Desktop で起動するたびに `aiftp_setup_status` が `bootstrap: fail` になりうる問題を修正**（macOS）— Claude Desktop は起動のたびに拡張を 2〜3 プロセス同時に起動する。各プロセスが起動時にキーチェーンへパスワードを書き込むため、同時に書いた側が `already exists`（`-25299`）で失敗していた。再起動しても解消しなかった。
+  - 保存済みの値と同じなら書き込みを省くようにした（2 回目以降の起動では競合そのものが起きない）
+  - それでも書き込みが競合した場合は、少し待って保存済みの値を確かめ、同じなら成功、違えば 1 回だけやり直す
+  - 実測（macOS 25.6）: 修正前は 3 プロセス同時の書き込みで 90 回中 58 回失敗。修正後は 3 本・10 本同時の計 190 回で失敗 0
+  - Windows は保存方式（上書き保存）の違いでこの競合は起きないため、挙動は変わらない
+
+---
+
 ## [0.13.1] — 2026-09-07
 
 ### Added
@@ -1044,7 +1056,8 @@ for v0.9.2's BLOCK fix. They will land in v0.10.0:
 
 ---
 
-[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/aiftp-tools/aiftp/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.2
 [0.13.1]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.1
 [0.13.0]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.13.0
 [0.12.4]: https://github.com/aiftp-tools/aiftp/releases/tag/v0.12.4
