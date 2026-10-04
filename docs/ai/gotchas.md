@@ -32,6 +32,7 @@
 - 🔴 **作業ディレクトリが親（`~/Projects/Web/AIftp`）だと `pnpm --filter` は無言で何もしない** — workspace ルートは `aiftp/`。親にも紛らわしい `packages/cli` がある。**`cd` してから実行する**
 - **版番号 bump は 7 箇所**（root + packages 4 つの `package.json`、`docs/desktop-extension.md` の対応バージョン行）＋ CHANGELOG 3 箇所。`version-consistency.spec.ts` が担保するが、**同ドキュメント内の `.mcpb` ファイル名はテスト対象外**なので手で直す
 - **Release を publish すると `release.yml`（`.mcpb` 自動ビルド・添付）と `smoke.yml`（公開済みパッケージを検査）が走る** — `.mcpb` の手動ビルド・アップロードは不要。smoke が意味を持つよう **レジストリ公開 → Release** の順にする
+- 🔴 **`latest` が新版になっても tarball 本体はまだ 404 のことがある（2026-10-04・v0.13.2）** — メタデータ（dist-tags・versions）が先に更新され、tarball の配信が数分遅れる。今回は core だけ公開から約 7 分 `GET .../core-0.13.2.tgz` が 404 で、`latest` だけ確認して Release を作ったら **smoke 6 ジョブが全滅**した（`npm install -g @aiftp-tools/cli@latest` が依存の core tarball で E404）。**Release を作る前に、3 本とも tarball の GET が 200 になることを確認する**。全滅しても公開自体は正常なので、tarball が 200 になってから `gh run rerun <id> --failed` で green になる
 
 ## npm publish（2026-08 の変更）
 
