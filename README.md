@@ -295,7 +295,7 @@ Branches coverage 83.29%, Statements 90.25%, biome lint clean.
 ## Quick start
 
 ```bash
-# 0. Install globally from npm (Node.js 22+ required)
+# 0. Install globally from npm (Node.js 22+ required; 22.23.4 / 24.22.1 or later recommended — Oct 2026 security releases)
 npm install -g @aiftp-tools/cli
 aiftp --version   # → 0.12.0
 
