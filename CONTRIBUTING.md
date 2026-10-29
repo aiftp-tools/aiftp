@@ -51,7 +51,7 @@ aiftp is a pnpm monorepo with three packages: `core`, `cli`, `mcp`.
 
 ### Prerequisites
 
-- Node.js **22 LTS** or newer
+- Node.js **22 LTS** or newer — at least **22.23.4 / 24.22.1** (the [October 21, 2026 security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases))
 - pnpm **9+**
 - macOS or Windows (Linux is supported for development but not
   primary-tested for `keychain` flows)
